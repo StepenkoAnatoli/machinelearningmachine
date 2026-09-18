@@ -3,16 +3,65 @@ Base Agent definition for the Inter-Module Communication Mesh.
 Every module (Arena AI, Copilot, Claude, GPT, Custom) inherits from BaseAgent.
 
 User-centered: bounded memory, better error handling, status tracking.
+
+Provenance is part of the contract: every message carries ``metadata`` saying
+which provider produced it and whether the text is simulated. A provider that
+fails is never turned into a normal-looking answer - either the simulator
+answers *and says so*, or the error is raised for the caller to handle.
 """
 
 import asyncio
 import logging
-from typing import List, Dict, Any, Optional
-from ..protocol.message import Message, MessageType
+import re
+from typing import Any, Dict, List, Optional
+
 from ..protocol.bus import MessageBus
-from .providers import BaseLLMProvider, MockLLMProvider
+from ..protocol.message import Message, MessageType
+from .providers import FALLBACK_NOTICE_TEMPLATE, BaseLLMProvider, MockLLMProvider, ProviderError
 
 logger = logging.getLogger("BaseAgent")
+
+#: Hex colours only - the value ends up in a ``style`` attribute in the browser.
+COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
+#: Emoji-ish avatars: a few characters, no markup, no quotes.
+MAX_AVATAR_CHARS = 8
+
+
+def safe_color(value: Any, default: str = "#6366f1") -> str:
+    """
+    Return ``value`` when it is a plain hex colour, else ``default``.
+
+    Colours reach the browser through inline styles, and saved sessions are
+    user-editable JSON files, so the value is validated here as well as in the
+    API models - defence in depth against markup sneaking into an attribute.
+    """
+    if isinstance(value, str):
+        candidate = value.strip()
+        if COLOR_PATTERN.match(candidate):
+            return candidate
+    return default
+
+
+#: Characters that have no business in an avatar: markup, quoting, or anything
+#: that could break out of an attribute when the value is rendered.
+_AVATAR_FORBIDDEN = set('<>"\'&;=()[]{}%`\\/|')
+
+
+def safe_avatar(value: Any, default: str = "🤖") -> str:
+    """
+    Keep avatars to a short run of plain printable characters (emoji, letters).
+
+    Anything containing markup-ish characters is discarded outright rather than
+    filtered - a mangled emoji is cosmetic, a silently accepted payload is not.
+    """
+    if not isinstance(value, str):
+        return default
+    cleaned = value.strip()[:MAX_AVATAR_CHARS]
+    if not cleaned:
+        return default
+    if any(ch in _AVATAR_FORBIDDEN or ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        return default
+    return cleaned
 
 
 class BaseAgent:
@@ -40,12 +89,12 @@ class BaseAgent:
         self.name = name.strip()
         self.role = role.strip()
         self.system_prompt = system_prompt
-        self.color = color
-        self.avatar = avatar
+        self.color = safe_color(color, "#6366f1")
+        self.avatar = safe_avatar(avatar)
         self.provider = provider or MockLLMProvider()
         self.bus = bus
         self.memory: List[Message] = []
-        self.status: str = "idle"  # idle, thinking, error
+        self.status: str = "idle"  # idle, thinking, degraded, error
 
         if self.bus:
             self.attach_bus(self.bus)
@@ -80,7 +129,13 @@ class BaseAgent:
     ) -> Message:
         """
         Synthesize response using the LLM provider and broadcast/send it over the bus.
-        User-centered: robust error handling, clear status.
+
+        Provenance and failure policy:
+        - the produced message records which provider answered and whether the
+          text is simulated (``metadata["simulated"]``),
+        - a :class:`ProviderError` is never turned into a plausible-looking
+          answer. Either the simulator answers *and says which provider failed*,
+          or the error propagates so the run can be reported as failed.
         """
         if prompt is not None and len(prompt) > 10000:
             raise ValueError("Prompt too long (max 10000 chars)")
@@ -97,6 +152,10 @@ class BaseAgent:
         if prompt:
             recent_messages.append({"role": "user", "content": prompt})
 
+        provider_label = self.provider.__class__.__name__
+        simulated = bool(getattr(self.provider, "is_simulated", False))
+        metadata: Dict[str, Any] = {"provider": provider_label, "simulated": simulated}
+
         try:
             content = await self.provider.generate(
                 system_prompt=self.system_prompt,
@@ -107,18 +166,53 @@ class BaseAgent:
             )
             if not content or not content.strip():
                 content = f"[{self.name} processed the request but generated empty response - using fallback]"
-        except Exception as e:
-            logger.error(f"Error in {self.name} generation: {e}", exc_info=True)
-            # User-friendly error, not raw exception
-            content = (
-                f"### [{self.name} - Error Recovery]\n\n"
-                f"Encountered an issue while generating response. "
-                f"Provider: {self.provider.__class__.__name__}\n\n"
-                f"**Fallback response:**\n"
-                f"Task received: {prompt[:200] if prompt else 'No prompt'}...\n"
-                f"Continuing with simulated response for resilience."
+                metadata["empty_response"] = True
+        except ProviderError as e:
+            # A real provider was configured and failed. Falling back is allowed
+            # only when it is visible: the message carries the reason, the agent
+            # goes to "degraded", and the text says the simulator is talking.
+            logger.error(f"{self.name}: provider {e.provider} failed: {e.reason} {e.detail}".strip())
+            if not getattr(self.provider, "fallback_to_mock", True):
+                self.status = "error"
+                raise
+            content = FALLBACK_NOTICE_TEMPLATE.format(provider=e.provider, reason=e.reason) + (
+                await MockLLMProvider().generate(
+                    system_prompt=self.system_prompt,
+                    messages=recent_messages,
+                    agent_role=self.role,
+                    agent_name=self.name,
+                    task_context=prompt,
+                )
             )
-            self.status = "error"
+            metadata.update(
+                {
+                    "provider": f"{e.provider} -> simulator",
+                    "simulated": True,
+                    "provider_error": e.reason,
+                    "provider_status_code": e.status_code,
+                }
+            )
+            self.status = "degraded"
+        except Exception as e:  # unexpected bug inside a provider, not its own error
+            logger.error(f"Error in {self.name} generation: {e}", exc_info=True)
+            if not getattr(self.provider, "fallback_to_mock", True):
+                self.status = "error"
+                raise
+            content = (
+                f"> ⚠️ **{provider_label} failed** ({e.__class__.__name__}). The reply below is "
+                f"the built-in simulator talking, **not** an answer from {provider_label}.\n\n"
+                f"### [{self.name} - Error Recovery]\n\n"
+                f"Task received: {prompt[:200] if prompt else 'No prompt'}...\n\n"
+                f"_Continuing with a simulated response so the dialogue does not stall._"
+            )
+            metadata.update(
+                {
+                    "provider": f"{provider_label} -> simulator",
+                    "simulated": True,
+                    "provider_error": f"{e.__class__.__name__}: {e}"[:300],
+                }
+            )
+            self.status = "degraded"
             # Brief pause before returning to idle
             await asyncio.sleep(0.1)
 
@@ -131,12 +225,15 @@ class BaseAgent:
             message_type=message_type,
             content=content,
             artifacts=artifacts or {},
+            metadata=metadata,
         )
 
         self.memory.append(msg)
         if len(self.memory) > self.MAX_MEMORY:
             self.memory = self.memory[-self.MAX_MEMORY:]
-        self.status = "idle"
+        # "degraded" survives the turn so the UI can show that the last answer
+        # came from the simulator after a provider failure, not from the model.
+        self.status = "degraded" if metadata.get("provider_error") else "idle"
 
         if self.bus:
             try:
@@ -211,6 +308,12 @@ class BaseAgent:
         self.status = "idle"
 
     def to_dict(self) -> Dict[str, Any]:
+        """Public agent description.
+
+        ``provider_kind`` is what the dashboard shows: ``simulated`` answers
+        must never look like ``live`` ones.
+        """
+        simulated = bool(getattr(self.provider, "is_simulated", False))
         return {
             "agent_id": self.agent_id,
             "name": self.name,
@@ -220,5 +323,7 @@ class BaseAgent:
             "avatar": self.avatar,
             "status": self.status,
             "provider": self.provider.__class__.__name__,
+            "provider_kind": "simulated" if simulated else "live",
+            "model": getattr(self.provider, "model", None),
             "memory_count": len(self.memory),
         }
