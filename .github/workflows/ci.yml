@@ -133,15 +133,22 @@ jobs:
   security:
     name: dependency audit
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]" -c constraints.txt
-      - name: pip-audit (known CVEs in the pinned environment)
-        run: python -m pip_audit --strict --desc on --progress-spinner off
+      - run: python -m pip install --upgrade pip && python -m pip install pip-audit
+      - name: pip-audit (declared ranges)
+        # Auditing the requirement files rather than the runner's whole
+        # environment: the image ships its own old setuptools/pip, and a finding
+        # there is not this project's dependency to fix. What matters is whether
+        # what we ask for - and what we pin - has known CVEs.
+        run: |
+          python -m pip_audit --progress-spinner off --desc off -r requirements.txt
+          python -m pip_audit --progress-spinner off --desc off -r requirements-dev.txt
+      - name: pip-audit (the pinned reference environment)
+        run: python -m pip_audit --progress-spinner off --desc off -r constraints.txt
       - name: npm audit (vendored browser dependencies)
         run: npm audit --audit-level=high
 
