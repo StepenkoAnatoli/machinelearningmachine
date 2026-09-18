@@ -3,6 +3,10 @@
 #
 #   python -m pip install -e ".[dev]" -c constraints.txt
 #
+# Generated on Python 3.11. It is *not* installable on 3.10 (websockets 17
+# requires >=3.11); on 3.10 install from the ranges in pyproject.toml and let
+# pip resolve an older websockets. CI encodes exactly that.
+#
 # Refresh deliberately (then run the tests):
 #   python -m venv .venv-refresh && .venv-refresh/bin/pip install -e .
 #   .venv-refresh/bin/pip freeze | grep -v "^machinelearningmachine" > constraints.txt

@@ -388,7 +388,8 @@ transcript = await mesh.talk_p2p(
 Everything is offline and hermetic - network calls are injected, never performed.
 
 ```bash
-pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment
+pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
+# on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
 pytest -q                                    # 184 tests
 node --test tests/js/sanitize.test.mjs       # 13 XSS/sanitizer tests (needs: npm install)
 ruff check machinelearningmachine tests      # lint
