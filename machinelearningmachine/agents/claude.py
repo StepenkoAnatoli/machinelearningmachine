@@ -5,9 +5,10 @@ Examines concurrency safety, algorithmic complexity, boundary conditions, and se
 """
 
 from typing import Optional
+
+from ..protocol.bus import MessageBus
 from .base import BaseAgent
 from .providers import BaseLLMProvider
-from ..protocol.bus import MessageBus
 
 DEFAULT_CLAUDE_PROMPT = """You are Claude, a deep systems architect, code reviewer, and safety analyst.
 Your role:

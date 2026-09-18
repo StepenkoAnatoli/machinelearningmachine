@@ -1,10 +1,9 @@
 import pytest
-from machinelearningmachine.protocol.bus import MessageBus
+
 from machinelearningmachine.agents.arena_ai import ArenaAIAgent
 from machinelearningmachine.agents.copilot import CopilotAgent
-from machinelearningmachine.agents.claude import ClaudeAgent
-from machinelearningmachine.agents.gpt import GPTAgent
 from machinelearningmachine.agents.custom import CustomAgent
+from machinelearningmachine.protocol.bus import MessageBus
 
 
 @pytest.mark.asyncio

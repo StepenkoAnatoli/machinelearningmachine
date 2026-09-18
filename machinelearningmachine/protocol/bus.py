@@ -6,7 +6,8 @@ Supports point-to-point routing, topic-based pub/sub, event hooks, and transcrip
 import asyncio
 import json
 import logging
-from typing import Dict, List, Callable, Awaitable, Set
+from typing import Awaitable, Callable, Dict, List, Set
+
 from .message import Message
 
 logger = logging.getLogger("MessageBus")

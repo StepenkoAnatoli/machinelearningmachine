@@ -7,3 +7,12 @@ dist/
 build/
 .venv/
 .venv-test/
+venv/
+node_modules/
+coverage/
+*.log
+.DS_Store
+# Local dashboard state; sessions live in ~/.module_mesh by design.
+.module_mesh/
+.mypy_cache/
+.ruff_cache/

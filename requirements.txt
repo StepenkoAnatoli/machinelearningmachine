@@ -1,9 +1,8 @@
-fastapi>=0.110.0
-uvicorn>=0.28.0
-pydantic>=2.6.0
-aiohttp>=3.9.0
-requests>=2.31.0
-websockets>=12.0
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-httpx>=0.27.0
+# Runtime dependencies (same ranges as pyproject.toml).
+# For the pinned, reproducible set, install with: -c constraints.txt
+fastapi>=0.110,<1.0
+uvicorn>=0.28,<1.0
+pydantic>=2.6,<3.0
+aiohttp>=3.9,<4.0
+requests>=2.31,<3.0
+websockets>=12.0,<18.0

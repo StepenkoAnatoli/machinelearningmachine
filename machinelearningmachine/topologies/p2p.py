@@ -11,11 +11,12 @@ User-centered: faster feedback, configurable delays, proper error handling.
 
 import asyncio
 import logging
-from typing import List, Dict, Any, Optional
-from .base import BaseTopology
+from typing import List
+
+from ..agents.base import BaseAgent
 from ..protocol.bus import MessageBus
 from ..protocol.message import Message, MessageType
-from ..agents.base import BaseAgent
+from .base import BaseTopology
 
 logger = logging.getLogger("P2PTopology")
 

@@ -3,11 +3,11 @@ Base Topology definition.
 A topology defines the interaction pattern and message routing rules among modules.
 """
 
-import asyncio
-from typing import List, Dict, Any, Optional
-from ..protocol.bus import MessageBus
-from ..protocol.message import Message, MessageType
+from typing import Any, Dict, List
+
 from ..agents.base import BaseAgent
+from ..protocol.bus import MessageBus
+from ..protocol.message import Message
 
 
 class BaseTopology:

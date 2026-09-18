@@ -3,10 +3,11 @@ Standardized Inter-Module Message Protocol for MachineLearningMachine.
 Defines structured message types, payloads, and serialization.
 """
 
-from enum import Enum
 import time
 import uuid
-from typing import Dict, Any, Optional, List
+from enum import Enum
+from typing import Any, Dict, Optional
+
 from pydantic import BaseModel, Field
 
 

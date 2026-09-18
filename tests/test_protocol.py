@@ -1,7 +1,8 @@
+
 import pytest
-import asyncio
-from machinelearningmachine.protocol.message import Message, MessageType
+
 from machinelearningmachine.protocol.bus import MessageBus
+from machinelearningmachine.protocol.message import Message, MessageType
 
 
 def test_message_creation_and_dict():

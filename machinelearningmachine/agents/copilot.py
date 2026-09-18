@@ -5,9 +5,10 @@ Writes idiomatic code, designs clean functions/classes, and implements APIs.
 """
 
 from typing import Optional
+
+from ..protocol.bus import MessageBus
 from .base import BaseAgent
 from .providers import BaseLLMProvider
-from ..protocol.bus import MessageBus
 
 DEFAULT_COPILOT_PROMPT = """You are GitHub Copilot, an elite code synthesis and implementation engine.
 Your role:

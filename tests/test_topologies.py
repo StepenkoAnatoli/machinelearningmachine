@@ -1,4 +1,5 @@
 import pytest
+
 from machinelearningmachine.mesh import AgentMesh
 
 
