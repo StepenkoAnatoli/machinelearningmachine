@@ -99,6 +99,12 @@ def main():
         action="store_true",
         help="Disable inter-turn delays for faster execution (useful for testing)",
     )
+    run_parser.add_argument(
+        "--speak",
+        action="store_true",
+        help="Read the dialogue aloud with your computer's built-in text-to-speech "
+             "(macOS: say, Windows: SAPI, Linux: espeak-ng)",
+    )
 
     args = parser.parse_args()
 
@@ -248,6 +254,17 @@ async def execute_cli_run(args):
         print("📄 JSON EXPORT")
         print("="*60 + "\n")
         print(mesh.export_json())
+
+    if args.speak:
+        print(f"\n{'='*60}")
+        print("🔊 Reading the dialogue aloud...")
+        print(f"{'='*60}\n")
+        from . import tts
+        lines = []
+        for msg in transcript:
+            target = f" to {msg.recipient_name or msg.recipient_id}" if msg.recipient_id != "*" else ""
+            lines.append(f"{msg.sender_name}{target} says: {msg.content}")
+        tts.speak("\n\n".join(lines))
 
     print(f"\n{'='*60}")
     print(f"✨ Done! {len(transcript)} messages exchanged")

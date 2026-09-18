@@ -59,6 +59,10 @@
           <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true"></span>
           <span>Live Mesh Connected</span>
         </div>
+        <button id="btnSessions" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Open saved sessions">
+          <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
+          <span>Sessions</span>
+        </button>
         <button id="btnSettings" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Open settings and API keys">
           <i class="fa-solid fa-sliders" aria-hidden="true"></i>
           <span>Settings / Keys</span>
@@ -214,13 +218,23 @@
           <textarea id="inputPrompt" rows="3" class="w-full bg-slate-800/90 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none resize-none"
             placeholder="Describe the task or topic for the modules to discuss and implement... (Ctrl+Enter to run)"
             aria-describedby="prompt-help charCount">Implement a robust, thread-safe rate limiter in Python using the token-bucket algorithm.</textarea>
-          <p id="prompt-help" class="text-[11px] text-slate-500 mt-1">💡 Be specific: include language, constraints, and desired output. Press <kbd class="px-1 py-0.5 bg-slate-800 border border-slate-700 rounded text-[10px]">Ctrl+Enter</kbd> to run.</p>
+          <p id="prompt-help" class="text-[11px] text-slate-500 mt-1">💡 Be specific: include language, constraints, and desired output. Press <kbd class="px-1 py-0.5 bg-slate-800 border border-slate-700 rounded text-[10px]">Ctrl+Enter</kbd> to run. <span id="readPromptHint" class="hidden text-pink-400">🔊 Your prompt will be read aloud before it is sent.</span></p>
         </div>
 
         <div class="flex items-center justify-between">
-          <div class="text-[11px] text-slate-500">
-            <i class="fa-solid fa-lightbulb text-amber-400 mr-1" aria-hidden="true"></i>
-            Try: "Build JWT auth middleware", "Create LRU cache", "Design event bus with backpressure"
+          <div class="flex items-center gap-2 text-[11px] text-slate-500">
+            <span class="flex items-center">
+              <i class="fa-solid fa-lightbulb text-amber-400 mr-1" aria-hidden="true"></i>
+              Try: "Build JWT auth middleware", "Create LRU cache"
+            </span>
+            <button id="btnReadPrompt" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-pink-300 flex items-center space-x-1 transition focus-visible:ring-2 focus-visible:ring-pink-500" title="Read your prompt text aloud" aria-label="Read the prompt text aloud">
+              <i class="fa-solid fa-volume-high" aria-hidden="true"></i>
+              <span>Read My Prompt</span>
+            </button>
+            <button id="btnDictate" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition focus-visible:ring-2 focus-visible:ring-pink-500" title="Speak your prompt into the microphone" aria-label="Dictate the prompt by voice">
+              <i class="fa-solid fa-microphone" aria-hidden="true"></i>
+              <span>Dictate</span>
+            </button>
           </div>
           <div class="flex items-center space-x-2">
             <button id="btnRun" class="h-10 px-5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-indigo-600/30 transition disabled:opacity-50 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-indigo-400" aria-label="Execute dialogue">
@@ -257,6 +271,14 @@
             <i class="fa-solid fa-code" aria-hidden="true"></i>
             <span>Export JSON</span>
           </button>
+          <button id="btnReadAll" class="px-2.5 py-1 text-xs rounded bg-pink-900/40 hover:bg-pink-900/70 border border-pink-800/60 text-pink-300 flex items-center space-x-1 transition focus-visible:ring-2 focus-visible:ring-pink-500" title="Read the whole conversation aloud" aria-label="Read the entire conversation aloud">
+            <i class="fa-solid fa-volume-high" aria-hidden="true"></i>
+            <span>Read All</span>
+          </button>
+          <button id="btnStopSpeech" class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition focus-visible:ring-2 focus-visible:ring-slate-500" title="Stop all speech" aria-label="Stop reading aloud">
+            <i class="fa-solid fa-stop" aria-hidden="true"></i>
+            <span>Stop</span>
+          </button>
         </div>
       </div>
 
@@ -279,6 +301,76 @@
         </div>
       </div>
 
+    </section>
+
+    <!-- Read-Aloud Studio: read your text, files, web pages & the conversation -->
+    <section id="readerSection" class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 backdrop-blur" aria-labelledby="reader-heading">
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-book-open text-pink-400" aria-hidden="true"></i>
+          <h2 id="reader-heading" class="text-sm font-semibold text-slate-200">Read-Aloud Studio</h2>
+          <span class="text-[11px] text-slate-500 hidden md:inline">— the machine reads what you write: your text, files, web pages, the whole conversation</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <span id="ttsStatus" class="text-[11px] text-slate-500" role="status" aria-live="polite">Idle</span>
+          <select id="ttsVoice" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-pink-500 max-w-[180px]" aria-label="Choose speaking voice"></select>
+          <select id="ttsRate" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-pink-500" aria-label="Speech speed">
+            <option value="0.75">0.75x</option>
+            <option value="1" selected>1x speed</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.5x</option>
+          </select>
+          <label class="flex items-center space-x-1.5 text-[11px] text-slate-400 cursor-pointer select-none">
+            <input type="checkbox" id="ttsAutoRead" class="accent-pink-500">
+            <span>Read replies automatically</span>
+          </label>
+          <label class="flex items-center space-x-1.5 text-[11px] text-slate-400 cursor-pointer select-none">
+            <input type="checkbox" id="ttsReadPrompt" class="accent-pink-500">
+            <span>Read my prompt when I run</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="What to read">
+        <button class="reader-tab reader-tab-active px-3 py-1.5 text-xs rounded-lg border transition focus-visible:ring-2 focus-visible:ring-pink-500" data-reader-tab="text" role="tab" aria-selected="true" aria-controls="readerTab-text">📝 My Text</button>
+        <button class="reader-tab px-3 py-1.5 text-xs rounded-lg border transition focus-visible:ring-2 focus-visible:ring-pink-500" data-reader-tab="file" role="tab" aria-selected="false" aria-controls="readerTab-file">📄 From File</button>
+        <button class="reader-tab px-3 py-1.5 text-xs rounded-lg border transition focus-visible:ring-2 focus-visible:ring-pink-500" data-reader-tab="url" role="tab" aria-selected="false" aria-controls="readerTab-url">🌐 Web Page</button>
+        <button id="btnTestVoice" class="ml-auto px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition focus-visible:ring-2 focus-visible:ring-pink-500" aria-label="Test the selected voice">
+          🔊 Test Voice
+        </button>
+      </div>
+
+      <div id="readerTab-text" class="reader-tab-panel">
+        <textarea id="readerText" rows="4" class="w-full bg-slate-800/90 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-pink-500 resize-y"
+          placeholder="Type or paste anything you want the machine to read aloud..." aria-label="Text to read aloud"></textarea>
+        <div class="flex justify-end mt-2">
+          <button id="btnReadText" class="px-4 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-xs font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Read the text aloud">
+            <i class="fa-solid fa-volume-high" aria-hidden="true"></i><span>Read This Text</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="readerTab-file" class="reader-tab-panel hidden">
+        <div class="flex flex-wrap items-center gap-3">
+          <input type="file" id="readerFile" accept=".txt,.md,.markdown,.csv,.json,.log,.py,.js,.ts,.html,.xml,.yml,.yaml,.ini,.cfg,.toml" class="text-xs text-slate-300 file:ml-3 file:mr-0 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 file:cursor-pointer" aria-label="Choose a text file to read aloud">
+          <button id="btnReadFile" class="px-4 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-xs font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Read the chosen file aloud">
+            <i class="fa-solid fa-volume-high" aria-hidden="true"></i><span>Read This File</span>
+          </button>
+        </div>
+        <p class="text-[11px] text-slate-500 mt-2">Plain-text files up to 1 MB: .txt, .md, .csv, .json, .log, .py, .js, .ts, .html, .yml, .toml and more.</p>
+      </div>
+
+      <div id="readerTab-url" class="reader-tab-panel hidden">
+        <div class="flex flex-wrap items-center gap-3">
+          <input type="url" id="readerUrl" placeholder="https://example.com/article" class="flex-1 min-w-[240px] bg-slate-800/90 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-pink-500" aria-label="Web page URL to read aloud">
+          <button id="btnReadUrl" class="px-4 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-xs font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Fetch and read the web page aloud">
+            <i class="fa-solid fa-download" aria-hidden="true"></i><span>Fetch &amp; Read</span>
+          </button>
+        </div>
+        <p class="text-[11px] text-slate-500 mt-2">Paste a link to an article, blog post or documentation page — it is fetched, cleaned, shown below, and read aloud.</p>
+      </div>
+
+      <pre id="readerDisplay" class="hidden mt-3 max-h-48 overflow-y-auto custom-scroll bg-slate-950/80 border border-slate-800 rounded-lg p-3 text-[11px] text-slate-300 whitespace-pre-wrap break-words" aria-label="Fetched content preview"></pre>
     </section>
 
   </main>
@@ -413,6 +505,40 @@
         <button id="btnCloseClearModal" class="sr-only">Close</button>
         <button id="btnConfirmClear" class="px-4 py-2 text-xs rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-red-400">Clear Session</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Saved Sessions Modal -->
+  <div id="sessionsModal" class="modal-backdrop fixed inset-0 z-50 hidden flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="sessions-modal-title" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-lg w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto custom-scroll">
+      <div class="flex items-center justify-between mb-4">
+        <h3 id="sessions-modal-title" class="text-base font-bold text-slate-100 flex items-center space-x-2">
+          <i class="fa-solid fa-folder-open text-pink-400" aria-hidden="true"></i>
+          <span>Saved Sessions</span>
+        </h3>
+        <button id="btnCloseSessionsModal" class="text-slate-400 hover:text-slate-200 p-1 rounded focus-visible:ring-2 focus-visible:ring-pink-500" aria-label="Close sessions dialog">
+          <i class="fa-solid fa-xmark text-lg" aria-hidden="true"></i>
+        </button>
+      </div>
+
+      <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-800 mb-4">
+        <label for="sessionName" class="block text-xs font-medium text-slate-400 mb-1">Save the current conversation</label>
+        <div class="flex items-center gap-2">
+          <input type="text" id="sessionName" placeholder="e.g. Rate limiter redesign" maxlength="120"
+            class="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-pink-500" aria-describedby="sessions-help">
+          <button id="btnSaveSession" class="px-4 py-2 text-xs rounded-lg bg-pink-600 hover:bg-pink-500 text-white font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Save current session">
+            <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i>
+            <span>Save</span>
+          </button>
+        </div>
+        <p id="sessions-help" class="text-[11px] text-slate-500 mt-2">Stored on this computer in <code class="px-1 bg-slate-900 rounded">~/.module_mesh/sessions</code>. Loading a session restores its modules and full conversation.</p>
+      </div>
+
+      <div id="sessionsList" class="space-y-2" role="list" aria-label="Saved sessions"></div>
+      <p id="sessionsEmpty" class="text-center text-xs text-slate-500 py-6 hidden">
+        <i class="fa-regular fa-folder-open text-2xl block mb-2 opacity-50" aria-hidden="true"></i>
+        No saved sessions yet. Run a dialogue, then save it above — it will appear here next time.
+      </p>
     </div>
   </div>
 

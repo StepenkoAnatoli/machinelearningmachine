@@ -37,6 +37,35 @@ document.addEventListener("DOMContentLoaded", () => {
   const searchInput = document.getElementById("searchMessages");
   const toastContainer = document.getElementById("toastContainer");
 
+  // Read-Aloud / TTS controls
+  const btnReadPrompt = document.getElementById("btnReadPrompt");
+  const btnDictate = document.getElementById("btnDictate");
+  const btnReadAll = document.getElementById("btnReadAll");
+  const btnStopSpeech = document.getElementById("btnStopSpeech");
+  const ttsStatus = document.getElementById("ttsStatus");
+  const ttsVoiceSelect = document.getElementById("ttsVoice");
+  const ttsRateSelect = document.getElementById("ttsRate");
+  const ttsAutoReadBox = document.getElementById("ttsAutoRead");
+  const ttsReadPromptBox = document.getElementById("ttsReadPrompt");
+  const readPromptHint = document.getElementById("readPromptHint");
+  const readerText = document.getElementById("readerText");
+  const readerFile = document.getElementById("readerFile");
+  const readerUrl = document.getElementById("readerUrl");
+  const readerDisplay = document.getElementById("readerDisplay");
+  const btnReadText = document.getElementById("btnReadText");
+  const btnReadFile = document.getElementById("btnReadFile");
+  const btnReadUrl = document.getElementById("btnReadUrl");
+  const btnTestVoice = document.getElementById("btnTestVoice");
+
+  // Sessions controls
+  const btnSessions = document.getElementById("btnSessions");
+  const sessionsModal = document.getElementById("sessionsModal");
+  const btnCloseSessionsModal = document.getElementById("btnCloseSessionsModal");
+  const sessionNameInput = document.getElementById("sessionName");
+  const btnSaveSession = document.getElementById("btnSaveSession");
+  const sessionsList = document.getElementById("sessionsList");
+  const sessionsEmpty = document.getElementById("sessionsEmpty");
+
   // Modals
   const agentModal = document.getElementById("agentModal");
   const btnNewAgent = document.getElementById("btnNewAgent");
@@ -112,6 +141,269 @@ document.addEventListener("DOMContentLoaded", () => {
     const div = document.createElement("div");
     div.textContent = str;
     return div.innerHTML;
+  }
+
+  // ===== SpeechKit: read what you write (browser Web Speech API) =====
+  // Zero-install text-to-speech: uses the voices already on the user's
+  // computer. Settings persist in localStorage; long texts are chunked to
+  // work around the Chrome long-utterance cutoff.
+  const SpeechKit = (() => {
+    const supported = "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
+    let voices = [];
+    let voiceURI = localStorage.getItem("mesh.tts.voice") || "";
+    let rate = parseFloat(localStorage.getItem("mesh.tts.rate") || "1") || 1;
+    let autoRead = localStorage.getItem("mesh.tts.auto") === "1";
+    let readPromptOnRun = localStorage.getItem("mesh.tts.prompt") === "1";
+    let queue = [];            // { text, label, msgId }
+    let busy = false;
+    let speakingMsgId = null;
+    let speakingLabel = null;
+
+    function loadVoices() {
+      if (!supported) return;
+      const v = window.speechSynthesis.getVoices();
+      if (v && v.length) {
+        voices = Array.from(v);
+        if (!voiceURI) {
+          const def = voices.find(x => x.default) || voices.find(x => x.lang.startsWith("en")) || voices[0];
+          voiceURI = def ? def.voiceURI : "";
+        }
+      }
+    }
+    if (supported) {
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+
+    function pickVoice() {
+      if (!voiceURI) return null;
+      return voices.find(v => v.voiceURI === voiceURI) || null;
+    }
+
+    function stripMarkdown(text) {
+      if (!text) return "";
+      let t = String(text);
+      t = t.replace(/```[\s\S]*?```/g, (m) => m.replace(/^```[^\n]*\n?/, "").replace(/```$/, ""));
+      t = t.replace(/`([^`]+)`/g, "$1");
+      t = t.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
+      t = t.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+      t = t.replace(/^#{1,6}\s+/gm, "");
+      t = t.replace(/^\s*(?:[-*+]|\d+\.)\s+/gm, "");
+      t = t.replace(/[*_~>#|]/g, " ");
+      t = t.replace(/https?:\/\/\S+/g, " (link) ");
+      return t.replace(/\n{3,}/g, "\n\n").trim();
+    }
+
+    function chunkText(text, size = 320) {
+      const chunks = [];
+      let rest = text;
+      while (rest.length > size) {
+        let cut = rest.lastIndexOf(".", size);
+        if (cut < size * 0.4) cut = rest.lastIndexOf("\n", size);
+        if (cut < size * 0.4) cut = rest.lastIndexOf(" ", size);
+        if (cut < size * 0.4) cut = size;
+        chunks.push(rest.slice(0, cut + 1));
+        rest = rest.slice(cut + 1);
+      }
+      if (rest) chunks.push(rest);
+      return chunks;
+    }
+
+    function setSpeakingUI(msgId, label) {
+      speakingMsgId = msgId || null;
+      speakingLabel = label || null;
+      updateStatus();
+      document.querySelectorAll("[data-msg-speak]").forEach((b) => {
+        const on = !!speakingMsgId && b.dataset.msgSpeak === String(speakingMsgId);
+        b.classList.toggle("speaking", on);
+        b.innerHTML = on
+          ? '<i class="fa-solid fa-stop" aria-hidden="true"></i>'
+          : '<i class="fa-solid fa-volume-high" aria-hidden="true"></i>';
+        b.setAttribute("aria-label", on ? "Stop reading this message" : "Read this message aloud");
+        b.title = on ? "Stop reading" : "Read this message aloud";
+      });
+    }
+
+    function updateStatus() {
+      if (!ttsStatus) return;
+      const inQueue = queue.length;
+      if (busy && speakingLabel) {
+        ttsStatus.textContent = `🔊 Speaking: ${speakingLabel}${inQueue ? ` · ${inQueue} more in queue` : ""}`;
+        ttsStatus.className = "text-[11px] text-pink-400 speaking-pulse";
+      } else {
+        ttsStatus.textContent = inQueue ? `⏸ ${inQueue} in queue` : "Idle";
+        ttsStatus.className = "text-[11px] text-slate-500";
+      }
+    }
+
+    function processQueue() {
+      if (busy || !supported) return;
+      const item = queue.shift();
+      updateStatus();
+      if (!item) { setSpeakingUI(null, null); return; }
+      busy = true;
+      setSpeakingUI(item.msgId, item.label);
+      const chunks = chunkText(item.text);
+      let i = 0;
+      const next = () => {
+        if (!busy) return; // stopped by user
+        if (i < chunks.length) {
+          const u = new SpeechSynthesisUtterance(chunks[i++]);
+          const v = pickVoice();
+          if (v) { u.voice = v; u.lang = v.lang; }
+          u.rate = rate;
+          u.onend = next;
+          u.onerror = next;
+          window.speechSynthesis.speak(u);
+        } else {
+          busy = false;
+          processQueue();
+        }
+      };
+      next();
+    }
+
+    function enqueue(text, opts = {}) {
+      const clean = stripMarkdown(text);
+      if (!clean) return false;
+      queue.push({
+        text: clean,
+        label: opts.label || "Speech",
+        msgId: opts.msgId != null ? String(opts.msgId) : null,
+      });
+      processQueue();
+      return true;
+    }
+
+    function speak(text, opts = {}) {
+      if (!supported) {
+        showToast("Speech is not supported in this browser - try Chrome or Edge", "warning", 4000);
+        return false;
+      }
+      if (opts.interrupt !== false) {
+        queue = [];
+        busy = false;
+        window.speechSynthesis.cancel();
+      }
+      return enqueue(text, opts);
+    }
+
+    function stop() {
+      queue = [];
+      busy = false;
+      if (supported) window.speechSynthesis.cancel();
+      setSpeakingUI(null, null);
+    }
+
+    // Pause/resume keeps working when the user switches tabs in Chrome.
+    let pauseTimer = null;
+    if (supported) {
+      setInterval(() => {
+        if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
+          // Chrome pauses long speech on its own; nudge it to keep flowing.
+          window.speechSynthesis.pause();
+          clearTimeout(pauseTimer);
+          pauseTimer = setTimeout(() => window.speechSynthesis.resume(), 50);
+        }
+      }, 10000);
+    }
+
+    return {
+      supported,
+      speak,
+      enqueue,
+      stop,
+      getVoices: () => voices,
+      getVoiceURI: () => voiceURI,
+      setVoice(uri) { voiceURI = uri; localStorage.setItem("mesh.tts.voice", uri); },
+      getRate: () => rate,
+      setRate(r) { rate = r; localStorage.setItem("mesh.tts.rate", String(r)); },
+      isAutoRead: () => autoRead,
+      setAutoRead(on) { autoRead = on; localStorage.setItem("mesh.tts.auto", on ? "1" : "0"); },
+      isReadPromptOnRun: () => readPromptOnRun,
+      setReadPromptOnRun(on) {
+        readPromptOnRun = on;
+        localStorage.setItem("mesh.tts.prompt", on ? "1" : "0");
+        if (readPromptHint) readPromptHint.classList.toggle("hidden", !on);
+      },
+      getSpeakingMsgId: () => speakingMsgId,
+    };
+  })();
+
+  function initSpeechUI() {
+    // Voice dropdown
+    if (ttsVoiceSelect && SpeechKit.supported) {
+      const populate = () => {
+        const current = ttsVoiceSelect.value;
+        const voices = SpeechKit.getVoices();
+        ttsVoiceSelect.innerHTML = "";
+        const groups = {};
+        voices.forEach((v) => {
+          const lang = (v.lang || "other").split("-")[0];
+          (groups[lang] = groups[lang] || []).push(v);
+        });
+        Object.keys(groups).sort().forEach((lang) => {
+          const og = document.createElement("optgroup");
+          og.label = lang.toUpperCase();
+          groups[lang].forEach((v) => {
+            const opt = document.createElement("option");
+            opt.value = v.voiceURI;
+            opt.textContent = `${v.name} (${v.lang})${v.default ? " · default" : ""}`;
+            if (v.voiceURI === SpeechKit.getVoiceURI()) opt.selected = true;
+            og.appendChild(opt);
+          });
+          ttsVoiceSelect.appendChild(og);
+        });
+        if (current && !ttsVoiceSelect.value) ttsVoiceSelect.value = current;
+      };
+      populate();
+      ttsVoiceSelect.addEventListener("change", () => {
+        SpeechKit.setVoice(ttsVoiceSelect.value);
+        showToast(`Voice: ${ttsVoiceSelect.options[ttsVoiceSelect.selectedIndex]?.text || ""}`, "info", 1500);
+      });
+    } else if (ttsVoiceSelect) {
+      ttsVoiceSelect.disabled = true;
+      ttsVoiceSelect.placeholder = "Not supported";
+    }
+    if (ttsRateSelect) {
+      ttsRateSelect.value = String(SpeechKit.getRate());
+      ttsRateSelect.addEventListener("change", () => SpeechKit.setRate(parseFloat(ttsRateSelect.value) || 1));
+    }
+    if (ttsAutoReadBox) {
+      ttsAutoReadBox.checked = SpeechKit.isAutoRead();
+      ttsAutoReadBox.addEventListener("change", () => {
+        SpeechKit.setAutoRead(ttsAutoReadBox.checked);
+        showToast(ttsAutoReadBox.checked ? "Replies will be read aloud automatically" : "Auto-read off", "info", 2000);
+      });
+    }
+    if (ttsReadPromptBox) {
+      ttsReadPromptBox.checked = SpeechKit.isReadPromptOnRun();
+      readPromptHint.classList.toggle("hidden", !SpeechKit.isReadPromptOnRun());
+      ttsReadPromptBox.addEventListener("change", () => {
+        SpeechKit.setReadPromptOnRun(ttsReadPromptBox.checked);
+        showToast(ttsReadPromptBox.checked ? "Your prompt will be read aloud before it is sent" : "Prompt read-aloud off", "info", 2000);
+      });
+    }
+    if (btnTestVoice) {
+      btnTestVoice.addEventListener("click", () => {
+        SpeechKit.speak("Hello! This is how your chosen voice will sound in the Machine Learning Machine.", { label: "Voice test" });
+      });
+    }
+    if (btnStopSpeech) {
+      btnStopSpeech.addEventListener("click", () => {
+        SpeechKit.stop();
+        showToast("Speech stopped", "info", 1500);
+      });
+    }
+  }
+
+  function speakMessage(msg) {
+    const id = msg.id ? String(msg.id) : null;
+    if (id && SpeechKit.getSpeakingMsgId() === id) {
+      SpeechKit.stop();
+      return;
+    }
+    SpeechKit.speak(msg.content, { label: msg.sender_name || "Message", msgId: id });
   }
 
   // Safe markdown parsing - prevent XSS
@@ -302,7 +594,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const msg = data.message;
       messages.push(msg);
       // Only append if passes search filter
-      if (!searchFilter || 
+      if (!searchFilter ||
           msg.content.toLowerCase().includes(searchFilter.toLowerCase()) ||
           msg.sender_name.toLowerCase().includes(searchFilter.toLowerCase())) {
         appendMessageToFeed(msg);
@@ -312,6 +604,19 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       triggerPacketAnimation(msg.sender_id, msg.recipient_id);
       needsRedraw = true;
+      // Read replies aloud automatically (skips short system notices)
+      if (SpeechKit.isAutoRead() && msg.message_type !== "system") {
+        SpeechKit.speak(msg.content, { label: msg.sender_name || "Message", msgId: msg.id });
+      }
+    } else if (data.type === "session_loaded") {
+      agents = data.agents || [];
+      messages = data.history || [];
+      searchFilter = "";
+      if (searchInput) searchInput.value = "";
+      renderAgentList();
+      renderAllMessages();
+      needsRedraw = true;
+      showToast(`Session "${data.name || ""}" loaded - conversation restored`, "success", 4000);
     } else if (data.type === "agents_updated") {
       agents = data.agents || [];
       renderAgentList();
@@ -619,7 +924,12 @@ document.addEventListener("DOMContentLoaded", () => {
             ${escapeHtml(msg.message_type.replace('_', ' '))}
           </span>
         </div>
-        <span class="text-[10px] font-mono text-slate-500">${escapeHtml(msg.formatted_time || "")}</span>
+        <div class="flex items-center gap-2">
+          <button class="msg-speak-btn" data-msg-speak="${escapeHtml(msg.id || "")}" title="Read this message aloud" aria-label="Read this message aloud">
+            <i class="fa-solid fa-volume-high" aria-hidden="true"></i>
+          </button>
+          <span class="text-[10px] font-mono text-slate-500">${escapeHtml(msg.formatted_time || "")}</span>
+        </div>
       </div>
       <div class="text-xs text-slate-300 leading-relaxed prose prose-invert max-w-none prose-pre:bg-slate-950/80">
         ${parsedContent}
@@ -652,6 +962,15 @@ document.addEventListener("DOMContentLoaded", () => {
       };
       pre.appendChild(copyBtn);
     });
+
+    // Per-message read-aloud button
+    const speakBtn = card.querySelector(".msg-speak-btn");
+    if (speakBtn) {
+      speakBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        speakMessage(msg);
+      });
+    }
 
     messagesContainer.appendChild(card);
 
@@ -783,6 +1102,11 @@ document.addEventListener("DOMContentLoaded", () => {
       to_agent: agentB,
       turns: turns,
     };
+
+    // Read what the user wrote before sending it, if enabled.
+    if (SpeechKit.isReadPromptOnRun()) {
+      SpeechKit.speak(prompt, { label: "Your prompt" });
+    }
 
     try {
       const resp = await fetch("/api/run", {
@@ -1016,10 +1340,320 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  // ===== Read-Aloud Studio & prompt speech controls =====
+
+  if (btnReadPrompt) {
+    btnReadPrompt.addEventListener("click", () => {
+      const text = inputPrompt.value.trim();
+      if (!text) {
+        showToast("Type or paste your prompt first - then I will read it aloud", "warning");
+        inputPrompt.focus();
+        return;
+      }
+      const speakingThis = btnReadPrompt.classList.contains("speaking");
+      if (speakingThis) {
+        SpeechKit.stop();
+      } else {
+        SpeechKit.speak(text, { label: "Your prompt" });
+      }
+    });
+  }
+
+  // Voice dictation (speech recognition) - speak the prompt into the mic
+  function initDictation() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR || !btnDictate) {
+      if (btnDictate) btnDictate.style.display = "none"; // unsupported browser
+      return;
+    }
+    const rec = new SR();
+    rec.continuous = false;
+    rec.interimResults = true;
+    rec.lang = navigator.language || "en-US";
+    let base = "";
+    rec.onstart = () => {
+      base = inputPrompt.value.trim() ? inputPrompt.value.trim() + " " : "";
+      btnDictate.classList.add("recording");
+      btnDictate.innerHTML = '<i class="fa-solid fa-stop" aria-hidden="true"></i><span>Stop listening</span>';
+      showToast("Listening... speak your task now", "info", 2500);
+    };
+    rec.onresult = (e) => {
+      let interim = "";
+      let final = "";
+      for (const r of e.results) {
+        if (r.isFinal) final += r[0].transcript;
+        else interim += r[0].transcript;
+      }
+      inputPrompt.value = (base + final).trim() + (interim ? " " + interim : "");
+      updateCharCount();
+    };
+    rec.onerror = (e) => {
+      showToast("Voice input problem: " + (e.error || "unknown") + " - try again", "warning", 3500);
+    };
+    rec.onend = () => {
+      btnDictate.classList.remove("recording");
+      btnDictate.innerHTML = '<i class="fa-solid fa-microphone" aria-hidden="true"></i><span>Dictate</span>';
+    };
+    btnDictate.addEventListener("click", () => {
+      if (rec.recognizing) { rec.stop(); return; }
+      try {
+        rec.start();
+      } catch (e) {
+        showToast("Could not start the microphone - check browser permissions", "warning");
+      }
+    });
+  }
+
+  if (btnReadAll) {
+    btnReadAll.addEventListener("click", () => {
+      if (!messages.length) {
+        showToast("No messages to read yet - run a dialogue first", "info");
+        return;
+      }
+      // First message interrupts, the rest queue up in order.
+      SpeechKit.speak(messages[0].content, { label: messages[0].sender_name, msgId: messages[0].id });
+      for (const m of messages.slice(1)) {
+        SpeechKit.enqueue(m.content, { label: m.sender_name, msgId: m.id });
+      }
+      showToast(`Reading all ${messages.length} messages aloud`, "info", 2500);
+    });
+  }
+
+  // Reader tabs
+  document.querySelectorAll(".reader-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".reader-tab").forEach((t) => {
+        t.classList.remove("reader-tab-active");
+        t.setAttribute("aria-selected", "false");
+      });
+      tab.classList.add("reader-tab-active");
+      tab.setAttribute("aria-selected", "true");
+      document.querySelectorAll(".reader-tab-panel").forEach((p) => p.classList.add("hidden"));
+      const panel = document.getElementById("readerTab-" + tab.dataset.readerTab);
+      if (panel) panel.classList.remove("hidden");
+    });
+  });
+
+  function showReaderDisplay(title, text) {
+    if (!readerDisplay) return;
+    readerDisplay.classList.remove("hidden");
+    readerDisplay.textContent = (title ? `— ${title} —\n\n` : "") + text;
+    readerDisplay.scrollTop = 0;
+  }
+
+  if (btnReadText) {
+    btnReadText.addEventListener("click", () => {
+      const text = readerText.value.trim();
+      if (!text) {
+        showToast("Type or paste the text you want read aloud first", "warning");
+        readerText.focus();
+        return;
+      }
+      SpeechKit.speak(text, { label: "Your text" });
+      showToast("Reading your text aloud", "info", 1500);
+    });
+  }
+
+  if (btnReadFile) {
+    btnReadFile.addEventListener("click", () => {
+      const file = readerFile.files && readerFile.files[0];
+      if (!file) {
+        showToast("Choose a file first, then I will read it aloud", "warning");
+        readerFile.focus();
+        return;
+      }
+      if (file.size > 1024 * 1024) {
+        showToast("File is bigger than 1 MB - choose a smaller one", "error");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = String(reader.result || "");
+        if (!text.trim()) {
+          showToast("That file appears to be empty or not plain text", "warning");
+          return;
+        }
+        showReaderDisplay(file.name, text);
+        SpeechKit.speak(text, { label: file.name });
+        showToast(`Reading "${file.name}" aloud`, "info", 2000);
+      };
+      reader.onerror = () => showToast("Could not read that file", "error");
+      reader.readAsText(file);
+    });
+  }
+
+  if (btnReadUrl) {
+    btnReadUrl.addEventListener("click", async () => {
+      const url = readerUrl.value.trim();
+      if (!url) {
+        showToast("Paste a web page link first", "warning");
+        readerUrl.focus();
+        return;
+      }
+      if (!/^https?:\/\//i.test(url)) {
+        showToast("The link must start with http:// or https://", "warning");
+        return;
+      }
+      btnReadUrl.disabled = true;
+      btnReadUrl.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i><span>Fetching...</span>';
+      try {
+        const resp = await fetch("/api/read/url", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          showToast(data.detail || "Could not fetch that page", "error", 5000);
+          return;
+        }
+        showReaderDisplay(`${data.title || url} (${data.url})${data.truncated ? " [trimmed]" : ""}`, data.text);
+        SpeechKit.speak(data.text, { label: data.title || url });
+        showToast(data.truncated
+          ? "Page is long - reading the first part aloud"
+          : "Reading the page aloud", "info", 2500);
+      } catch (e) {
+        showToast("Network error while fetching the page", "error", 4000);
+      } finally {
+        btnReadUrl.disabled = false;
+        btnReadUrl.innerHTML = '<i class="fa-solid fa-download" aria-hidden="true"></i><span>Fetch &amp; Read</span>';
+      }
+    });
+  }
+
+  // ===== Saved Sessions =====
+
+  async function refreshSessions() {
+    try {
+      const resp = await fetch("/api/sessions");
+      const data = await resp.json();
+      const sessions = data.sessions || [];
+      sessionsList.innerHTML = "";
+      sessionsEmpty.classList.toggle("hidden", sessions.length > 0);
+      sessions.forEach((s) => {
+        const when = new Date(s.saved_at * 1000);
+        const dateStr = when.toLocaleDateString() + " " + when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const row = document.createElement("div");
+        row.className = "session-row flex items-center justify-between gap-2 p-2.5 rounded-lg bg-slate-800/70 border border-slate-700/60";
+        row.setAttribute("role", "listitem");
+        row.innerHTML = `
+          <div class="min-w-0">
+            <p class="text-xs font-semibold text-slate-200 truncate">${escapeHtml(s.name)}</p>
+            <p class="text-[10px] text-slate-500">${dateStr} · ${s.message_count} messages</p>
+          </div>
+          <div class="flex items-center gap-1.5 flex-shrink-0">
+            <button class="session-load px-2.5 py-1 text-[11px] rounded bg-indigo-600 hover:bg-indigo-500 text-white transition focus-visible:ring-2 focus-visible:ring-indigo-400" data-id="${escapeHtml(s.id)}" aria-label="Load session ${escapeHtml(s.name)}">
+              Load
+            </button>
+            <button class="session-del px-2 py-1 text-[11px] rounded bg-slate-800 hover:bg-red-900/60 border border-slate-700 text-slate-400 hover:text-red-300 transition focus-visible:ring-2 focus-visible:ring-red-400" data-id="${escapeHtml(s.id)}" aria-label="Delete session ${escapeHtml(s.name)}">
+              <i class="fa-solid fa-trash-can" aria-hidden="true"></i>
+            </button>
+          </div>
+        `;
+        row.querySelector(".session-load").addEventListener("click", async () => {
+          const btn = row.querySelector(".session-load");
+          btn.disabled = true;
+          try {
+            const resp = await fetch("/api/sessions/load", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ session_id: s.id }),
+            });
+            if (!resp.ok) {
+              const err = await resp.json().catch(() => ({}));
+              showToast(err.detail || "Could not load that session", "error", 4000);
+              btn.disabled = false;
+            } else {
+              closeModal(sessionsModal);
+            }
+          } catch (e) {
+            showToast("Network error loading session", "error", 4000);
+            btn.disabled = false;
+          }
+        });
+        row.querySelector(".session-del").addEventListener("click", async () => {
+          const btn = row.querySelector(".session-del");
+          btn.disabled = true;
+          try {
+            const resp = await fetch("/api/sessions/" + encodeURIComponent(s.id), { method: "DELETE" });
+            if (!resp.ok) showToast("Could not delete that session", "error");
+            refreshSessions();
+          } catch (e) {
+            showToast("Network error deleting session", "error");
+            btn.disabled = false;
+          }
+        });
+        sessionsList.appendChild(row);
+      });
+    } catch (e) {
+      showToast("Could not list saved sessions", "error");
+    }
+  }
+
+  if (btnSessions) {
+    btnSessions.addEventListener("click", () => {
+      openModal(sessionsModal);
+      refreshSessions();
+    });
+  }
+  if (btnCloseSessionsModal) {
+    btnCloseSessionsModal.addEventListener("click", () => closeModal(sessionsModal));
+  }
+  if (sessionsModal) {
+    sessionsModal.addEventListener("click", (e) => {
+      if (e.target === sessionsModal) closeModal(sessionsModal);
+    });
+    sessionsModal.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeModal(sessionsModal);
+    });
+  }
+  if (btnSaveSession) {
+    btnSaveSession.addEventListener("click", async () => {
+      const name = sessionNameInput ? sessionNameInput.value.trim() : "";
+      if (!messages.length) {
+        showToast("There is no conversation to save yet - run a dialogue first", "warning");
+        return;
+      }
+      btnSaveSession.disabled = true;
+      btnSaveSession.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i><span>Saving...</span>';
+      try {
+        const resp = await fetch("/api/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name || null }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          showToast(data.detail || "Could not save the session", "error", 4000);
+        } else {
+          showToast(`Session "${data.session.name}" saved to this computer`, "success", 3500);
+          if (sessionNameInput) sessionNameInput.value = "";
+          refreshSessions();
+        }
+      } catch (e) {
+        showToast("Network error saving session", "error", 4000);
+      } finally {
+        btnSaveSession.disabled = false;
+        btnSaveSession.innerHTML = '<i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>Save</span>';
+      }
+    });
+    // Allow Enter in the name field to save
+    if (sessionNameInput) {
+      sessionNameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          btnSaveSession.click();
+        }
+      });
+    }
+  }
+
   // Start
   initWebSocket();
   requestAnimationFrame(drawCanvas);
-  
+  initSpeechUI();
+  initDictation();
+
   // Initial char count
   updateCharCount();
 });

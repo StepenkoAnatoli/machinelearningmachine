@@ -5,17 +5,21 @@ User-centered improvements: input validation, rate limiting, security fixes, bet
 """
 
 import asyncio
+import html
 import logging
 import re
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+import requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 
+from .. import sessions as session_store
 from ..mesh import AgentMesh
 from ..protocol.message import Message, MessageType
 from ..agents.custom import CustomAgent
@@ -35,6 +39,8 @@ RESERVED_AGENT_IDS = {"system", "broadcast", "all", "*", "api", "admin", "root"}
 # Simple in-memory rate limiting for user protection
 _last_run_time: Dict[str, float] = {}
 RUN_COOLDOWN_SECONDS = 1.0  # Prevent accidental double-clicks / spam
+_last_url_read_time: Dict[str, float] = {}
+URL_READ_COOLDOWN_SECONDS = 2.0
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -52,7 +58,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -170,6 +176,26 @@ class ConfigApiKeysRequest(BaseModel):
         if not (v.startswith("http://") or v.startswith("https://")):
             raise ValueError("Base URL must start with http:// or https://")
         return v.rstrip("/")
+
+
+class SaveSessionRequest(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=120)
+
+
+class LoadSessionRequest(BaseModel):
+    session_id: str = Field(..., min_length=4, max_length=64)
+
+
+class ReadUrlRequest(BaseModel):
+    url: str = Field(..., min_length=3, max_length=2000)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        v = v.strip()
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("URL must start with http:// or https://")
+        return v
 
 
 @app.get("/api/agents")
@@ -317,6 +343,195 @@ async def update_config(req: ConfigApiKeysRequest):
     except Exception as e:
         logger.error(f"Config error: {e}")
         raise HTTPException(status_code=500, detail="Failed to configure providers")
+
+
+# ===== Saved Sessions (store / list / load / delete) =====
+
+
+@app.post("/api/sessions")
+async def save_session(req: SaveSessionRequest):
+    """Save the current agents + conversation to this computer for later."""
+    if not mesh.get_history():
+        raise HTTPException(
+            status_code=400,
+            detail="There is nothing to save yet - run a dialogue first, then save it.",
+        )
+    try:
+        meta = session_store.save_session(
+            name=req.name,
+            agents=mesh.list_agents(),
+            messages=[m.to_dict() for m in mesh.get_history()],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to save session: {e}")
+        raise HTTPException(status_code=500, detail="Could not save the session. Please try again.")
+    logger.info(f"Session saved: {meta['id']} ({meta['name']})")
+    return {"status": "saved", "session": meta}
+
+
+@app.get("/api/sessions")
+async def list_sessions():
+    """List all saved sessions, newest first."""
+    return {"sessions": session_store.list_sessions()}
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: str):
+    """Return one full saved session."""
+    data = session_store.get_session(session_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return data
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a saved session."""
+    if not session_store.delete_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"status": "deleted"}
+
+
+@app.post("/api/sessions/load")
+async def load_session(req: LoadSessionRequest):
+    """Restore agents + conversation from a saved session into the live mesh."""
+    data = session_store.get_session(req.session_id)
+    if not data:
+        raise HTTPException(
+            status_code=404,
+            detail="Session not found - it may have been deleted.",
+        )
+
+    try:
+        mesh.reset_to_session(data.get("agents", []))
+        messages = []
+        for m in data.get("messages", []):
+            clean = {k: v for k, v in m.items() if k != "formatted_time"}
+            messages.append(Message(**clean))
+        mesh.load_messages(messages)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Could not restore this session: {e}")
+    except Exception as e:
+        logger.error(f"Failed to load session {req.session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to load the session. Please try again.")
+
+    await broadcast_ws({
+        "type": "session_loaded",
+        "name": data.get("name"),
+        "agents": mesh.list_agents(),
+        "history": [m.to_dict() for m in mesh.get_history()],
+    })
+    logger.info(f"Session loaded: {data.get('name')} ({len(messages)} messages)")
+    return {"status": "loaded", "name": data.get("name"), "messages": len(messages)}
+
+
+# ===== Web page reader (feeds the Read-Aloud Studio) =====
+
+MAX_READ_CHARS = 60_000
+MAX_READ_BYTES = 1_000_000  # stop downloading pages bigger than ~1 MB
+
+
+def _html_to_text(raw_html: str) -> str:
+    """Reduce an HTML document to readable plain text (no external deps)."""
+    html_text = raw_html
+    # Drop non-content blocks entirely.
+    html_text = re.sub(r"(?is)<(script|style|noscript|svg|head|template)[^>]*>.*?</\1>", " ", html_text)
+    html_text = re.sub(r"(?is)<(nav|footer|form|iframe|button|select|dialog)[^>]*>.*?</\1>", " ", html_text)
+    # Line breaks for block-level tags.
+    html_text = re.sub(r"(?i)<br\s*/?>", "\n", html_text)
+    html_text = re.sub(r"(?i)</(p|div|h[1-6]|li|tr|section|article|pre|blockquote|table)>", "\n", html_text)
+    html_text = re.sub(r"(?i)<li[^>]*>", "- ", html_text)
+    # Remove every remaining tag.
+    text = re.sub(r"(?s)<[^>]+>", " ", html_text)
+    text = html.unescape(text)
+    # Tidy whitespace: one space per line, drop blank runs.
+    lines = [re.sub(r"[ \t\u00a0]+", " ", ln).strip() for ln in text.splitlines()]
+    text = "\n".join(ln for ln in lines if ln)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _extract_title(raw_html: str) -> str:
+    m = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw_html)
+    if m:
+        title = html.unescape(re.sub(r"(?s)<[^>]+>", " ", m.group(1)))
+        return re.sub(r"\s+", " ", title).strip()[:200]
+    return ""
+
+
+def fetch_page_text(url: str) -> Dict[str, Any]:
+    """
+    Fetch a public web page and reduce it to readable plain text.
+    Runs in a worker thread (called via ``asyncio.to_thread``).
+    """
+    resp = requests.get(
+        url,
+        timeout=15,
+        stream=True,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; ModuleMesh-Reader/1.0)"},
+    )
+    try:
+        resp.raise_for_status()
+        # Only read as much of the body as we need.
+        chunks = []
+        downloaded = 0
+        for chunk in resp.iter_content(chunk_size=65536):
+            chunks.append(chunk)
+            downloaded += len(chunk)
+            if downloaded >= MAX_READ_BYTES:
+                break
+        body = b"".join(chunks).decode("utf-8", errors="replace")
+    finally:
+        resp.close()
+
+    content_type = resp.headers.get("content-type", "")
+    title = ""
+    if "json" in content_type:
+        text = body
+    elif "html" in content_type or body.lstrip()[:1] == "<":
+        title = _extract_title(body)
+        text = _html_to_text(body)
+    else:
+        text = body
+
+    text = text.strip()
+    truncated = len(text) > MAX_READ_CHARS
+    return {"title": title, "text": text[:MAX_READ_CHARS], "truncated": truncated}
+
+
+@app.post("/api/read/url")
+async def read_url(req: ReadUrlRequest, request: Request):
+    """Fetch a web page and return its readable text (for reading aloud)."""
+    client_id = request.client.host if request.client else "unknown"
+    now = time.time()
+    last = _last_url_read_time.get(client_id, 0)
+    if now - last < URL_READ_COOLDOWN_SECONDS:
+        raise HTTPException(status_code=429, detail="Please wait a moment between page reads")
+    _last_url_read_time[client_id] = now
+
+    try:
+        data = await asyncio.to_thread(fetch_page_text, req.url)
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="That page took too long to load - try a different URL")
+    except requests.exceptions.RequestException as e:
+        raw = str(e)
+        if "404" in raw or "Not Found" in raw:
+            detail = "That page was not found (404) - double-check the link."
+        elif "403" in raw:
+            detail = "That site refused the request (403) - it may block automated readers. Try another page."
+        elif "Name or service not known" in raw or "getaddrinfo" in raw:
+            detail = "Could not find that address - check the URL for typos."
+        else:
+            detail = "Could not reach that page. Check the URL and your internet connection, then try again."
+        raise HTTPException(status_code=400, detail=detail)
+    except Exception as e:
+        logger.error(f"URL read failed for {req.url}: {e}")
+        raise HTTPException(status_code=500, detail="Could not read that page. Please try again.")
+
+    if not data["text"]:
+        raise HTTPException(status_code=422, detail="No readable text found at that URL")
+    return {"status": "ok", "url": req.url, **data}
 
 
 @app.post("/api/run")

@@ -114,6 +114,13 @@ class MessageBus:
         """Return a copy of the message history."""
         return list(self._history)
 
+    def set_history(self, messages: List[Message]) -> None:
+        """
+        Replace the message history (used when loading a saved session).
+        Keeps only the most recent ``max_history`` messages.
+        """
+        self._history = list(messages)[-self._max_history:]
+
     def clear_history(self) -> None:
         """Clear message history."""
         self._history.clear()

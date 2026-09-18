@@ -253,3 +253,81 @@ input:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
 }
+
+/* ===== Read-Aloud Studio & speech controls ===== */
+
+.reader-tab {
+  background-color: #1e293b;
+  border-color: #334155;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+.reader-tab:hover {
+  background-color: #334155;
+}
+.reader-tab-active {
+  background-color: rgba(190, 24, 93, 0.25) !important;
+  border-color: rgba(157, 23, 77, 0.6) !important;
+  color: #f9a8d4 !important;
+}
+
+/* Per-message speaker button */
+.msg-speak-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid #334155;
+  background-color: #1e293b;
+  color: #f9a8d4;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.msg-speak-btn:hover,
+.msg-speak-btn:focus-visible {
+  background-color: rgba(190, 24, 93, 0.35);
+  outline: 2px solid #ec4899;
+  outline-offset: 1px;
+}
+.msg-speak-btn.speaking {
+  background-color: #be185d;
+  color: #fff;
+  animation: glowPulse 1.6s infinite ease-in-out;
+}
+
+/* Speaking status pulse in the reader bar */
+.speaking-pulse {
+  animation: speakingBlink 1.2s infinite ease-in-out;
+}
+@keyframes speakingBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+/* Dictation recording state */
+#btnDictate.recording {
+  background-color: #be185d !important;
+  color: #fff !important;
+  border-color: #ec4899 !important;
+  animation: glowPulse 1.6s infinite ease-in-out;
+}
+
+/* Saved sessions list rows */
+.session-row {
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.session-row:hover {
+  border-color: #475569;
+  background-color: rgba(51, 65, 85, 0.5);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .speaking-pulse,
+  .msg-speak-btn.speaking,
+  #btnDictate.recording {
+    animation: none;
+  }
+}
