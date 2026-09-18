@@ -1,6 +1,6 @@
 # MachineLearningMachine: Multi-Module Inter-Agent Communication Mesh
 
-[![Tests](https://img.shields.io/badge/tests-14%20passed-success)](https://github.com/StepenkoAnatoli/machinelearningmachine)
+[![Tests](https://img.shields.io/badge/tests-21%20passed-success)](https://github.com/StepenkoAnatoli/machinelearningmachine)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-teal)](https://fastapi.tiangolo.com)
 [![WebSocket](https://img.shields.io/badge/WebSocket-Real--Time-orange)](https://websockets.readthedocs.io/)
@@ -62,18 +62,53 @@ A modular orchestration system that enables AI modules to talk directly to each 
 
 ### 1. Installation
 
+The package depends on **pydantic**, **fastapi**, **uvicorn**, **aiohttp**, **requests**, and **websockets**. Install the project *and* its dependencies — running the code straight from a bare interpreter fails with `ModuleNotFoundError: No module named 'pydantic'`.
+
 ```bash
 git clone https://github.com/StepenkoAnatoli/machinelearningmachine.git
 cd machinelearningmachine
-pip install -e .
+
+python -m pip install -e .        # macOS / Linux
+py -m pip install -e .            # Windows
 ```
+
+Equivalent: `pip install -r requirements.txt` (plus `pip install -e .` if you want the `module-mesh` command).
+
+> **Tip:** prefer a virtual environment so the dependencies land in the same interpreter you run the code with:
+> ```bash
+> # macOS / Linux
+> python3 -m venv .venv && source .venv/bin/activate && python -m pip install -e .
+> # Windows (PowerShell)
+> py -m venv .venv ; .\.venv\Scripts\Activate.ps1 ; py -m pip install -e .
+> ```
 
 ### 2. Launch the Interactive Web Dashboard
 
 ```bash
-python3 -m machinelearningmachine.cli serve --host 0.0.0.0 --port 8000
+python -m machinelearningmachine.cli serve --host 0.0.0.0 --port 8000
+# or, equivalently:
+python -m machinelearningmachine
 ```
+
 Open `http://localhost:8000` (or the live preview port) in your browser to access the real-time visual dashboard.
+
+#### Troubleshooting: `ModuleNotFoundError: No module named 'pydantic'`
+
+This means the dependencies were never installed into the Python interpreter that is running the code — not a problem with the package itself. Fix it with:
+
+```bash
+cd machinelearningmachine        # the folder containing pyproject.toml
+py -m pip install -e .           # Windows  (python -m pip install -e . on macOS/Linux)
+```
+
+If the error persists, you are likely using a different interpreter than the one you installed into. Compare these two commands — they must point at the same environment:
+
+```bash
+py -m pip --version
+py -c "import sys; print(sys.executable)"
+```
+
+Other modules import only what they need: the simulation engine and CLI dialogues work with `pydantic` alone, and `fastapi`/`uvicorn` are only required for the web dashboard.
 
 ---
 

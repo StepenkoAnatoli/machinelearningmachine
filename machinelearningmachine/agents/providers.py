@@ -7,12 +7,24 @@ LLM Provider abstractions supporting:
 """
 
 import os
-import aiohttp
 import logging
 from typing import List, Dict, Any, Optional
+from .._deps import install_hint
 from ..protocol.message import Message, MessageType
 
 logger = logging.getLogger("LLMProviders")
+
+
+def _aiohttp():
+    """
+    Import aiohttp lazily: the mock/simulation engine and every topology work
+    without it, so it is only needed once a live HTTP API is actually called.
+    """
+    try:
+        import aiohttp
+    except ImportError:
+        raise ImportError(install_hint("aiohttp")) from None
+    return aiohttp
 
 
 class BaseLLMProvider:
@@ -255,7 +267,7 @@ class OpenAIProvider(BaseLLMProvider):
             "temperature": 0.7,
         }
 
-        async with aiohttp.ClientSession() as session:
+        async with _aiohttp().ClientSession() as session:
             async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
                 if resp.status != 200:
                     err_txt = await resp.text()
@@ -307,7 +319,7 @@ class AnthropicProvider(BaseLLMProvider):
             "max_tokens": 2048,
         }
 
-        async with aiohttp.ClientSession() as session:
+        async with _aiohttp().ClientSession() as session:
             async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
                 if resp.status != 200:
                     err_txt = await resp.text()
