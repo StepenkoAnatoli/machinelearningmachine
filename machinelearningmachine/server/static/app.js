@@ -10,6 +10,11 @@ document.addEventListener("DOMContentLoaded", () => {
   let wsReconnectAttempts = 0;
   const MAX_RECONNECT_ATTEMPTS = 10;
   let searchFilter = "";
+  // Bounded by the server's own limit (sent in the WS "init" payload) so a tab
+  // left open for weeks cannot grow the transcript array forever.
+  let maxMessagesClient = 1000;
+  let urlReaderEnabled = true;
+  let authenticated = true;
 
   // DOM Elements
   const canvas = document.getElementById("topologyCanvas");
@@ -135,6 +140,127 @@ document.addEventListener("DOMContentLoaded", () => {
     setTimeout(() => {
       if (toast.parentNode) toast.parentNode.removeChild(toast);
     }, 300);
+  }
+
+  // ===== API access =====
+  // One wrapper for every call: JSON in, and a 401 reveals the token prompt
+  // instead of failing silently (the server requires a token when it is bound
+  // to a non-loopback interface).
+  async function apiFetch(url, options) {
+    const opts = Object.assign({}, options || {});
+    if (opts.body && typeof opts.body !== "string") opts.body = JSON.stringify(opts.body);
+    if (opts.body) {
+      opts.headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+    }
+    opts.credentials = opts.credentials || "same-origin";
+    let resp;
+    try {
+      resp = await fetch(url, opts);
+    } catch (e) {
+      if (url.indexOf("/api/auth/") !== 0) showAuthPanel("Cannot reach the server - is it still running?");
+      throw e;
+    }
+    if (resp.status === 401 && url.indexOf("/api/auth/") !== 0) {
+      showAuthPanel();
+      authenticated = false;
+    } else if (resp.ok && url.indexOf("/api/auth/") === 0) {
+      authenticated = true;
+    }
+    return resp;
+  }
+
+  function authPanel() {
+    return document.getElementById("authPanel");
+  }
+
+  function showAuthPanel(message) {
+    const panel = authPanel();
+    if (!panel) return;
+    panel.classList.remove("hidden");
+    const hint = document.getElementById("authPanelHint");
+    if (hint && message) setText(hint, message);
+    const input = document.getElementById("authTokenInput");
+    if (input && document.activeElement !== input) input.focus();
+  }
+
+  function hideAuthPanel() {
+    const panel = authPanel();
+    if (panel) panel.classList.add("hidden");
+  }
+
+  function wireAuthPanel() {
+    const form = document.getElementById("authForm");
+    if (!form) return;
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = document.getElementById("authTokenInput");
+      const status = document.getElementById("authPanelHint");
+      const token = (input && input.value ? input.value : "").trim();
+      if (!token) {
+        if (status) setText(status, "Paste the token the server was started with.");
+        return;
+      }
+      try {
+        const resp = await apiFetch("/api/auth/login", { method: "POST", body: { token: token } });
+        if (resp.ok) {
+          if (input) input.value = "";
+          hideAuthPanel();
+          showToast("Signed in - this browser has its own mesh", "success");
+          reconnectWebSocket();
+          refreshMeshState();
+        } else {
+          const data = await resp.json().catch(() => ({}));
+          if (status) setText(status, data.detail || "That token was not accepted.");
+        }
+      } catch (err) {
+        if (status) setText(status, "Could not reach the server.");
+      }
+    });
+  }
+
+  /** Pull agents/history/limits after signing in or loading a session. */
+  async function refreshMeshState() {
+    try {
+      const [agentsResp, statusResp] = await Promise.all([
+        apiFetch("/api/agents"),
+        apiFetch("/api/status"),
+      ]);
+      if (agentsResp.ok) {
+        agents = await agentsResp.json();
+        renderAgentList();
+        requestRedraw(true);
+      }
+      if (statusResp.ok) applyStatus(await statusResp.json());
+    } catch (e) {
+      /* the WebSocket will bring state anyway */
+    }
+  }
+
+  function applyStatus(status) {
+    if (!status) return;
+    const mode = status.provider_mode || "simulated";
+    if (mode === "simulated") {
+      setModeBanner({
+        live: false,
+        text: "Simulation mode: answers come from the built-in template simulator. No model was called, and no generated code was run or tested.",
+      });
+    } else if (mode === "unverified") {
+      setModeBanner({
+        live: true,
+        text: "Provider configured but not verified" + ((status.last_run_warnings || []).length
+          ? ` - last run reported: ${status.last_run_warnings.join("; ")}` : ""),
+      });
+    } else {
+      setModeBanner({
+        live: true,
+        text: "Live providers configured for this browser session only (keys are never saved to disk).",
+      });
+    }
+    const msgs = document.getElementById("statusSessionInfo");
+    if (msgs) {
+      setText(msgs, `${status.agents || 0} modules · ${status.messages || 0} messages · ` +
+        `${status.live_sessions || 0} live session(s) on this server`);
+    }
   }
 
   function escapeHtml(str) {
@@ -406,30 +532,64 @@ document.addEventListener("DOMContentLoaded", () => {
     SpeechKit.speak(msg.content, { label: msg.sender_name || "Message", msgId: id });
   }
 
-  // Safe markdown parsing - prevent XSS
-  function safeMarkdownParse(content) {
-    try {
-      // Configure marked to not allow raw HTML for security
-      if (typeof marked !== "undefined") {
-        marked.setOptions({
-          gfm: true,
-          breaks: true,
-          sanitize: false, // We'll sanitize via escaping
-        });
-        let html = marked.parse(content);
-        // Basic XSS protection - remove script tags and event handlers
-        // In production, use DOMPurify, but this is a lightweight alternative
-        html = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
-        html = html.replace(/on\w+="[^"]*"/gi, "");
-        html = html.replace(/on\w+='[^']*'/gi, "");
-        html = html.replace(/javascript:/gi, "");
-        return html;
-      }
-      return `<pre class="text-xs whitespace-pre-wrap">${escapeHtml(content)}</pre>`;
-    } catch (e) {
-      return `<pre class="text-xs whitespace-pre-wrap">${escapeHtml(content)}</pre>`;
-    }
+  // ===== Safe rendering of untrusted text =====
+  // The implementation lives in markdown.js (loaded before this file) because it
+  // is the app's XSS boundary and is unit-tested under jsdom in
+  // tests/js/sanitize.test.mjs. If that file ever fails to load, this shim keeps
+  // the app alive by rendering escaped plain text instead of unsanitised HTML.
+  const MeshRender = window.MeshRender || {
+    render(content) {
+      const frag = document.createDocumentFragment();
+      const pre = document.createElement("pre");
+      pre.className = "md-plain";
+      pre.textContent = content == null ? "" : String(content);
+      frag.appendChild(pre);
+      return frag;
+    },
+    renderToString(content) {
+      const holder = document.createElement("div");
+      holder.appendChild(this.render(content));
+      return holder.innerHTML;
+    },
+    safeColor: (value, fallback) =>
+      /^#[0-9a-fA-F]{6}$/.test(String(value || "").trim()) ? String(value).trim() : fallback || "#8b5cf6",
+    safeAvatar: (value, fallback) => {
+      const text = String(value == null ? "" : value).trim().slice(0, 8);
+      const clean = text && !/[<>"'&;=()\[\]{}%`\\/|]/.test(text) ? text : "";
+      return clean || (fallback == null ? "" : String(fallback));
+    },
+    setText,
+    paintChip,
+    sanitizerAvailable: () => false,
+  };
+
+  function renderMarkdownFragment(content) {
+    return MeshRender.render(content);
   }
+
+  /** Render markdown to a sanitized HTML string (only where a string is needed). */
+  function safeMarkdownParse(content) {
+    return MeshRender.renderToString(content);
+  }
+
+  /** Set text safely; used everywhere a value came from a user or a file. */
+  function setText(el, value) {
+    if (el) el.textContent = value == null ? "" : String(value);
+    return el;
+  }
+
+  function safeColor(value, fallback) {
+    return MeshRender.safeColor(value, fallback);
+  }
+
+  function paintChip(el, color, alphaSuffix) {
+    return MeshRender.paintChip(el, color, alphaSuffix);
+  }
+
+  function isAuthError(resp) {
+    return resp && resp.status === 401;
+  }
+
 
   // Focus trap for modals - accessibility
   function trapFocus(modal) {
@@ -506,11 +666,26 @@ document.addEventListener("DOMContentLoaded", () => {
     inputPrompt.style.height = Math.min(inputPrompt.scrollHeight, 200) + "px";
   }
 
-  // ===== Canvas Handling - Performance Optimized =====
+  // ===== Canvas Handling - draws only while something is actually moving =====
   let animationFrameId = null;
   let needsRedraw = true;
   let lastDrawTime = 0;
   const DRAW_THROTTLE = 1000 / 30; // 30fps max to save battery
+
+  /** Ask for a frame. The loop runs only while the graph has work to do. */
+  function requestRedraw(force) {
+    if (force) needsRedraw = true;
+    if (animationFrameId === null && !document.hidden && canvas && ctx) {
+      animationFrameId = requestAnimationFrame(drawCanvas);
+    }
+  }
+
+  function stopRedraw() {
+    if (animationFrameId !== null) {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
+    }
+  }
 
   function resizeCanvas() {
     if (!canvas) return;
@@ -520,7 +695,7 @@ document.addEventListener("DOMContentLoaded", () => {
     canvas.style.width = rect.width + "px";
     canvas.style.height = rect.height + "px";
     if (ctx) ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-    needsRedraw = true;
+    requestRedraw(true);
   }
 
   window.addEventListener("resize", resizeCanvas);
@@ -529,13 +704,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // Pause animation when tab is not visible - battery saving
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
-      if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-        animationFrameId = null;
-      }
+      stopRedraw();
     } else {
-      needsRedraw = true;
-      if (!animationFrameId) requestAnimationFrame(drawCanvas);
+      requestRedraw(true);
     }
   });
 
@@ -586,13 +757,22 @@ document.addEventListener("DOMContentLoaded", () => {
   function handleWsEvent(data) {
     if (data.type === "init") {
       agents = data.agents || [];
-      messages = data.history || [];
+      messages = (data.history || []).slice(-maxMessagesClient);
+      authenticated = data.authenticated !== false;
+      if (data.limits && data.limits.max_messages_client) {
+        maxMessagesClient = data.limits.max_messages_client;
+        messages = messages.slice(-maxMessagesClient);
+      }
+      if (data.flags) urlReaderEnabled = data.flags.url_reader_enabled !== false;
+      applyReaderAvailability();
+      hideAuthPanel();
       renderAgentList();
       renderAllMessages();
-      needsRedraw = true;
+      requestRedraw(true);
     } else if (data.type === "new_message") {
       const msg = data.message;
       messages.push(msg);
+      trimMessages();
       // Only append if passes search filter
       if (!searchFilter ||
           msg.content.toLowerCase().includes(searchFilter.toLowerCase()) ||
@@ -603,26 +783,29 @@ document.addEventListener("DOMContentLoaded", () => {
         updateMessageCount();
       }
       triggerPacketAnimation(msg.sender_id, msg.recipient_id);
-      needsRedraw = true;
+      requestRedraw(true);
       // Read replies aloud automatically (skips short system notices)
       if (SpeechKit.isAutoRead() && msg.message_type !== "system") {
         SpeechKit.speak(msg.content, { label: msg.sender_name || "Message", msgId: msg.id });
       }
     } else if (data.type === "session_loaded") {
       agents = data.agents || [];
-      messages = data.history || [];
+      messages = (data.history || []).slice(-maxMessagesClient);
       searchFilter = "";
+      showAllMatching = false;
       if (searchInput) searchInput.value = "";
       renderAgentList();
       renderAllMessages();
-      needsRedraw = true;
+      requestRedraw(true);
       showToast(`Session "${data.name || ""}" loaded - conversation restored`, "success", 4000);
     } else if (data.type === "agents_updated") {
       agents = data.agents || [];
       renderAgentList();
-      needsRedraw = true;
+      requestRedraw(true);
     } else if (data.type === "history_cleared") {
       messages = [];
+      showAllMatching = false;
+      setModeBanner(null);
       renderAllMessages();
       showToast("Session cleared successfully", "success");
     } else if (data.type === "run_started") {
@@ -636,25 +819,68 @@ document.addEventListener("DOMContentLoaded", () => {
       btnRun.disabled = false;
       btnRun.innerHTML = '<i class="fa-solid fa-play" aria-hidden="true"></i><span>Execute Dialogue</span>';
       btnRun.removeAttribute("aria-busy");
+      requestRedraw(true); // one last frame so the graph settles without a live loop
       if (data.type === "run_error") {
         showToast("Dialogue failed: " + (data.error || "Unknown error"), "error", 5000);
+      } else if (data.simulated_count) {
+        showToast(`${data.simulated_count} simulated answer${data.simulated_count === 1 ? "" : "s"} - nothing was executed or tested`, "warning", 6000);
       } else {
-        showToast("Dialogue completed successfully!", "success");
+        showToast("Dialogue completed", "success");
       }
     }
   }
 
-  // Optimized canvas drawing with throttling
+  // ===== Provider-mode banner =====
+  /** Say out loud what produced the transcript the user is looking at. */
+  function setModeBanner(info) {
+    const banner = document.getElementById("modeBanner");
+    if (!banner) return;
+    if (!info) {
+      banner.classList.add("hidden");
+      banner.replaceChildren();
+      return;
+    }
+    banner.classList.remove("hidden");
+    banner.replaceChildren();
+    const icon = document.createElement("i");
+    icon.className = "fa-solid " + (info.live ? "fa-plug-circle-check" : "fa-flask");
+    icon.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span");
+    text.textContent = info.text;
+    banner.appendChild(icon);
+    banner.appendChild(text);
+  }
+
+  // ===== Availability of the (opt-in) page reader =====
+  function applyReaderAvailability() {
+    const btn = document.getElementById("btnReadUrl");
+    const hint = document.getElementById("readerUrlHint");
+    if (!btn) return;
+    if (urlReaderEnabled) {
+      btn.disabled = false;
+      if (hint) hint.classList.add("hidden");
+      return;
+    }
+    btn.disabled = true;
+    btn.title = "Disabled by the server";
+    if (hint) {
+      hint.classList.remove("hidden");
+      setText(hint, "Reading web pages is disabled on this server. Start it with --enable-url-reader.");
+    }
+  }
+
   function drawCanvas(timestamp = 0) {
-    animationFrameId = requestAnimationFrame(drawCanvas);
-    
-    // Throttle drawing
+    animationFrameId = null;
+
+    if (!ctx || !canvas || document.hidden) {
+      return; // no loop while the tab is hidden or the canvas is gone
+    }
+
+    // Throttle, but never below the "something moved" signal.
     if (timestamp - lastDrawTime < DRAW_THROTTLE && !needsRedraw && !activePacket && !isExecuting) {
       return;
     }
     lastDrawTime = timestamp;
-    
-    if (!ctx || !canvas) return;
     
     const w = canvas.width / window.devicePixelRatio;
     const h = canvas.height / window.devicePixelRatio;
@@ -723,7 +949,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (activePacket.progress >= 1.0) {
           activePacket = null;
         }
-        needsRedraw = true;
+        needsRedraw = true; // keeps this frame's follow-up scheduled
       } else {
         activePacket = null;
       }
@@ -754,11 +980,18 @@ document.addEventListener("DOMContentLoaded", () => {
       ctx.fillStyle = "#cbd5e1";
       ctx.fillText(node.name, node.x, node.y + radius + 14);
     }
-    
+
     needsRedraw = false;
+
+    // Only keep the loop alive if the packet is still in flight or a run is
+    // executing. An idle graph costs nothing: no frame, no CPU.
+    if (activePacket || isExecuting || needsRedraw) {
+      requestRedraw();
+    }
   }
 
   function triggerPacketAnimation(fromId, toId) {
+    // Any new packet restarts the loop if it had gone idle.
     const color = nodePositions[fromId]?.color || "#a855f7";
     activePacket = {
       fromId: fromId,
@@ -769,27 +1002,32 @@ document.addEventListener("DOMContentLoaded", () => {
     needsRedraw = true;
   }
 
-  // Render Registered Modules - with accessibility
+  // Render Registered Modules.
+  // Names, roles, colours and avatars are user-supplied (POST /api/agents, or a
+  // hand-edited saved-session file), so they are written with textContent and
+  // CSSOM - never interpolated into an HTML string.
   function renderAgentList() {
-    agentCountBadge.textContent = `${agents.length} Modules`;
+    setText(agentCountBadge, `${agents.length} Modules`);
     agentCountBadge.setAttribute("aria-label", `${agents.length} modules registered`);
 
     const currentA = selectAgentA.value;
     const currentB = selectAgentB.value;
-    selectAgentA.innerHTML = "";
-    selectAgentB.innerHTML = "";
-    moduleList.innerHTML = "";
+    selectAgentA.replaceChildren();
+    selectAgentB.replaceChildren();
+    moduleList.replaceChildren();
 
     agents.forEach((ag, idx) => {
+      const roleShort = String(ag.role || "").split("&")[0].trim();
+
       const optA = document.createElement("option");
-      optA.value = ag.agent_id;
-      optA.textContent = `${ag.name} (${ag.role.split("&")[0].trim()})`;
+      optA.value = String(ag.agent_id || "");
+      optA.textContent = `${ag.name || ag.agent_id} (${roleShort})`;
       if (ag.agent_id === currentA || (!currentA && idx === 0)) optA.selected = true;
       selectAgentA.appendChild(optA);
 
       const optB = document.createElement("option");
-      optB.value = ag.agent_id;
-      optB.textContent = `${ag.name} (${ag.role.split("&")[0].trim()})`;
+      optB.value = String(ag.agent_id || "");
+      optB.textContent = `${ag.name || ag.agent_id} (${roleShort})`;
       if (ag.agent_id === currentB || (!currentB && idx === 1)) optB.selected = true;
       selectAgentB.appendChild(optB);
 
@@ -797,104 +1035,194 @@ document.addEventListener("DOMContentLoaded", () => {
       item.className = "agent-card p-2.5 rounded-lg bg-slate-800/70 border border-slate-700/60 flex items-center justify-between cursor-pointer";
       item.setAttribute("role", "button");
       item.setAttribute("tabindex", "0");
-      item.setAttribute("aria-label", `${ag.name}, ${ag.role}`);
-      item.innerHTML = `
-        <div class="flex items-center space-x-2.5 overflow-hidden">
-          <div class="w-7 h-7 rounded-md flex items-center justify-center text-sm font-bold flex-shrink-0" style="background-color: ${ag.color}25; border: 1px solid ${ag.color}" aria-hidden="true">
-            ${ag.avatar}
-          </div>
-          <div class="truncate">
-            <h4 class="text-xs font-semibold text-slate-200 truncate">${escapeHtml(ag.name)}</h4>
-            <p class="text-[10px] text-slate-400 truncate">${escapeHtml(ag.role)}</p>
-          </div>
-        </div>
-        <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400">
-          ${escapeHtml(ag.provider || 'Mock')}
-        </span>
-      `;
-      
-      // Click to show agent details
-      item.addEventListener("click", () => {
-        showToast(`${ag.name}: ${ag.role}. Provider: ${ag.provider || 'Mock Simulator'}`, "info", 3000);
-      });
+      item.setAttribute("aria-label", `${ag.name || "module"}, ${roleShort}`);
+
+      const left = document.createElement("div");
+      left.className = "flex items-center space-x-2.5 overflow-hidden";
+
+      const chip = document.createElement("div");
+      chip.className = "w-7 h-7 rounded-md flex items-center justify-center text-sm font-bold flex-shrink-0";
+      chip.setAttribute("aria-hidden", "true");
+      paintChip(chip, ag.color, "25");
+      setText(chip, MeshRender.safeAvatar(ag.avatar, "🤖"));
+
+      const names = document.createElement("div");
+      names.className = "truncate";
+      const title = document.createElement("h4");
+      title.className = "text-xs font-semibold text-slate-200 truncate";
+      setText(title, ag.name || ag.agent_id);
+      const sub = document.createElement("p");
+      sub.className = "text-[10px] text-slate-400 truncate";
+      setText(sub, ag.role || "");
+      names.appendChild(title);
+      names.appendChild(sub);
+
+      left.appendChild(chip);
+      left.appendChild(names);
+
+      const kind = ag.provider_kind === "live" ? `Live: ${ag.provider || ""}` : "Simulator";
+      const prov = document.createElement("span");
+      prov.className = "text-[10px] font-mono px-1.5 py-0.5 rounded border " +
+        (ag.provider_kind === "live"
+          ? "bg-emerald-950 border-emerald-800 text-emerald-300"
+          : "bg-slate-900 border-slate-800 text-slate-400");
+      setText(prov, kind);
+
+      item.appendChild(left);
+      item.appendChild(prov);
+
+      const detail = `${ag.name || "module"}: ${ag.role || ""}. ${kind}`;
+      item.addEventListener("click", () => showToast(detail, "info", 3000));
       item.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           item.click();
         }
       });
-      
+
       moduleList.appendChild(item);
     });
   }
 
-  function updateMessageCount() {
-    const visibleCount = searchFilter 
-      ? messages.filter(m => 
-          m.content.toLowerCase().includes(searchFilter.toLowerCase()) ||
-          m.sender_name.toLowerCase().includes(searchFilter.toLowerCase())
-        ).length
-      : messages.length;
-    
+  function updateMessageCount(visibleCount) {
+    const total = messages.length;
+    const shown = typeof visibleCount === "number" ? visibleCount : total;
     if (searchFilter) {
-      msgCountBadge.textContent = `${visibleCount} / ${messages.length} messages`;
+      setText(msgCountBadge, `${shown} / ${total} messages`);
+    } else if (shown < total) {
+      setText(msgCountBadge, `Showing last ${shown} of ${total} messages`);
     } else {
-      msgCountBadge.textContent = `${messages.length} message${messages.length === 1 ? '' : 's'}`;
+      setText(msgCountBadge, `${total} message${total === 1 ? "" : "s"}`);
     }
+  }
+
+  // ===== Transcript rendering =====
+  // Two separate bounds, both taken from the server:
+  //  * `messages` never grows past max_messages_client (the bus limit), so a
+  //    tab left open for days cannot eat all the memory;
+  //  * at most RENDER_WINDOW cards are in the DOM at once, which keeps a long
+  //    transcript scrollable without a thousand live nodes.
+  const RENDER_WINDOW = 200;
+  let showAllMatching = false;
+
+  function trimMessages() {
+    const limit = maxMessagesClient || messages.length;
+    if (messages.length > limit) {
+      messages.splice(0, messages.length - limit);
+    }
+  }
+
+  function messageMatches(msg) {
+    if (!searchFilter) return true;
+    const needle = searchFilter.toLowerCase();
+    return [msg.content, msg.sender_name, msg.message_type]
+      .some((field) => String(field || "").toLowerCase().includes(needle));
+  }
+
+  function filteredMessages() {
+    return messages.filter(messageMatches);
   }
 
   // Render Transcript Messages - with search and accessibility
   function renderAllMessages() {
-    messagesContainer.innerHTML = "";
+    messagesContainer.replaceChildren();
     if (messages.length === 0) {
       if (emptyPlaceholder) emptyPlaceholder.style.display = "flex";
-      msgCountBadge.textContent = "0 messages";
+      setText(msgCountBadge, "0 messages");
       return;
     }
     if (emptyPlaceholder) emptyPlaceholder.style.display = "none";
 
-    const filtered = searchFilter
-      ? messages.filter(m => 
-          m.content.toLowerCase().includes(searchFilter.toLowerCase()) ||
-          m.sender_name.toLowerCase().includes(searchFilter.toLowerCase()) ||
-          m.message_type.toLowerCase().includes(searchFilter.toLowerCase())
-        )
-      : messages;
-
-    updateMessageCount();
-
+    const filtered = filteredMessages();
     if (filtered.length === 0 && searchFilter) {
       const noResults = document.createElement("div");
       noResults.className = "text-center py-8 text-slate-400";
-      noResults.innerHTML = `
-        <i class="fa-solid fa-search text-2xl mb-2 opacity-50"></i>
-        <p class="text-sm">No messages match "${escapeHtml(searchFilter)}"</p>
-        <button class="mt-2 text-xs text-indigo-400 hover:text-indigo-300 underline" onclick="document.getElementById('searchMessages').value=''; document.getElementById('searchMessages').dispatchEvent(new Event('input'))">
-          Clear search
-        </button>
-      `;
+      const icon = document.createElement("i");
+      icon.className = "fa-solid fa-search text-2xl mb-2 opacity-50";
+      icon.setAttribute("aria-hidden", "true");
+      const label = document.createElement("p");
+      label.className = "text-sm";
+      setText(label, `No messages match "${searchFilter}"`);
+      const clear = document.createElement("button");
+      clear.className = "mt-2 text-xs text-indigo-400 hover:text-indigo-300 underline";
+      clear.type = "button";
+      setText(clear, "Clear search");
+      clear.addEventListener("click", () => {
+        searchFilter = "";
+        if (searchInput) searchInput.value = "";
+        renderAllMessages();
+      });
+      noResults.appendChild(icon);
+      noResults.appendChild(label);
+      noResults.appendChild(clear);
       messagesContainer.appendChild(noResults);
+      updateMessageCount(0);
       return;
     }
 
-    filtered.forEach((msg) => {
-      appendMessageToFeed(msg, false);
-    });
-    scrollFeedToBottom();
+    let windowed = filtered;
+    if (!showAllMatching && filtered.length > RENDER_WINDOW) {
+      const hidden = filtered.length - RENDER_WINDOW;
+      windowed = filtered.slice(hidden);
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "w-full text-[11px] py-1.5 mb-2 rounded bg-slate-800/70 border border-slate-700 text-slate-400 hover:text-slate-200";
+      setText(more, `Show ${Math.min(hidden, RENDER_WINDOW)} earlier message${hidden === 1 ? "" : "s"} (${hidden} not in view)`);
+      more.addEventListener("click", () => {
+        showAllMatching = true;
+        renderAllMessages();
+      });
+      messagesContainer.appendChild(more);
+    } else if (showAllMatching && filtered.length > RENDER_WINDOW) {
+      windowed = filtered;
+    }
+
+    updateMessageCount(windowed.length);
+    windowed.forEach((msg) => appendMessageToFeed(msg, false));
+    if (!searchFilter) scrollFeedToBottom();
   }
 
-  function appendMessageToFeed(msg, autoScroll = true) {
-    if (emptyPlaceholder) emptyPlaceholder.style.display = "none";
-    updateMessageCount();
-
+  function buildMessageCard(msg) {
     const card = document.createElement("div");
     card.className = "msg-bubble p-4 rounded-xl bg-slate-800/50 border border-slate-700/60 shadow-md space-y-2";
     card.setAttribute("role", "article");
-    card.setAttribute("aria-label", `Message from ${msg.sender_name}, type ${msg.message_type}`);
+    card.setAttribute("aria-label", `Message from ${msg.sender_name || "module"}, type ${msg.message_type || "message"}`);
 
+    const meta = msg.metadata || {};
     const agentObj = agents.find((a) => a.agent_id === msg.sender_id) || {};
-    const color = agentObj.color || "#8b5cf6";
-    const avatar = agentObj.avatar || "🤖";
+
+    const header = document.createElement("div");
+    header.className = "flex items-center justify-between border-b border-slate-700/40 pb-2";
+
+    const headLeft = document.createElement("div");
+    headLeft.className = "flex items-center space-x-2.5";
+
+    const chip = document.createElement("div");
+    chip.className = "w-6 h-6 rounded-md flex items-center justify-center text-xs";
+    chip.setAttribute("aria-hidden", "true");
+    paintChip(chip, agentObj.color, "30");
+    setText(chip, MeshRender.safeAvatar(agentObj.avatar, "🤖"));
+
+    const who = document.createElement("span");
+    who.className = "text-xs font-bold text-slate-200";
+    setText(who, msg.sender_name || msg.sender_id || "module");
+
+    headLeft.appendChild(chip);
+    headLeft.appendChild(who);
+
+    const target = document.createElement("span");
+    if (msg.recipient_id && msg.recipient_id !== "*") {
+      target.className = "text-[11px] font-medium text-slate-400";
+      const at = document.createElement("span");
+      at.className = "text-indigo-400 font-semibold";
+      setText(at, `@${msg.recipient_name || msg.recipient_id}`);
+      target.textContent = "→ ";
+      target.appendChild(at);
+    } else {
+      target.className = "text-[11px] text-slate-500";
+      setText(target, "(broadcast)");
+    }
+    headLeft.appendChild(target);
 
     const badgeColorMap = {
       task_spec: "bg-purple-900/40 text-purple-300 border-purple-700/60",
@@ -904,51 +1232,82 @@ document.addEventListener("DOMContentLoaded", () => {
       consensus: "bg-emerald-900/40 text-emerald-300 border-emerald-700/60",
       system: "bg-slate-800 text-slate-300 border-slate-700",
     };
-    const badgeClass = badgeColorMap[msg.message_type] || "bg-slate-800 text-slate-300 border-slate-700";
+    const badge = document.createElement("span");
+    badge.className = "text-[10px] uppercase font-mono px-2 py-0.5 rounded-full border " +
+      (badgeColorMap[msg.message_type] || "bg-slate-800 text-slate-300 border-slate-700");
+    setText(badge, String(msg.message_type || "message").replace("_", " "));
+    headLeft.appendChild(badge);
 
-    const targetBadge = msg.recipient_id !== "*"
-      ? `<span class="text-[11px] font-medium text-slate-400">→ <span class="text-indigo-400 font-semibold">@${escapeHtml(msg.recipient_name || msg.recipient_id)}</span></span>`
-      : `<span class="text-[11px] text-slate-500">(broadcast)</span>`;
+    // Provenance badge: simulated output must never look like a real answer.
+    if (meta.provider_error) {
+      const warn = document.createElement("span");
+      warn.className = "prov-badge prov-degraded";
+      warn.title = `${meta.provider_error} - the simulator answered instead`;
+      setText(warn, "provider failed → simulated");
+      headLeft.appendChild(warn);
+    } else if (meta.simulated) {
+      const sim = document.createElement("span");
+      sim.className = "prov-badge prov-sim";
+      sim.title = "Written by the built-in simulator: no model API call, no execution, no tests";
+      setText(sim, "simulated");
+      headLeft.appendChild(sim);
+    } else if (meta.provider) {
+      const live = document.createElement("span");
+      live.className = "prov-badge prov-live";
+      live.title = `Answer from ${meta.provider}`;
+      setText(live, "live");
+      headLeft.appendChild(live);
+    }
 
-    const parsedContent = safeMarkdownParse(msg.content);
+    const headRight = document.createElement("div");
+    headRight.className = "flex items-center gap-2";
+    const speakBtn = document.createElement("button");
+    speakBtn.className = "msg-speak-btn";
+    speakBtn.type = "button";
+    speakBtn.title = "Read this message aloud";
+    speakBtn.setAttribute("aria-label", "Read this message aloud");
+    speakBtn.innerHTML = '<i class="fa-solid fa-volume-high" aria-hidden="true"></i>';
+    const time = document.createElement("span");
+    time.className = "text-[10px] font-mono text-slate-500";
+    setText(time, msg.formatted_time || "");
+    headRight.appendChild(speakBtn);
+    headRight.appendChild(time);
 
-    card.innerHTML = `
-      <div class="flex items-center justify-between border-b border-slate-700/40 pb-2">
-        <div class="flex items-center space-x-2.5">
-          <div class="w-6 h-6 rounded-md flex items-center justify-center text-xs" style="background-color: ${color}30; border: 1px solid ${color}" aria-hidden="true">
-            ${avatar}
-          </div>
-          <span class="text-xs font-bold text-slate-200">${escapeHtml(msg.sender_name)}</span>
-          ${targetBadge}
-          <span class="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full border ${badgeClass}">
-            ${escapeHtml(msg.message_type.replace('_', ' '))}
-          </span>
-        </div>
-        <div class="flex items-center gap-2">
-          <button class="msg-speak-btn" data-msg-speak="${escapeHtml(msg.id || "")}" title="Read this message aloud" aria-label="Read this message aloud">
-            <i class="fa-solid fa-volume-high" aria-hidden="true"></i>
-          </button>
-          <span class="text-[10px] font-mono text-slate-500">${escapeHtml(msg.formatted_time || "")}</span>
-        </div>
-      </div>
-      <div class="text-xs text-slate-300 leading-relaxed prose prose-invert max-w-none prose-pre:bg-slate-950/80">
-        ${parsedContent}
-      </div>
-    `;
+    const body = document.createElement("div");
+    body.className = "md-body text-xs text-slate-300 leading-relaxed";
+    body.appendChild(renderMarkdownFragment(msg.content));
 
-    // Highlight code blocks and attach copy buttons
+    card.appendChild(header);
+    header.appendChild(headLeft);
+    header.appendChild(headRight);
+    card.appendChild(body);
+    card.dataset.msgId = String(msg.id || "");
+    speakBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      speakMessage(msg);
+    });
+    return card;
+  }
+
+  function appendMessageToFeed(msg, autoScroll = true) {
+    if (emptyPlaceholder) emptyPlaceholder.style.display = "none";
+
+    const card = buildMessageCard(msg);
+
+    // Highlight code blocks and attach copy buttons.
     card.querySelectorAll("pre code").forEach((block) => {
       if (typeof hljs !== "undefined") {
-        hljs.highlightElement(block);
+        try { hljs.highlightElement(block); } catch (e) { /* highlighting is cosmetic */ }
       }
       const pre = block.parentElement;
       pre.classList.add("code-container");
 
       const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
       copyBtn.className = "btn-copy-code";
       copyBtn.setAttribute("aria-label", "Copy code to clipboard");
       copyBtn.innerHTML = '<i class="fa-regular fa-copy" aria-hidden="true"></i> Copy';
-      copyBtn.onclick = async () => {
+      copyBtn.addEventListener("click", async () => {
         try {
           await navigator.clipboard.writeText(block.innerText);
           copyBtn.innerHTML = '<i class="fa-solid fa-check text-emerald-400" aria-hidden="true"></i> Copied!';
@@ -959,25 +1318,18 @@ document.addEventListener("DOMContentLoaded", () => {
         } catch (e) {
           showToast("Failed to copy code", "error");
         }
-      };
+      });
       pre.appendChild(copyBtn);
     });
-
-    // Per-message read-aloud button
-    const speakBtn = card.querySelector(".msg-speak-btn");
-    if (speakBtn) {
-      speakBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        speakMessage(msg);
-      });
-    }
 
     messagesContainer.appendChild(card);
 
     if (autoScroll) {
       scrollFeedToBottom();
     }
+    updateMessageCount(messagesContainer.querySelectorAll(".msg-bubble").length);
   }
+
 
   function scrollFeedToBottom() {
     // Only auto-scroll if user is near bottom
@@ -985,6 +1337,19 @@ document.addEventListener("DOMContentLoaded", () => {
     if (isNearBottom) {
       messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }
+  }
+
+  /** Drop and re-open the socket (after signing in, or when the server restarted). */
+  function reconnectWebSocket() {
+    wsReconnectAttempts = 0;
+    if (ws) {
+      try {
+        ws.onclose = null;
+        ws.close();
+      } catch (e) { /* already gone */ }
+      ws = null;
+    }
+    initWebSocket();
   }
 
   // ===== Event Handlers - User Centered =====
@@ -1056,10 +1421,13 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  wireAuthPanel();
+
   // Search messages
   if (searchInput) {
     searchInput.addEventListener("input", (e) => {
       searchFilter = e.target.value.trim();
+      showAllMatching = false;
       renderAllMessages();
     });
   }
@@ -1109,7 +1477,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     try {
-      const resp = await fetch("/api/run", {
+      const resp = await apiFetch("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1118,6 +1486,22 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({ detail: "Unknown error" }));
         showToast("Failed: " + (err.detail || "Unknown error"), "error", 5000);
+      } else {
+        const data = await resp.json().catch(() => ({}));
+        // Say what the transcript actually is - simulated vs. real provider output.
+        if (data && data.simulated) {
+          showToast(
+            "Done - these are simulated answers. Nothing was compiled, executed, or tested.",
+            "warning",
+            7000
+          );
+        } else if (data && data.partially_simulated) {
+          showToast("Part of this run fell back to the simulator - see the badges on the messages", "warning", 7000);
+        }
+        if (data && Array.isArray(data.provider_warnings) && data.provider_warnings.length) {
+          showToast("Provider problem: " + data.provider_warnings.join("; "), "error", 8000);
+        }
+        apiFetch("/api/status").then((r) => (r.ok ? r.json() : null)).then(applyStatus).catch(() => {});
       }
     } catch (err) {
       console.error("Run error:", err);
@@ -1138,7 +1522,7 @@ document.addEventListener("DOMContentLoaded", () => {
     btnConfirmClear.addEventListener("click", async () => {
       closeModal(clearConfirmModal);
       try {
-        const resp = await fetch("/api/clear", { method: "POST" });
+        const resp = await apiFetch("/api/clear", { method: "POST" });
         if (!resp.ok) {
           showToast("Failed to clear session", "error");
         }
@@ -1164,7 +1548,7 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       btnExportMd.disabled = true;
       btnExportMd.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Exporting...</span>';
-      const res = await fetch("/api/export/markdown");
+      const res = await apiFetch("/api/export/markdown");
       const data = await res.json();
       downloadFile("module_mesh_transcript.md", data.markdown, "text/markdown");
       showToast("Markdown exported successfully", "success");
@@ -1184,7 +1568,7 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       btnExportJson.disabled = true;
       btnExportJson.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Exporting...</span>';
-      const res = await fetch("/api/export/json");
+      const res = await apiFetch("/api/export/json");
       const data = await res.json();
       downloadFile("module_mesh_transcript.json", data.json, "application/json");
       showToast("JSON exported successfully", "success");
@@ -1281,7 +1665,7 @@ document.addEventListener("DOMContentLoaded", () => {
     submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Registering...';
 
     try {
-      const resp = await fetch("/api/agents", {
+      const resp = await apiFetch("/api/agents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1303,13 +1687,38 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  const btnClearProviders = document.getElementById("btnClearProviders");
+  if (btnClearProviders) {
+    btnClearProviders.addEventListener("click", async () => {
+      btnClearProviders.disabled = true;
+      try {
+        const resp = await apiFetch("/api/config", { method: "POST", body: { clear: true } });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) {
+          showToast(data.message || "Back to the built-in simulator.", "info", 3000);
+          const agentsResp = await apiFetch("/api/agents");
+          if (agentsResp.ok) { agents = await agentsResp.json(); renderAgentList(); }
+          apiFetch("/api/status").then((r) => (r.ok ? r.json() : null)).then(applyStatus).catch(() => {});
+        } else {
+          showToast(data.detail || "Could not clear providers", "error");
+        }
+      } catch (e) {
+        showToast("Network error", "error");
+      } finally {
+        btnClearProviders.disabled = false;
+      }
+    });
+  }
+
   // Settings form
   formSettings.addEventListener("submit", async (e) => {
     e.preventDefault();
+    const verifyBox = document.getElementById("inputVerifyKeys");
     const payload = {
       openai_api_key: document.getElementById("inputOpenAiKey").value.trim() || null,
       anthropic_api_key: document.getElementById("inputAnthropicKey").value.trim() || null,
       openai_base_url: document.getElementById("inputOpenAiBaseUrl").value.trim() || null,
+      verify: !!(verifyBox && verifyBox.checked),
     };
 
     const submitBtn = formSettings.querySelector('button[type="submit"]');
@@ -1318,16 +1727,20 @@ document.addEventListener("DOMContentLoaded", () => {
     submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
 
     try {
-      const resp = await fetch("/api/config", {
+      const resp = await apiFetch("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (resp.ok) {
-        const data = await resp.json();
+      if (resp.ok || resp.status === 200) {
+        const data = await resp.json().catch(() => ({}));
         closeModal(settingsModal);
-        showToast(data.message || "Configuration saved!", "success");
+        showToast(data.message || "Configuration saved for this session.", data.status === "partial" ? "warning" : "success", 7000);
         formSettings.reset();
+        apiFetch("/api/status").then((r) => (r.ok ? r.json() : null)).then(applyStatus).catch(() => {});
+        apiFetch("/api/agents").then((r) => (r.ok ? r.json() : null)).then((list) => {
+          if (Array.isArray(list)) { agents = list; renderAgentList(); }
+        }).catch(() => {});
       } else {
         const err = await resp.json().catch(() => ({ detail: "Failed" }));
         showToast(err.detail || "Failed to save configuration", "error");
@@ -1497,9 +1910,12 @@ document.addEventListener("DOMContentLoaded", () => {
       btnReadUrl.disabled = true;
       btnReadUrl.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i><span>Fetching...</span>';
       try {
-        const resp = await fetch("/api/read/url", {
+        if (!urlReaderEnabled) {
+          showToast("Reading web pages is disabled on this server (start it with --enable-url-reader)", "warning", 5000);
+          return;
+        }
+        const resp = await apiFetch("/api/read/url", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url }),
         });
         const data = await resp.json().catch(() => ({}));
@@ -1525,7 +1941,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function refreshSessions() {
     try {
-      const resp = await fetch("/api/sessions");
+      const resp = await apiFetch("/api/sessions");
       const data = await resp.json();
       const sessions = data.sessions || [];
       sessionsList.innerHTML = "";
@@ -1554,7 +1970,7 @@ document.addEventListener("DOMContentLoaded", () => {
           const btn = row.querySelector(".session-load");
           btn.disabled = true;
           try {
-            const resp = await fetch("/api/sessions/load", {
+            const resp = await apiFetch("/api/sessions/load", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ session_id: s.id }),
@@ -1575,7 +1991,7 @@ document.addEventListener("DOMContentLoaded", () => {
           const btn = row.querySelector(".session-del");
           btn.disabled = true;
           try {
-            const resp = await fetch("/api/sessions/" + encodeURIComponent(s.id), { method: "DELETE" });
+            const resp = await apiFetch("/api/sessions/" + encodeURIComponent(s.id), { method: "DELETE" });
             if (!resp.ok) showToast("Could not delete that session", "error");
             refreshSessions();
           } catch (e) {
@@ -1617,7 +2033,7 @@ document.addEventListener("DOMContentLoaded", () => {
       btnSaveSession.disabled = true;
       btnSaveSession.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i><span>Saving...</span>';
       try {
-        const resp = await fetch("/api/sessions", {
+        const resp = await apiFetch("/api/sessions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: name || null }),
@@ -1650,9 +2066,28 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Start
   initWebSocket();
-  requestAnimationFrame(drawCanvas);
+  // One frame to paint the graph; the loop then stops itself until a packet,
+  // a run, or a resize asks for another.
+  requestRedraw(true);
   initSpeechUI();
   initDictation();
+  applyReaderAvailability();
+
+  // Ask the server what it is actually running (auth, page reader, providers).
+  apiFetch("/api/auth/status")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((info) => {
+      if (!info) return;
+      authenticated = info.authenticated !== false;
+      urlReaderEnabled = info.url_reader_enabled !== false;
+      applyReaderAvailability();
+      if (info.auth_required && info.authenticated === false) showAuthPanel();
+    })
+    .catch(() => {})
+    .then(() => apiFetch("/api/status"))
+    .then((r) => (r.ok ? r.json() : null))
+    .then(applyStatus)
+    .catch(() => {});
 
   // Initial char count
   updateCharCount();

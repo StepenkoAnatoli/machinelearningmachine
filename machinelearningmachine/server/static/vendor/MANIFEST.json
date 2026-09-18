@@ -1,0 +1,55 @@
+{
+  "files": {
+    "dompurify/purify.min.js": {
+      "bytes": 29369,
+      "package": "dompurify",
+      "sri": "sha384-uUMu9JDY09vBzRf9SPcK2VgUj+W/70J6Soc+Dded5P474ElQ63iv9j5N3DE7Kp3N",
+      "version": "3.4.15"
+    },
+    "fontawesome/css/all.min.css": {
+      "bytes": 103009,
+      "package": "@fortawesome/fontawesome-free",
+      "sri": "sha384-PPIZEGYM1v8zp5Py7UjFb79S58UeqCL9pYVnVPURKEqvioPROaVAJKKLzvH2rDnI",
+      "version": "6.5.2"
+    },
+    "fontawesome/webfonts/fa-regular-400.woff2": {
+      "bytes": 25392,
+      "package": "@fortawesome/fontawesome-free",
+      "sri": "sha384-zjzkD/f/AiDmIjwMSJkzaQUW+eDxqWx7XzAu/614xFagzRIAkBIZ4Oe1fDnKVnQa",
+      "version": "6.5.2"
+    },
+    "fontawesome/webfonts/fa-solid-900.woff2": {
+      "bytes": 156400,
+      "package": "@fortawesome/fontawesome-free",
+      "sri": "sha384-/yPfwhDVE7kxMpMWSRkPuIptMPApLQTfaUaYRIdQExK4Nglm9fFgbaQZWq5HdhhV",
+      "version": "6.5.2"
+    },
+    "highlight.js/highlight.min.js": {
+      "bytes": 121727,
+      "package": "@highlightjs/cdn-assets",
+      "sri": "sha384-F/bZzf7p3Joyp5psL90p/p89AZJsndkSoGwRpXcZhleCWhd8SnRuoYo4d0yirjJp",
+      "version": "11.9.0"
+    },
+    "highlight.js/styles/atom-one-dark.min.css": {
+      "bytes": 856,
+      "package": "@highlightjs/cdn-assets",
+      "sri": "sha384-oaMLBGEzBOJx3UHwac0cVndtX5fxGQIfnAeFZ35RTgqPcYlbprH9o9PUV/F8Le07",
+      "version": "11.9.0"
+    },
+    "marked/marked.min.js": {
+      "bytes": 35479,
+      "package": "marked",
+      "sri": "sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi",
+      "version": "12.0.2"
+    },
+    "tailwind.css": {
+      "bytes": 25098,
+      "note": "compiled from static/index.html + static/app.js; regenerate, do not edit",
+      "package": "tailwindcss",
+      "sri": "sha384-1iAqJ55+k1h0JFN3VU7XGEpFaxEzfRFt3gyOdR2x7JxRS60MTibKhSF4cvRwZ+vC",
+      "version": "3.4.4"
+    }
+  },
+  "generated_by": "scripts/build_vendor.py",
+  "note": "Browser assets shipped with the app so the dashboard needs no CDN. Do not edit by hand - regenerate with `npm install && python3 scripts/build_vendor.py`."
+}
