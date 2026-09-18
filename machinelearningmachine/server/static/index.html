@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Inter-Module Agent Mesh | Arena AI · Copilot · Claude · GPT</title>
+  <meta name="description" content="Modular orchestration system enabling AI modules to talk directly - Arena AI, Copilot, Claude, GPT, and custom agents">
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- FontAwesome -->
@@ -36,12 +37,13 @@
   </script>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased">
+  <a href="#main-content" class="skip-link">Skip to main content</a>
 
   <!-- Top Navigation Bar -->
-  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-40">
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-40" role="banner">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
       <div class="flex items-center space-x-3">
-        <div class="h-9 w-9 rounded-lg bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center text-white shadow-lg shadow-purple-500/20 font-bold text-lg">
+        <div class="h-9 w-9 rounded-lg bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center text-white shadow-lg shadow-purple-500/20 font-bold text-lg" aria-hidden="true">
           ⚡
         </div>
         <div>
@@ -53,16 +55,16 @@
       </div>
 
       <div class="flex items-center space-x-3">
-        <div id="connectionStatus" class="flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-emerald-950/80 border border-emerald-800 text-emerald-400">
-          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <div id="connectionStatus" class="flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-emerald-950/80 border border-emerald-800 text-emerald-400" role="status" aria-live="polite" aria-label="Connection status">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true"></span>
           <span>Live Mesh Connected</span>
         </div>
-        <button id="btnSettings" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition">
-          <i class="fa-solid fa-sliders"></i>
+        <button id="btnSettings" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Open settings and API keys">
+          <i class="fa-solid fa-sliders" aria-hidden="true"></i>
           <span>Settings / Keys</span>
         </button>
-        <button id="btnNewAgent" class="px-3 py-1.5 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white flex items-center space-x-1.5 transition shadow-sm">
-          <i class="fa-solid fa-plus"></i>
+        <button id="btnNewAgent" class="px-3 py-1.5 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white flex items-center space-x-1.5 transition shadow-sm focus-visible:ring-2 focus-visible:ring-indigo-400" aria-label="Add new custom module">
+          <i class="fa-solid fa-plus" aria-hidden="true"></i>
           <span>Add Module</span>
         </button>
       </div>
@@ -70,7 +72,7 @@
   </header>
 
   <!-- Main Container -->
-  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 flex flex-col space-y-6 w-full">
+  <main id="main-content" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 flex flex-col space-y-6 w-full" role="main">
 
     <!-- Top Grid: Interactive Topology Graph & Active Modules -->
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -79,28 +81,28 @@
       <div class="lg:col-span-2 bg-slate-900/60 border border-slate-800 rounded-xl p-5 flex flex-col relative overflow-hidden backdrop-blur">
         <div class="flex items-center justify-between mb-3 z-10">
           <div class="flex items-center space-x-2">
-            <i class="fa-solid fa-network-wired text-purple-400"></i>
+            <i class="fa-solid fa-network-wired text-purple-400" aria-hidden="true"></i>
             <h2 class="text-sm font-semibold text-slate-200">Active Communication Mesh Topology</h2>
           </div>
-          <span id="topologyLabelBadge" class="text-xs font-mono px-2.5 py-0.5 rounded-full bg-purple-900/40 text-purple-300 border border-purple-700/50">
+          <span id="topologyLabelBadge" class="text-xs font-mono px-2.5 py-0.5 rounded-full bg-purple-900/40 text-purple-300 border border-purple-700/50" aria-live="polite">
             P2P: Arena AI ⇄ Copilot
           </span>
         </div>
 
         <!-- Canvas for dynamic packet routing animations -->
-        <div class="relative w-full h-56 rounded-lg bg-slate-950/70 border border-slate-800/80 flex items-center justify-center">
-          <canvas id="topologyCanvas" class="absolute inset-0 w-full h-full"></canvas>
+        <div class="relative w-full h-56 rounded-lg bg-slate-950/70 border border-slate-800/80 flex items-center justify-center" role="img" aria-label="Network topology visualization showing active agents and message flow">
+          <canvas id="topologyCanvas" class="absolute inset-0 w-full h-full" aria-hidden="true"></canvas>
           <div id="graphOverlay" class="absolute inset-0 pointer-events-none"></div>
         </div>
 
         <div class="flex items-center justify-between text-xs text-slate-400 mt-3 z-10">
-          <div class="flex items-center space-x-4">
-            <span class="flex items-center space-x-1.5"><span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span><span>Arena AI</span></span>
-            <span class="flex items-center space-x-1.5"><span class="w-2.5 h-2.5 rounded-full bg-cyan-500"></span><span>Copilot</span></span>
-            <span class="flex items-center space-x-1.5"><span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span><span>Claude</span></span>
-            <span class="flex items-center space-x-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span><span>GPT-4o</span></span>
+          <div class="flex items-center space-x-4" role="list" aria-label="Agent color legend">
+            <span class="flex items-center space-x-1.5" role="listitem"><span class="w-2.5 h-2.5 rounded-full bg-purple-500" aria-hidden="true"></span><span>Arena AI</span></span>
+            <span class="flex items-center space-x-1.5" role="listitem"><span class="w-2.5 h-2.5 rounded-full bg-cyan-500" aria-hidden="true"></span><span>Copilot</span></span>
+            <span class="flex items-center space-x-1.5" role="listitem"><span class="w-2.5 h-2.5 rounded-full bg-amber-500" aria-hidden="true"></span><span>Claude</span></span>
+            <span class="flex items-center space-x-1.5" role="listitem"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500" aria-hidden="true"></span><span>GPT-4o</span></span>
           </div>
-          <span class="text-slate-500 italic">Visual packet routing updates on message dispatch</span>
+          <span class="text-slate-500 italic hidden sm:inline">Visual packet routing updates on message dispatch</span>
         </div>
       </div>
 
@@ -108,47 +110,51 @@
       <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 flex flex-col backdrop-blur">
         <div class="flex items-center justify-between mb-3">
           <div class="flex items-center space-x-2">
-            <i class="fa-solid fa-cubes text-cyan-400"></i>
+            <i class="fa-solid fa-cubes text-cyan-400" aria-hidden="true"></i>
             <h2 class="text-sm font-semibold text-slate-200">Registered Modules</h2>
           </div>
-          <span id="agentCountBadge" class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300">4 Modules</span>
+          <span id="agentCountBadge" class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300" aria-live="polite">4 Modules</span>
         </div>
 
-        <div id="moduleList" class="flex-1 space-y-2.5 overflow-y-auto max-h-56 pr-1 custom-scroll">
+        <div id="moduleList" class="flex-1 space-y-2.5 overflow-y-auto max-h-56 pr-1 custom-scroll" role="list" aria-label="Registered AI modules">
           <!-- Rendered dynamically -->
         </div>
+        <p class="text-[11px] text-slate-500 mt-3">💡 Click a module to see details. All run locally with mock simulation by default.</p>
       </div>
 
     </div>
 
     <!-- Control Center & Scenario Trigger -->
-    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 backdrop-blur">
+    <section class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 backdrop-blur" aria-labelledby="controls-heading">
       <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div class="flex items-center space-x-2">
-          <i class="fa-solid fa-sliders text-indigo-400"></i>
-          <h2 class="text-sm font-semibold text-slate-200">Dialogue Orchestration Controls</h2>
+          <i class="fa-solid fa-sliders text-indigo-400" aria-hidden="true"></i>
+          <h2 id="controls-heading" class="text-sm font-semibold text-slate-200">Dialogue Orchestration Controls</h2>
         </div>
 
         <!-- Presets Buttons -->
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2" role="group" aria-label="Quick scenario presets">
           <span class="text-xs text-slate-400">Quick Scenarios:</span>
-          <button class="preset-btn px-2.5 py-1 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-purple-300 border border-purple-900/60 transition"
+          <button class="preset-btn px-2.5 py-1 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-purple-300 border border-purple-900/60 transition focus-visible:ring-2 focus-visible:ring-purple-500"
             data-topology="p2p"
             data-from="arena-ai"
             data-to="copilot"
-            data-prompt="Implement a high-throughput, thread-safe Token Bucket Rate Limiter in Python with Redis backing.">
+            data-prompt="Implement a high-throughput, thread-safe Token Bucket Rate Limiter in Python with Redis backing."
+            aria-label="Load rate limiter scenario">
             ⚡ Arena AI ⇄ Copilot (Rate Limiter)
           </button>
-          <button class="preset-btn px-2.5 py-1 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-900/60 transition"
+          <button class="preset-btn px-2.5 py-1 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-900/60 transition focus-visible:ring-2 focus-visible:ring-amber-500"
             data-topology="debate"
             data-agents="copilot,claude,gpt"
-            data-prompt="Architectural debate: Compare Apache Kafka vs Redis Streams with Celery for an ultra-low latency microservices event bus.">
+            data-prompt="Architectural debate: Compare Apache Kafka vs Redis Streams with Celery for an ultra-low latency microservices event bus."
+            aria-label="Load architecture debate scenario">
             🔮 Copilot ⇄ Claude ⇄ GPT (Arch Debate)
           </button>
-          <button class="preset-btn px-2.5 py-1 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-900/60 transition"
+          <button class="preset-btn px-2.5 py-1 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-900/60 transition focus-visible:ring-2 focus-visible:ring-emerald-500"
             data-topology="pipeline"
             data-agents="arena-ai,claude,copilot,gpt"
-            data-prompt="Build a distributed caching system with TTL expiration, LRU eviction, and async invalidation hooks.">
+            data-prompt="Build a distributed caching system with TTL expiration, LRU eviction, and async invalidation hooks."
+            aria-label="Load cache engine scenario">
             🌐 4-Agent Full Relay (Cache Engine)
           </button>
         </div>
@@ -157,7 +163,7 @@
       <!-- Controls Form -->
       <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1">Interaction Topology</label>
+          <label for="selectTopology" class="block text-xs font-medium text-slate-400 mb-1">Interaction Topology</label>
           <select id="selectTopology" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
             <option value="p2p">Peer-to-Peer Dialogue (1-on-1)</option>
             <option value="pipeline">Sequential Pipeline Relay (Ordered Chain)</option>
@@ -167,7 +173,7 @@
         </div>
 
         <div id="p2pConfigA">
-          <label class="block text-xs font-medium text-slate-400 mb-1">Initiating Module (Agent A)</label>
+          <label for="selectAgentA" class="block text-xs font-medium text-slate-400 mb-1">Initiating Module (Agent A)</label>
           <select id="selectAgentA" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
             <option value="arena-ai">Arena AI (Orchestrator)</option>
             <option value="copilot">GitHub Copilot (Coder)</option>
@@ -177,7 +183,7 @@
         </div>
 
         <div id="p2pConfigB">
-          <label class="block text-xs font-medium text-slate-400 mb-1">Responding Module (Agent B)</label>
+          <label for="selectAgentB" class="block text-xs font-medium text-slate-400 mb-1">Responding Module (Agent B)</label>
           <select id="selectAgentB" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
             <option value="copilot">GitHub Copilot (Coder)</option>
             <option value="claude">Claude 3.5 (Critic)</option>
@@ -187,7 +193,7 @@
         </div>
 
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1">Conversation Turns</label>
+          <label for="selectTurns" class="block text-xs font-medium text-slate-400 mb-1">Conversation Turns</label>
           <select id="selectTurns" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
             <option value="4">4 Turns (Detailed Exchange)</option>
             <option value="2">2 Turns (Quick Question & Reply)</option>
@@ -196,115 +202,144 @@
       </div>
 
       <!-- Task Prompt Box -->
-      <div class="flex flex-col sm:flex-row items-stretch sm:items-end gap-3">
+      <div class="flex flex-col gap-3">
         <div class="flex-1">
-          <label class="block text-xs font-medium text-slate-400 mb-1">Task Specification / Prompt</label>
-          <textarea id="inputPrompt" rows="2" class="w-full bg-slate-800/90 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 resize-none"
-            placeholder="Describe the task or topic for the modules to discuss and implement...">Implement a robust, thread-safe rate limiter in Python using the token-bucket algorithm.</textarea>
+          <div class="flex items-center justify-between mb-1">
+            <label for="inputPrompt" class="block text-xs font-medium text-slate-400">Task Specification / Prompt</label>
+            <div class="flex items-center gap-2">
+              <span id="charCount" class="char-count" aria-live="polite">0 / 5000</span>
+              <button id="btnClearPrompt" type="button" class="text-[11px] text-slate-500 hover:text-slate-300 underline" aria-label="Clear prompt">Clear</button>
+            </div>
+          </div>
+          <textarea id="inputPrompt" rows="3" class="w-full bg-slate-800/90 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none resize-none"
+            placeholder="Describe the task or topic for the modules to discuss and implement... (Ctrl+Enter to run)"
+            aria-describedby="prompt-help charCount">Implement a robust, thread-safe rate limiter in Python using the token-bucket algorithm.</textarea>
+          <p id="prompt-help" class="text-[11px] text-slate-500 mt-1">💡 Be specific: include language, constraints, and desired output. Press <kbd class="px-1 py-0.5 bg-slate-800 border border-slate-700 rounded text-[10px]">Ctrl+Enter</kbd> to run.</p>
         </div>
 
-        <div class="flex items-center space-x-2">
-          <button id="btnRun" class="h-10 px-5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-indigo-600/30 transition disabled:opacity-50">
-            <i class="fa-solid fa-play"></i>
-            <span>Execute Dialogue</span>
-          </button>
-          <button id="btnClear" class="h-10 px-3.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 text-xs transition" title="Clear History">
-            <i class="fa-solid fa-trash-can"></i>
-          </button>
+        <div class="flex items-center justify-between">
+          <div class="text-[11px] text-slate-500">
+            <i class="fa-solid fa-lightbulb text-amber-400 mr-1" aria-hidden="true"></i>
+            Try: "Build JWT auth middleware", "Create LRU cache", "Design event bus with backpressure"
+          </div>
+          <div class="flex items-center space-x-2">
+            <button id="btnRun" class="h-10 px-5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-indigo-600/30 transition disabled:opacity-50 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-indigo-400" aria-label="Execute dialogue">
+              <i class="fa-solid fa-play" aria-hidden="true"></i>
+              <span>Execute Dialogue</span>
+            </button>
+            <button id="btnClear" class="h-10 px-3.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 text-xs transition focus-visible:ring-2 focus-visible:ring-slate-500" title="Clear History" aria-label="Clear all messages">
+              <i class="fa-solid fa-trash-can" aria-hidden="true"></i>
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- Live Transcript / Feed -->
-    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 flex-1 flex flex-col backdrop-blur min-h-[400px]">
-      <div class="flex items-center justify-between border-b border-slate-800/80 pb-3 mb-4">
+    <section class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 flex-1 flex flex-col backdrop-blur min-h-[400px]" aria-labelledby="transcript-heading">
+      <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3 mb-4">
         <div class="flex items-center space-x-2">
-          <i class="fa-solid fa-comments text-emerald-400"></i>
-          <h2 class="text-sm font-semibold text-slate-200">Real-Time Message Transcript</h2>
-          <span id="msgCountBadge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">0 messages</span>
+          <i class="fa-solid fa-comments text-emerald-400" aria-hidden="true"></i>
+          <h2 id="transcript-heading" class="text-sm font-semibold text-slate-200">Real-Time Message Transcript</h2>
+          <span id="msgCountBadge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400" aria-live="polite">0 messages</span>
         </div>
 
         <div class="flex items-center space-x-2">
-          <button id="btnExportMd" class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition">
-            <i class="fa-solid fa-file-arrow-down"></i>
+          <div class="relative">
+            <input id="searchMessages" type="search" placeholder="Search messages..." class="search-input w-40 sm:w-56 px-2.5 py-1 text-xs rounded-lg text-slate-200 placeholder-slate-500" aria-label="Search messages">
+            <i class="fa-solid fa-search absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 text-[11px] pointer-events-none" aria-hidden="true"></i>
+          </div>
+          <button id="btnExportMd" class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition focus-visible:ring-2 focus-visible:ring-slate-500" aria-label="Export transcript as Markdown">
+            <i class="fa-solid fa-file-arrow-down" aria-hidden="true"></i>
             <span>Export MD</span>
           </button>
-          <button id="btnExportJson" class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition">
-            <i class="fa-solid fa-code"></i>
+          <button id="btnExportJson" class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition focus-visible:ring-2 focus-visible:ring-slate-500" aria-label="Export transcript as JSON">
+            <i class="fa-solid fa-code" aria-hidden="true"></i>
             <span>Export JSON</span>
           </button>
         </div>
       </div>
 
       <!-- Messages Stream -->
-      <div id="messagesContainer" class="flex-1 space-y-4 overflow-y-auto max-h-[600px] pr-2 custom-scroll">
+      <div id="messagesContainer" class="flex-1 space-y-4 overflow-y-auto max-h-[600px] pr-2 custom-scroll" role="log" aria-live="polite" aria-label="Message transcript" tabindex="0">
         <!-- Empty state placeholder -->
         <div id="emptyPlaceholder" class="h-64 flex flex-col items-center justify-center text-slate-500 space-y-3">
-          <div class="w-12 h-12 rounded-full bg-slate-800/80 flex items-center justify-center text-slate-400 text-xl">
+          <div class="w-12 h-12 rounded-full bg-slate-800/80 flex items-center justify-center text-slate-400 text-xl" aria-hidden="true">
             <i class="fa-solid fa-bolt-lightning"></i>
           </div>
-          <div class="text-center">
+          <div class="text-center max-w-md">
             <p class="text-sm font-medium text-slate-300">Ready to initiate inter-module dialogue</p>
-            <p class="text-xs text-slate-500 mt-1">Select a scenario above or enter a prompt and click "Execute Dialogue".</p>
+            <p class="text-xs text-slate-500 mt-1">Select a scenario above or enter a prompt and click "Execute Dialogue". The mock simulator works without API keys and generates realistic code examples.</p>
+            <div class="mt-4 flex flex-wrap justify-center gap-2">
+              <span class="text-[11px] px-2 py-1 rounded-full bg-slate-800 border border-slate-700">No setup needed</span>
+              <span class="text-[11px] px-2 py-1 rounded-full bg-slate-800 border border-slate-700">Real-time streaming</span>
+              <span class="text-[11px] px-2 py-1 rounded-full bg-slate-800 border border-slate-700">Copy-paste ready code</span>
+            </div>
           </div>
         </div>
       </div>
 
-    </div>
+    </section>
 
   </main>
 
+  <!-- Toast Container -->
+  <div id="toastContainer" aria-live="polite" aria-atomic="true"></div>
+
   <!-- Add Custom Module Modal -->
-  <div id="agentModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
-    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-6 shadow-2xl">
+  <div id="agentModal" class="modal-backdrop fixed inset-0 z-50 hidden flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="agent-modal-title" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto custom-scroll">
       <div class="flex items-center justify-between mb-4">
-        <h3 class="text-base font-bold text-slate-100 flex items-center space-x-2">
-          <i class="fa-solid fa-cube text-indigo-400"></i>
+        <h3 id="agent-modal-title" class="text-base font-bold text-slate-100 flex items-center space-x-2">
+          <i class="fa-solid fa-cube text-indigo-400" aria-hidden="true"></i>
           <span>Add Custom Module</span>
         </h3>
-        <button id="btnCloseAgentModal" class="text-slate-400 hover:text-slate-200">
-          <i class="fa-solid fa-xmark text-lg"></i>
+        <button id="btnCloseAgentModal" class="text-slate-400 hover:text-slate-200 p-1 rounded focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Close modal">
+          <i class="fa-solid fa-xmark text-lg" aria-hidden="true"></i>
         </button>
       </div>
 
-      <form id="formAddAgent" class="space-y-4">
+      <form id="formAddAgent" class="space-y-4" novalidate>
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1">Module ID (slug)</label>
-          <input type="text" id="newAgentId" placeholder="e.g. dba-agent, security-auditor" required
+          <label for="newAgentId" class="block text-xs font-medium text-slate-400 mb-1">Module ID (slug) *</label>
+          <input type="text" id="newAgentId" placeholder="e.g. dba-agent, security-auditor" required pattern="^[a-z0-9][a-z0-9-_]{0,48}[a-z0-9]$"
+            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+            aria-describedby="agent-id-help">
+          <p id="agent-id-help" class="text-[11px] text-slate-500 mt-1">Lowercase, alphanumeric, dashes/underscores, 2-50 chars</p>
+        </div>
+        <div>
+          <label for="newAgentName" class="block text-xs font-medium text-slate-400 mb-1">Display Name *</label>
+          <input type="text" id="newAgentName" placeholder="e.g. DBA Architect" required maxlength="100"
             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1">Display Name</label>
-          <input type="text" id="newAgentName" placeholder="e.g. DBA Architect" required
+          <label for="newAgentRole" class="block text-xs font-medium text-slate-400 mb-1">Domain Role *</label>
+          <input type="text" id="newAgentRole" placeholder="e.g. Database Schema & Query Optimization Specialist" required maxlength="200"
             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1">Domain Role</label>
-          <input type="text" id="newAgentRole" placeholder="e.g. Database Schema & Query Optimization Specialist" required
-            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1">System Prompt / Instructions</label>
-          <textarea id="newAgentPrompt" rows="3" placeholder="Define this module's responsibilities and technical expertise..." required
+          <label for="newAgentPrompt" class="block text-xs font-medium text-slate-400 mb-1">System Prompt / Instructions *</label>
+          <textarea id="newAgentPrompt" rows="3" placeholder="Define this module's responsibilities and technical expertise... (min 10 chars)" required minlength="10" maxlength="2000"
             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"></textarea>
+          <p class="text-[11px] text-slate-500 mt-1">Be specific about what this agent should do</p>
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1">Color Theme</label>
+            <label for="newAgentColor" class="block text-xs font-medium text-slate-400 mb-1">Color Theme</label>
             <input type="color" id="newAgentColor" value="#ec4899" class="w-full h-8 bg-transparent cursor-pointer rounded border border-slate-700">
           </div>
           <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1">Emoji Avatar</label>
+            <label for="newAgentAvatar" class="block text-xs font-medium text-slate-400 mb-1">Emoji Avatar</label>
             <input type="text" id="newAgentAvatar" value="🧩" maxlength="4"
               class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 text-center">
           </div>
         </div>
 
         <div class="flex items-center justify-end space-x-2 pt-3 border-t border-slate-800">
-          <button type="button" id="btnCancelAddAgent" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300">
+          <button type="button" id="btnCancelAddAgent" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus-visible:ring-2 focus-visible:ring-slate-500">
             Cancel
           </button>
-          <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium">
+          <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-indigo-400">
             Register Module
           </button>
         </div>
@@ -313,44 +348,46 @@
   </div>
 
   <!-- Settings / API Keys Modal -->
-  <div id="settingsModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
-    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-6 shadow-2xl">
+  <div id="settingsModal" class="modal-backdrop fixed inset-0 z-50 hidden flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto custom-scroll">
       <div class="flex items-center justify-between mb-4">
-        <h3 class="text-base font-bold text-slate-100 flex items-center space-x-2">
-          <i class="fa-solid fa-key text-amber-400"></i>
+        <h3 id="settings-modal-title" class="text-base font-bold text-slate-100 flex items-center space-x-2">
+          <i class="fa-solid fa-key text-amber-400" aria-hidden="true"></i>
           <span>Model Provider Settings</span>
         </h3>
-        <button id="btnCloseSettingsModal" class="text-slate-400 hover:text-slate-200">
-          <i class="fa-solid fa-xmark text-lg"></i>
+        <button id="btnCloseSettingsModal" class="text-slate-400 hover:text-slate-200 p-1 rounded focus-visible:ring-2 focus-visible:ring-amber-500" aria-label="Close settings">
+          <i class="fa-solid fa-xmark text-lg" aria-hidden="true"></i>
         </button>
       </div>
 
       <div class="text-xs text-slate-400 mb-4 bg-slate-800/50 p-3 rounded-lg border border-slate-800">
-        <p><strong>Note:</strong> By default, all modules operate using the built-in Intelligent Simulator that generates realistic code, architecture critiques, and unit tests without needing external keys. You can optionally connect live OpenAI / Anthropic or local Ollama endpoints below.</p>
+        <p><strong>🔒 Privacy:</strong> Keys are kept in-memory only, never logged or persisted. By default, all modules use the built-in Intelligent Simulator that generates realistic code without external keys.</p>
       </div>
 
       <form id="formSettings" class="space-y-4">
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1">OpenAI API Key (for GPT-4o / Copilot)</label>
-          <input type="password" id="inputOpenAiKey" placeholder="sk-..."
+          <label for="inputOpenAiKey" class="block text-xs font-medium text-slate-400 mb-1">OpenAI API Key (for GPT-4o / Copilot)</label>
+          <input type="password" id="inputOpenAiKey" placeholder="sk-..." autocomplete="off"
             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1">Anthropic API Key (for Claude 3.5)</label>
-          <input type="password" id="inputAnthropicKey" placeholder="sk-ant-..."
+          <label for="inputAnthropicKey" class="block text-xs font-medium text-slate-400 mb-1">Anthropic API Key (for Claude 3.5)</label>
+          <input type="password" id="inputAnthropicKey" placeholder="sk-ant-..." autocomplete="off"
             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1">Custom / Local LLM Base URL (Ollama, LMStudio, vLLM)</label>
+          <label for="inputOpenAiBaseUrl" class="block text-xs font-medium text-slate-400 mb-1">Custom / Local LLM Base URL (Ollama, LMStudio, vLLM)</label>
           <input type="text" id="inputOpenAiBaseUrl" placeholder="http://localhost:11434/v1"
-            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+            aria-describedby="base-url-help">
+          <p id="base-url-help" class="text-[11px] text-slate-500 mt-1">Must start with http:// or https://</p>
         </div>
 
         <div class="flex items-center justify-end space-x-2 pt-3 border-t border-slate-800">
-          <button type="button" id="btnCancelSettings" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300">
+          <button type="button" id="btnCancelSettings" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus-visible:ring-2 focus-visible:ring-slate-500">
             Cancel
           </button>
-          <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium">
+          <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-amber-400">
             Save Configuration
           </button>
         </div>
@@ -358,8 +395,29 @@
     </div>
   </div>
 
+  <!-- Clear Confirmation Modal - replaces confirm() -->
+  <div id="clearConfirmModal" class="modal-backdrop fixed inset-0 z-50 hidden flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="clear-modal-title" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-sm w-full p-6 shadow-2xl">
+      <div class="flex items-center space-x-3 mb-4">
+        <div class="w-10 h-10 rounded-full bg-amber-900/50 border border-amber-700/50 flex items-center justify-center text-amber-400">
+          <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>
+        </div>
+        <div>
+          <h3 id="clear-modal-title" class="text-sm font-bold text-slate-100">Clear Session?</h3>
+          <p class="text-xs text-slate-400">This will remove all messages and reset module memory</p>
+        </div>
+      </div>
+      <p class="text-xs text-slate-400 mb-4">You can export the transcript first if you want to keep it. This action cannot be undone.</p>
+      <div class="flex items-center justify-end space-x-2">
+        <button id="btnCancelClear" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus-visible:ring-2 focus-visible:ring-slate-500">Cancel</button>
+        <button id="btnCloseClearModal" class="sr-only">Close</button>
+        <button id="btnConfirmClear" class="px-4 py-2 text-xs rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-red-400">Clear Session</button>
+      </div>
+    </div>
+  </div>
+
   <footer class="border-t border-slate-800/80 py-3 text-center text-xs text-slate-500">
-    MachineLearningMachine Inter-Module Mesh · Modular Multi-Agent Protocol
+    MachineLearningMachine Inter-Module Mesh · Modular Multi-Agent Protocol · <span class="text-slate-600">Built for real user value</span>
   </footer>
 
   <script src="/static/app.js"></script>
