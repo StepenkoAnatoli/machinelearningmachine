@@ -6,8 +6,8 @@ Supports point-to-point routing, topic-based pub/sub, event hooks, and transcrip
 import asyncio
 import json
 import logging
-from typing import Dict, List, Callable, Optional, Awaitable, Set
-from .message import Message, MessageType
+from typing import Dict, List, Callable, Awaitable, Set
+from .message import Message
 
 logger = logging.getLogger("MessageBus")
 
@@ -113,6 +113,13 @@ class MessageBus:
     def get_history(self) -> List[Message]:
         """Return a copy of the message history."""
         return list(self._history)
+
+    def set_history(self, messages: List[Message]) -> None:
+        """
+        Replace the message history (used when loading a saved session).
+        Keeps only the most recent ``max_history`` messages.
+        """
+        self._history = list(messages)[-self._max_history:]
 
     def clear_history(self) -> None:
         """Clear message history."""

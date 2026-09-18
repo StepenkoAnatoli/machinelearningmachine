@@ -215,6 +215,7 @@ class BaseAgent:
             "agent_id": self.agent_id,
             "name": self.name,
             "role": self.role,
+            "system_prompt": self.system_prompt,
             "color": self.color,
             "avatar": self.avatar,
             "status": self.status,

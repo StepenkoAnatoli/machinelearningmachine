@@ -99,6 +99,12 @@ def main():
         action="store_true",
         help="Disable inter-turn delays for faster execution (useful for testing)",
     )
+    run_parser.add_argument(
+        "--speak",
+        action="store_true",
+        help="Read the dialogue aloud with your computer's built-in text-to-speech "
+             "(macOS: say, Windows: SAPI, Linux: espeak-ng)",
+    )
 
     args = parser.parse_args()
 
@@ -121,7 +127,7 @@ def main():
 
         print(f"[*] Starting MachineLearningMachine Live Dashboard on http://{host}:{port} ...")
         print(f"[*] Open http://localhost:{port} in your browser")
-        print(f"[*] Press Ctrl+C to stop\n")
+        print("[*] Press Ctrl+C to stop\n")
         try:
             uvicorn.run("machinelearningmachine.server.app:app", host=host, port=port, log_level="info")
         except OSError as e:
@@ -178,13 +184,6 @@ async def execute_cli_run(args):
     print(f"🔧 Agents: {', '.join(agent_ids) if agent_ids else f'{args.agent_a} <-> {args.agent_b}'}")
     print(f"{'='*60}\n")
 
-    # Configure delay for faster testing if requested
-    delay_kwargs = {"inter_turn_delay": 0} if args.no_delay else {}
-    if args.topology in ("pipeline", "hub", "debate"):
-        delay_kwargs = {"inter_step_delay": 0} if args.no_delay else {}
-        if args.topology == "debate":
-            delay_kwargs = {"inter_turn_delay": 0} if args.no_delay else {}
-
     transcript = []
     try:
         if args.topology == "p2p":
@@ -220,7 +219,7 @@ async def execute_cli_run(args):
             spoke_ids = agent_ids or [aid for aid in mesh.agents.keys() if aid != hub_id]
             print(f"🎯 Hub: {hub_id} coordinating spokes: {', '.join(spoke_ids)}")
             transcript = await mesh.run_hub_and_spoke(args.prompt, hub_id=hub_id, spoke_ids=spoke_ids)
-    except ValueError as e:
+    except ValueError:
         raise
     except Exception as e:
         print(f"\n❌ Dialogue failed: {e}")
@@ -249,9 +248,20 @@ async def execute_cli_run(args):
         print("="*60 + "\n")
         print(mesh.export_json())
 
+    if args.speak:
+        print(f"\n{'='*60}")
+        print("🔊 Reading the dialogue aloud...")
+        print(f"{'='*60}\n")
+        from . import tts
+        lines = []
+        for msg in transcript:
+            target = f" to {msg.recipient_name or msg.recipient_id}" if msg.recipient_id != "*" else ""
+            lines.append(f"{msg.sender_name}{target} says: {msg.content}")
+        tts.speak("\n\n".join(lines))
+
     print(f"\n{'='*60}")
     print(f"✨ Done! {len(transcript)} messages exchanged")
-    print(f"💡 Tip: Run 'serve' to see this in the web dashboard")
+    print("💡 Tip: Run 'serve' to see this in the web dashboard")
     print(f"{'='*60}\n")
 
 

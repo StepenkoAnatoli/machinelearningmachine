@@ -326,6 +326,36 @@ Additional manual validation:
 
 ---
 
+## 🚀 Round 2: Zero-Friction Install, Sessions, and Reading Aloud
+
+The second user-centered pass focused on three things users repeatedly hit: **getting the app running without reading docs**, **not losing work**, and **hearing the output** (accessibility + convenience).
+
+### One-Click Launch (no terminal required)
+- **Problem**: The documented install was `git clone` → `python -m venv` → `pip install -e .` → `python -m ...`. Five steps, several of which fail confusingly (PEP 668, wrong interpreter, `ModuleNotFoundError: pydantic`) for non-developers.
+- **Solution**: Three tiny launcher files at the repo root — `launch-windows.bat`, `launch-macos.command`, `launch-linux.sh`. **Double-click the one for your OS.** Each one:
+  1. Detects an installed Python and gives a plain-English install hint if missing.
+  2. Creates a private `.venv` the first time (isolated, no PEP 668 clashes).
+  3. Installs dependencies once, marked by a `.deps_installed` flag so later launches are instant.
+  4. Starts the dashboard on `127.0.0.1:8000` and auto-opens the browser.
+- **Design choices**: everything happens inside the project folder (`.venv`) so nothing global is touched; failure paths always say what to do next; closing the window stops the app.
+
+### Saved Sessions (work you can come back to)
+- **Problem**: History lived only in memory — closing the browser lost the whole conversation.
+- **Solution**: `sessions.py` + a *Sessions* panel in the dashboard. One click saves the current modules and full transcript as JSON in `~/.module_mesh/sessions` (user home, never in the repo). Load restores agents *and* messages; delete removes. Bounded (50 kept, oldest pruned), filename-safe, path-traversal-proof, corrupt-file tolerant.
+- **Why home dir, not the repo**: sessions are personal, change constantly, and would otherwise pollute `git status`.
+
+### Read-Aloud Studio (the machine reads what you write)
+- **Problem**: Output is all visual; users want to *hear* their prompt, the replies, documents, or web pages — and keyboard/mic input is friendlier than typing for some tasks.
+- **Solution** (100% local, zero extra dependencies):
+  - **Web Speech API** TTS in the dashboard: read the prompt, any single message (per-message speaker button), the whole conversation, or with auto-read on, every reply as it arrives. Voice + speed pickers, test-voice button, settings persisted in `localStorage`. Long texts are chunked to dodge the Chrome long-utterance cutoff.
+  - **Other reading skills**: paste any text, open a local file (txt/md/csv/json/log/code, ≤1 MB), or paste a web-page URL — the server fetches it (`/api/read/url`), strips scripts/styles/nav to readable text, shows it, and reads it aloud.
+  - **Dictation**: 🎙️ button transcribes speech into the prompt (browser speech recognition, graceful hide when unsupported).
+  - **CLI parity**: `--speak` reads a dialogue with the OS voice (`say` on macOS, SAPI on Windows, `espeak-ng` on Linux) — no install required where the OS ships a voice.
+
+**User impact**: install is one double-click; conversations survive restarts; and the system can now *talk* as well as show.
+
+---
+
 ## 🔮 Future User-Centered Improvements (Not Yet Done)
 
 1. **Session isolation**: Add optional session ID header for multi-user

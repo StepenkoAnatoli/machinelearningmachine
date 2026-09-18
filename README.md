@@ -1,6 +1,6 @@
 # MachineLearningMachine: Multi-Module Inter-Agent Communication Mesh
 
-[![Tests](https://img.shields.io/badge/tests-21%20passed-success)](https://github.com/StepenkoAnatoli/machinelearningmachine)
+[![Tests](https://img.shields.io/badge/tests-30%20passed-success)](https://github.com/StepenkoAnatoli/machinelearningmachine)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-teal)](https://fastapi.tiangolo.com)
 [![WebSocket](https://img.shields.io/badge/WebSocket-Real--Time-orange)](https://websockets.readthedocs.io/)
@@ -27,6 +27,9 @@ A modular orchestration system that enables AI modules to talk directly to each 
 - 📱 Responsive, respects `prefers-reduced-motion`, optimized canvas (30fps, pauses when hidden)
 
 **Practical & Pleasant:**
+- 🚀 **One-click install & launch** — double-click `launch-windows.bat` / `launch-macos.command` / `launch-linux.sh` and the app sets itself up (Python check → venv → dependencies → dashboard → browser) and runs
+- 💾 **Saved sessions** — store any conversation (modules + full transcript) on your computer and reload it later from the *Sessions* panel
+- 🔊 **Reads what you write** — your prompt, every agent reply, any message, any text file, any web page, or the whole conversation is read aloud with your computer's own voices (no API keys, works offline); plus 🎙️ voice dictation for your prompt
 - 🚀 Faster execution (0.15s vs 0.4s delays), no unnecessary waiting
 - 💡 Contextual mock provider: detects `rate_limiter`, `cache`, `auth`, `queue` domains and generates copy-paste-ready code with tests
 - 📋 One-click copy for code blocks, export with proper headers
@@ -34,7 +37,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
 - 🛡️ Privacy: API keys kept in-memory only, never logged
 
 **Engineering Quality:**
-- 🧪 21 tests passing, better error recovery, bounded resources
+- 🧪 30 tests passing, better error recovery, bounded resources
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
 
@@ -59,6 +62,15 @@ A modular orchestration system that enables AI modules to talk directly to each 
   - Real-time WebSocket feed with code highlighting and 1-click copy.
   - Dynamic visual network graph showing packet animations between active agents.
   - Quick-launch presets and custom module builder.
+- 🔊 **Read-Aloud Studio (Text-to-Speech)**:
+  - Read **what you write**: your prompt, individual replies, or the whole conversation — with per-message speaker buttons.
+  - Read **other things too**: paste any text, open a local file (`.txt`, `.md`, `.csv`, `.json`, code…), or paste a web page link and the machine fetches, cleans and reads it aloud.
+  - Pick your voice and speed; auto-read replies as they arrive; dictate your prompt by voice (🎙️).
+  - Uses the Web Speech API — built into Chrome/Edge/Safari, no install, no keys, offline.
+  - CLI: `module-mesh run --speak` reads the dialogue with the OS voice (`say` / SAPI / espeak-ng).
+- 💾 **Session Persistence**:
+  - Save the current agents + full transcript with one click; reload, inspect or delete saved sessions from the *Sessions* panel.
+  - Stored locally in `~/.module_mesh/sessions` (never uploaded, never committed).
 - 🔌 **Dual Engine: Zero-Config Simulation or Live APIs**:
   - Works out of the box with realistic domain simulations (no API keys required).
   - One-click configuration for real **OpenAI (GPT-4o)**, **Anthropic (Claude 3.5)**, or **local Ollama / LMStudio / vLLM** backends.
@@ -91,29 +103,42 @@ A modular orchestration system that enables AI modules to talk directly to each 
 
 ## 🚀 Quick Start
 
-### 1. Installation
+### 1. One-Click Launch (recommended)
 
-The package depends on **pydantic**, **fastapi**, **uvicorn**, **aiohttp**, **requests**, and **websockets**. Install the project *and* its dependencies — running the code straight from a bare interpreter fails with `ModuleNotFoundError: No module named 'pydantic'`.
+Clone the repository, then **double-click the launcher for your computer**:
+
+| Your OS    | File to double-click      |
+|------------|---------------------------|
+| Windows    | `launch-windows.bat`      |
+| macOS      | `launch-macos.command`    |
+| Linux      | `launch-linux.sh` (run: `./launch-linux.sh`) |
+
+That single file does everything for you:
+
+1. 🔍 Finds your Python (install [python.org](https://www.python.org/downloads/) first if you don't have it)
+2. 📦 Creates a private `.venv` environment (first run only)
+3. ⬇️ Installs the dependencies once — a few minutes the first time, instant afterwards
+4. 🚀 Starts the dashboard at `http://127.0.0.1:8000`
+5. 🌐 Opens your browser automatically
+
+Close the terminal window (or press `Ctrl+C`) to stop the app.
+
+> **macOS note:** if your Mac blocks the script the first time, right-click it → *Open* → *Open*.
+> **Linux note:** if the file isn't executable, run `chmod +x launch-linux.sh` once.
+
+### 2. Manual installation (if you prefer the terminal)
+
+The package depends on **pydantic**, **fastapi**, **uvicorn**, **aiohttp**, **requests**, and **websockets**. Install the project *and* its dependencies:
 
 ```bash
 git clone https://github.com/StepenkoAnatoli/machinelearningmachine.git
 cd machinelearningmachine
 
-python -m pip install -e .        # macOS / Linux
-py -m pip install -e .            # Windows
+python3 -m venv .venv && source .venv/bin/activate   # Windows: py -m venv .venv
+pip install -e .
 ```
 
-Equivalent: `pip install -r requirements.txt` (plus `pip install -e .` if you want the `module-mesh` command).
-
-> **Tip:** prefer a virtual environment so the dependencies land in the same interpreter you run the code with:
-> ```bash
-> # macOS / Linux
-> python3 -m venv .venv && source .venv/bin/activate && python -m pip install -e .
-> # Windows (PowerShell)
-> py -m venv .venv ; .\.venv\Scripts\Activate.ps1 ; py -m pip install -e .
-> ```
-
-### 2. Launch the Interactive Web Dashboard
+Then launch the dashboard:
 
 ```bash
 python -m machinelearningmachine.cli serve --host 0.0.0.0 --port 8000
@@ -121,7 +146,7 @@ python -m machinelearningmachine.cli serve --host 0.0.0.0 --port 8000
 python -m machinelearningmachine
 ```
 
-Open `http://localhost:8000` (or the live preview port) in your browser to access the real-time visual dashboard.
+Open `http://localhost:8000` in your browser to access the real-time visual dashboard.
 
 #### Troubleshooting: `ModuleNotFoundError: No module named 'pydantic'`
 
@@ -238,7 +263,41 @@ python3 -m machinelearningmachine.cli run --topology pipeline --prompt "Create a
 
 # 4. Export transcript to Markdown or JSON
 python3 -m machinelearningmachine.cli run --topology p2p --prompt "Build a retry decorator" --export markdown
+
+# 5. Hear the dialogue: read it with your computer's built-in voice
+python3 -m machinelearningmachine.cli run --topology debate --prompt "Kafka vs Redis" --speak
 ```
+
+---
+
+## 🔊 Reading It Aloud & 💾 Saving Sessions
+
+Both features live in the web dashboard — no extra setup, everything uses what's already on your computer.
+
+### Reading aloud (Text-to-Speech)
+
+| What you want | How |
+|---------------|-----|
+| Read **what I just wrote** | Put text in the prompt box → click **🔊 Read My Prompt** (or enable *Read my prompt when I run* and it happens automatically on every run) |
+| Read **an agent's reply** | Click the **🔊 speaker button** on any message card |
+| Read **everything automatically** | Tick *Read replies automatically* in the Read-Aloud Studio bar |
+| Read **the whole conversation** | **Read All** button above the transcript |
+| Read **any text** | *Read-Aloud Studio → My Text* tab → paste → **Read This Text** |
+| Read **a file** | *From File* tab → pick a `.txt / .md / .csv / .json / .log / code…` file (≤ 1 MB) → **Read This File** |
+| Read **a web page** | *Web Page* tab → paste a link → **Fetch & Read** (the page is fetched, cleaned of HTML, shown and read) |
+| **Stop** any of the above | **Stop** button, or click the speaker that is currently pulsing |
+| Change **voice / speed** | Voice + speed dropdowns in the Read-Aloud Studio bar, **🔊 Test Voice** to audition |
+| **Dictate** my prompt | Click **🎙️ Dictate** next to the prompt, speak (Chrome/Edge; needs mic permission) |
+
+Speech uses the browser's built-in Web Speech API — your OS voices, no accounts, no API keys, and it works offline.
+
+### Saving sessions
+
+1. Run a dialogue (and register any custom modules you like).
+2. Click **Sessions** in the top bar → name it (optional) → **Save**.
+3. Later — even after restarting the app — open **Sessions** again and click **Load** on that session. Its modules and full conversation reappear in the dashboard.
+
+Sessions are stored as JSON on your machine in `~/.module_mesh/sessions` (set `MODULE_MESH_SESSIONS_DIR` to change). The 50 most recent sessions are kept; older ones are pruned automatically. API-key settings are *not* stored in sessions.
 
 ---
 
@@ -282,21 +341,37 @@ pytest -v
 
 Output:
 ```
-tests/test_agents.py::test_agent_initialization_and_talk PASSED          [  7%]
-tests/test_agents.py::test_custom_agent_creation PASSED                  [ 14%]
-tests/test_protocol.py::test_message_creation_and_dict PASSED            [ 21%]
-tests/test_protocol.py::test_message_bus_routing PASSED                  [ 28%]
-tests/test_server.py::test_server_index PASSED                           [ 35%]
-tests/test_server.py::test_server_agents_endpoint PASSED                 [ 42%]
-tests/test_server.py::test_server_run_p2p PASSED                         [ 50%]
-tests/test_server.py::test_server_history_and_clear PASSED               [ 57%]
-tests/test_server.py::test_server_add_custom_agent PASSED                [ 64%]
-tests/test_topologies.py::test_arena_talks_to_copilot_p2p PASSED         [ 71%]
-tests/test_topologies.py::test_copilot_talks_to_claude_p2p PASSED        [ 78%]
-tests/test_topologies.py::test_four_agent_pipeline PASSED                [ 85%]
-tests/test_topologies.py::test_collaborative_debate PASSED               [ 92%]
-tests/test_topologies.py::test_hub_and_spoke PASSED                      [100%]
-======================== 14 passed in 7.71s ========================
+tests/test_agents.py::test_agent_initialization_and_talk PASSED
+tests/test_agents.py::test_custom_agent_creation PASSED
+tests/test_deps.py::test_install_hint_names_package_and_commands PASSED
+tests/test_deps.py::test_install_hint_uses_import_root_for_submodules PASSED
+tests/test_deps.py::test_install_hint_deduplicates_and_sorts_packages PASSED
+tests/test_deps.py::test_missing_detects_absent_module PASSED
+tests/test_deps.py::test_known_dependency_classification PASSED
+tests/test_deps.py::test_require_raises_importerror_for_missing_dependency PASSED
+tests/test_deps.py::test_require_passes_when_dependencies_present PASSED
+tests/test_protocol.py::test_message_creation_and_dict PASSED
+tests/test_protocol.py::test_message_bus_routing PASSED
+tests/test_server.py::test_server_index PASSED
+tests/test_server.py::test_server_agents_endpoint PASSED
+tests/test_server.py::test_server_run_p2p PASSED
+tests/test_server.py::test_server_history_and_clear PASSED
+tests/test_server.py::test_server_add_custom_agent PASSED
+tests/test_sessions.py::test_store_roundtrip PASSED
+tests/test_sessions.py::test_store_name_sanitization PASSED
+tests/test_sessions.py::test_store_rejects_path_traversal PASSED
+tests/test_sessions.py::test_store_pruning_keeps_max_sessions PASSED
+tests/test_sessions.py::test_server_sessions_roundtrip PASSED
+tests/test_sessions.py::test_save_session_requires_history PASSED
+tests/test_sessions.py::test_read_url_strips_html PASSED
+tests/test_sessions.py::test_read_url_endpoint_validates PASSED
+tests/test_sessions.py::test_tts_engine_reporting PASSED
+tests/test_topologies.py::test_arena_talks_to_copilot_p2p PASSED
+tests/test_topologies.py::test_copilot_talks_to_claude_p2p PASSED
+tests/test_topologies.py::test_four_agent_pipeline PASSED
+tests/test_topologies.py::test_collaborative_debate PASSED
+tests/test_topologies.py::test_hub_and_spoke PASSED
+======================== 30 passed ========================
 ```
 
 ---
@@ -305,6 +380,9 @@ tests/test_topologies.py::test_hub_and_spoke PASSED                      [100%]
 
 ```
 machinelearningmachine/
+├── launch-windows.bat       # One-click launcher (Windows: double-click)
+├── launch-macos.command     # One-click launcher (macOS: double-click)
+├── launch-linux.sh          # One-click launcher (Linux: ./launch-linux.sh)
 ├── machinelearningmachine/
 │   ├── protocol/
 │   │   ├── message.py       # InterAgentMessage, MessageType, ContentPayload
@@ -324,12 +402,14 @@ machinelearningmachine/
 │   │   ├── debate.py        # Collaborative multi-agent debate
 │   │   └── hub_spoke.py     # Supervisor orchestrator
 │   ├── server/
-│   │   ├── app.py           # FastAPI WebSocket & REST API
+│   │   ├── app.py           # FastAPI WebSocket & REST API (sessions, page reader)
 │   │   └── static/
 │   │       ├── index.html   # Real-time Web Dashboard & Agent Network Graph
-│   │       ├── app.js       # WebSocket streaming & Canvas particle animations
+│   │       ├── app.js       # WebSocket streaming, Read-Aloud Studio, sessions UI
 │   │       └── style.css    # Custom Dark Mode styling
-│   ├── cli.py               # Command-line interface
+│   ├── sessions.py          # Session save/load/delete (JSON files in ~/.module_mesh)
+│   ├── tts.py               # OS text-to-speech for the CLI (say / SAPI / espeak-ng)
+│   ├── cli.py               # Command-line interface (--speak, --export, serve)
 │   └── mesh.py              # Central AgentMesh API entry point
 ├── examples/
 │   ├── 01_arena_talks_to_copilot.py

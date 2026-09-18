@@ -9,18 +9,16 @@ User-centered improvements:
 - Bounded history to prevent memory issues
 """
 
-import asyncio
 import logging
-from typing import Dict, List, Optional, Callable, Awaitable
+from typing import Any, Dict, List, Optional, Callable, Awaitable
 from .protocol.bus import MessageBus
-from .protocol.message import Message, MessageType
+from .protocol.message import Message
 from .agents.base import BaseAgent
 from .agents.arena_ai import ArenaAIAgent
 from .agents.copilot import CopilotAgent
 from .agents.claude import ClaudeAgent
 from .agents.gpt import GPTAgent
 from .agents.custom import CustomAgent
-from .agents.providers import BaseLLMProvider, MockLLMProvider, OpenAIProvider, AnthropicProvider
 from .topologies.p2p import P2PTopology
 from .topologies.pipeline import PipelineTopology
 from .topologies.debate import DebateTopology
@@ -32,7 +30,7 @@ logger = logging.getLogger("AgentMesh")
 class AgentMesh:
     """
     Main communication mesh managing agents, topologies, message routing, and sessions.
-    
+
     User-centered design:
     - Validates inputs early with clear messages
     - Prevents resource exhaustion
@@ -124,7 +122,7 @@ class AgentMesh:
         """
         Direct peer-to-peer dialogue between two modules.
         Example: Arena AI talks to Copilot, or Copilot talks to Claude/GPT.
-        
+
         User-centered: validates early, clear errors.
         """
         prompt = self._validate_prompt(prompt)
@@ -269,6 +267,71 @@ class AgentMesh:
 
         topology = HubSpokeTopology(hub_agent=hub, spoke_agents=spokes, bus=self.bus)
         return await topology.execute(prompt)
+
+    #: Agent IDs that exist in every fresh mesh (recreated, never deleted).
+    BUILTIN_AGENT_IDS = ("arena-ai", "copilot", "claude", "gpt")
+
+    def reset_to_session(self, agents_data: List[Dict[str, Any]]) -> None:
+        """
+        Restore the mesh's agent roster from a saved session.
+
+        - Built-in agents (arena-ai, copilot, claude, gpt) are kept and their
+          memory is cleared, so any provider/API-key configuration survives.
+        - Custom agents that are no longer in the session are removed.
+        - Custom agents present in the session are re-registered.
+        """
+        if not isinstance(agents_data, list) or not agents_data:
+            return
+
+        saved_ids = {
+            a.get("agent_id") for a in agents_data if isinstance(a, dict) and a.get("agent_id")
+        }
+
+        # Remove custom agents that are not part of the saved roster.
+        for aid in list(self.agents.keys()):
+            if aid in saved_ids:
+                continue
+            if aid in self.BUILTIN_AGENT_IDS:
+                # Built-in missing from an old session - just reset its memory.
+                self.agents[aid].clear_memory()
+                continue
+            try:
+                self.unregister_agent(aid)
+            except ValueError:
+                pass
+
+        # Clear memory on built-ins that are part of the saved roster.
+        for aid in self.BUILTIN_AGENT_IDS:
+            agent = self.agents.get(aid)
+            if agent:
+                agent.clear_memory()
+
+        # Re-register the session's custom agents.
+        for a in agents_data:
+            if not isinstance(a, dict):
+                continue
+            aid = (a.get("agent_id") or "").strip()
+            if not aid or aid in self.BUILTIN_AGENT_IDS or aid in self.agents:
+                continue
+            try:
+                agent = CustomAgent(
+                    agent_id=aid,
+                    name=(a.get("name") or aid).strip() or aid,
+                    role=(a.get("role") or "Custom module").strip() or "Custom module",
+                    system_prompt=(
+                        a.get("system_prompt") or a.get("role") or "Custom user-defined module."
+                    ).strip(),
+                    color=a.get("color") or "#ec4899",
+                    avatar=(a.get("avatar") or "🧩").strip() or "🧩",
+                    bus=self.bus,
+                )
+                self.register_agent(agent)
+            except ValueError as e:
+                logger.warning(f"Skipping invalid saved agent '{aid}': {e}")
+
+    def load_messages(self, messages: List[Message]) -> None:
+        """Replace the bus history (used when loading a saved session)."""
+        self.bus.set_history(messages)
 
     def get_history(self) -> List[Message]:
         return self.bus.get_history()
