@@ -9,18 +9,16 @@ User-centered improvements:
 - Bounded history to prevent memory issues
 """
 
-import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Callable, Awaitable
 from .protocol.bus import MessageBus
-from .protocol.message import Message, MessageType
+from .protocol.message import Message
 from .agents.base import BaseAgent
 from .agents.arena_ai import ArenaAIAgent
 from .agents.copilot import CopilotAgent
 from .agents.claude import ClaudeAgent
 from .agents.gpt import GPTAgent
 from .agents.custom import CustomAgent
-from .agents.providers import BaseLLMProvider, MockLLMProvider, OpenAIProvider, AnthropicProvider
 from .topologies.p2p import P2PTopology
 from .topologies.pipeline import PipelineTopology
 from .topologies.debate import DebateTopology
@@ -32,7 +30,7 @@ logger = logging.getLogger("AgentMesh")
 class AgentMesh:
     """
     Main communication mesh managing agents, topologies, message routing, and sessions.
-    
+
     User-centered design:
     - Validates inputs early with clear messages
     - Prevents resource exhaustion
@@ -124,7 +122,7 @@ class AgentMesh:
         """
         Direct peer-to-peer dialogue between two modules.
         Example: Arena AI talks to Copilot, or Copilot talks to Claude/GPT.
-        
+
         User-centered: validates early, clear errors.
         """
         prompt = self._validate_prompt(prompt)
