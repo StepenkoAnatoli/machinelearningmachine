@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Inter-Module Agent Mesh | Arena AI · Copilot · Claude · GPT</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- FontAwesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- Marked for Markdown -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- Highlight.js for Code Highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              purple: '#8b5cf6',
+              cyan: '#06b6d4',
+              amber: '#d97706',
+              emerald: '#10b981',
+              dark: '#0f172a',
+              card: '#1e293b',
+              border: '#334155'
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased">
+
+  <!-- Top Navigation Bar -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-40">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="h-9 w-9 rounded-lg bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center text-white shadow-lg shadow-purple-500/20 font-bold text-lg">
+          ⚡
+        </div>
+        <div>
+          <h1 class="text-lg font-bold bg-gradient-to-r from-purple-400 via-sky-300 to-emerald-400 bg-clip-text text-transparent">
+            Inter-Module Agent Mesh
+          </h1>
+          <p class="text-xs text-slate-400">Multi-Agent Protocol · Arena AI ⇄ Copilot ⇄ Claude ⇄ GPT</p>
+        </div>
+      </div>
+
+      <div class="flex items-center space-x-3">
+        <div id="connectionStatus" class="flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-emerald-950/80 border border-emerald-800 text-emerald-400">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span>Live Mesh Connected</span>
+        </div>
+        <button id="btnSettings" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition">
+          <i class="fa-solid fa-sliders"></i>
+          <span>Settings / Keys</span>
+        </button>
+        <button id="btnNewAgent" class="px-3 py-1.5 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white flex items-center space-x-1.5 transition shadow-sm">
+          <i class="fa-solid fa-plus"></i>
+          <span>Add Module</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 flex flex-col space-y-6 w-full">
+
+    <!-- Top Grid: Interactive Topology Graph & Active Modules -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      
+      <!-- Network Visualization Canvas -->
+      <div class="lg:col-span-2 bg-slate-900/60 border border-slate-800 rounded-xl p-5 flex flex-col relative overflow-hidden backdrop-blur">
+        <div class="flex items-center justify-between mb-3 z-10">
+          <div class="flex items-center space-x-2">
+            <i class="fa-solid fa-network-wired text-purple-400"></i>
+            <h2 class="text-sm font-semibold text-slate-200">Active Communication Mesh Topology</h2>
+          </div>
+          <span id="topologyLabelBadge" class="text-xs font-mono px-2.5 py-0.5 rounded-full bg-purple-900/40 text-purple-300 border border-purple-700/50">
+            P2P: Arena AI ⇄ Copilot
+          </span>
+        </div>
+
+        <!-- Canvas for dynamic packet routing animations -->
+        <div class="relative w-full h-56 rounded-lg bg-slate-950/70 border border-slate-800/80 flex items-center justify-center">
+          <canvas id="topologyCanvas" class="absolute inset-0 w-full h-full"></canvas>
+          <div id="graphOverlay" class="absolute inset-0 pointer-events-none"></div>
+        </div>
+
+        <div class="flex items-center justify-between text-xs text-slate-400 mt-3 z-10">
+          <div class="flex items-center space-x-4">
+            <span class="flex items-center space-x-1.5"><span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span><span>Arena AI</span></span>
+            <span class="flex items-center space-x-1.5"><span class="w-2.5 h-2.5 rounded-full bg-cyan-500"></span><span>Copilot</span></span>
+            <span class="flex items-center space-x-1.5"><span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span><span>Claude</span></span>
+            <span class="flex items-center space-x-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span><span>GPT-4o</span></span>
+          </div>
+          <span class="text-slate-500 italic">Visual packet routing updates on message dispatch</span>
+        </div>
+      </div>
+
+      <!-- Module Registry Summary -->
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 flex flex-col backdrop-blur">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center space-x-2">
+            <i class="fa-solid fa-cubes text-cyan-400"></i>
+            <h2 class="text-sm font-semibold text-slate-200">Registered Modules</h2>
+          </div>
+          <span id="agentCountBadge" class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300">4 Modules</span>
+        </div>
+
+        <div id="moduleList" class="flex-1 space-y-2.5 overflow-y-auto max-h-56 pr-1 custom-scroll">
+          <!-- Rendered dynamically -->
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Control Center & Scenario Trigger -->
+    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 backdrop-blur">
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-sliders text-indigo-400"></i>
+          <h2 class="text-sm font-semibold text-slate-200">Dialogue Orchestration Controls</h2>
+        </div>
+
+        <!-- Presets Buttons -->
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-xs text-slate-400">Quick Scenarios:</span>
+          <button class="preset-btn px-2.5 py-1 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-purple-300 border border-purple-900/60 transition"
+            data-topology="p2p"
+            data-from="arena-ai"
+            data-to="copilot"
+            data-prompt="Implement a high-throughput, thread-safe Token Bucket Rate Limiter in Python with Redis backing.">
+            ⚡ Arena AI ⇄ Copilot (Rate Limiter)
+          </button>
+          <button class="preset-btn px-2.5 py-1 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-900/60 transition"
+            data-topology="debate"
+            data-agents="copilot,claude,gpt"
+            data-prompt="Architectural debate: Compare Apache Kafka vs Redis Streams with Celery for an ultra-low latency microservices event bus.">
+            🔮 Copilot ⇄ Claude ⇄ GPT (Arch Debate)
+          </button>
+          <button class="preset-btn px-2.5 py-1 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-900/60 transition"
+            data-topology="pipeline"
+            data-agents="arena-ai,claude,copilot,gpt"
+            data-prompt="Build a distributed caching system with TTL expiration, LRU eviction, and async invalidation hooks.">
+            🌐 4-Agent Full Relay (Cache Engine)
+          </button>
+        </div>
+      </div>
+
+      <!-- Controls Form -->
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Interaction Topology</label>
+          <select id="selectTopology" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+            <option value="p2p">Peer-to-Peer Dialogue (1-on-1)</option>
+            <option value="pipeline">Sequential Pipeline Relay (Ordered Chain)</option>
+            <option value="debate">Collaborative Multi-Agent Debate</option>
+            <option value="hub">Hub & Spoke (Supervisor Orchestrator)</option>
+          </select>
+        </div>
+
+        <div id="p2pConfigA">
+          <label class="block text-xs font-medium text-slate-400 mb-1">Initiating Module (Agent A)</label>
+          <select id="selectAgentA" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+            <option value="arena-ai">Arena AI (Orchestrator)</option>
+            <option value="copilot">GitHub Copilot (Coder)</option>
+            <option value="claude">Claude 3.5 (Critic)</option>
+            <option value="gpt">GPT-4o (Tester)</option>
+          </select>
+        </div>
+
+        <div id="p2pConfigB">
+          <label class="block text-xs font-medium text-slate-400 mb-1">Responding Module (Agent B)</label>
+          <select id="selectAgentB" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+            <option value="copilot">GitHub Copilot (Coder)</option>
+            <option value="claude">Claude 3.5 (Critic)</option>
+            <option value="gpt">GPT-4o (Tester)</option>
+            <option value="arena-ai">Arena AI (Orchestrator)</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Conversation Turns</label>
+          <select id="selectTurns" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+            <option value="4">4 Turns (Detailed Exchange)</option>
+            <option value="2">2 Turns (Quick Question & Reply)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Task Prompt Box -->
+      <div class="flex flex-col sm:flex-row items-stretch sm:items-end gap-3">
+        <div class="flex-1">
+          <label class="block text-xs font-medium text-slate-400 mb-1">Task Specification / Prompt</label>
+          <textarea id="inputPrompt" rows="2" class="w-full bg-slate-800/90 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 resize-none"
+            placeholder="Describe the task or topic for the modules to discuss and implement...">Implement a robust, thread-safe rate limiter in Python using the token-bucket algorithm.</textarea>
+        </div>
+
+        <div class="flex items-center space-x-2">
+          <button id="btnRun" class="h-10 px-5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-indigo-600/30 transition disabled:opacity-50">
+            <i class="fa-solid fa-play"></i>
+            <span>Execute Dialogue</span>
+          </button>
+          <button id="btnClear" class="h-10 px-3.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 text-xs transition" title="Clear History">
+            <i class="fa-solid fa-trash-can"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live Transcript / Feed -->
+    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 flex-1 flex flex-col backdrop-blur min-h-[400px]">
+      <div class="flex items-center justify-between border-b border-slate-800/80 pb-3 mb-4">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-comments text-emerald-400"></i>
+          <h2 class="text-sm font-semibold text-slate-200">Real-Time Message Transcript</h2>
+          <span id="msgCountBadge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">0 messages</span>
+        </div>
+
+        <div class="flex items-center space-x-2">
+          <button id="btnExportMd" class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition">
+            <i class="fa-solid fa-file-arrow-down"></i>
+            <span>Export MD</span>
+          </button>
+          <button id="btnExportJson" class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition">
+            <i class="fa-solid fa-code"></i>
+            <span>Export JSON</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Messages Stream -->
+      <div id="messagesContainer" class="flex-1 space-y-4 overflow-y-auto max-h-[600px] pr-2 custom-scroll">
+        <!-- Empty state placeholder -->
+        <div id="emptyPlaceholder" class="h-64 flex flex-col items-center justify-center text-slate-500 space-y-3">
+          <div class="w-12 h-12 rounded-full bg-slate-800/80 flex items-center justify-center text-slate-400 text-xl">
+            <i class="fa-solid fa-bolt-lightning"></i>
+          </div>
+          <div class="text-center">
+            <p class="text-sm font-medium text-slate-300">Ready to initiate inter-module dialogue</p>
+            <p class="text-xs text-slate-500 mt-1">Select a scenario above or enter a prompt and click "Execute Dialogue".</p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- Add Custom Module Modal -->
+  <div id="agentModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-6 shadow-2xl">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-base font-bold text-slate-100 flex items-center space-x-2">
+          <i class="fa-solid fa-cube text-indigo-400"></i>
+          <span>Add Custom Module</span>
+        </h3>
+        <button id="btnCloseAgentModal" class="text-slate-400 hover:text-slate-200">
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+
+      <form id="formAddAgent" class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Module ID (slug)</label>
+          <input type="text" id="newAgentId" placeholder="e.g. dba-agent, security-auditor" required
+            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Display Name</label>
+          <input type="text" id="newAgentName" placeholder="e.g. DBA Architect" required
+            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Domain Role</label>
+          <input type="text" id="newAgentRole" placeholder="e.g. Database Schema & Query Optimization Specialist" required
+            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">System Prompt / Instructions</label>
+          <textarea id="newAgentPrompt" rows="3" placeholder="Define this module's responsibilities and technical expertise..." required
+            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"></textarea>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Color Theme</label>
+            <input type="color" id="newAgentColor" value="#ec4899" class="w-full h-8 bg-transparent cursor-pointer rounded border border-slate-700">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Emoji Avatar</label>
+            <input type="text" id="newAgentAvatar" value="🧩" maxlength="4"
+              class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 text-center">
+          </div>
+        </div>
+
+        <div class="flex items-center justify-end space-x-2 pt-3 border-t border-slate-800">
+          <button type="button" id="btnCancelAddAgent" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300">
+            Cancel
+          </button>
+          <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium">
+            Register Module
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Settings / API Keys Modal -->
+  <div id="settingsModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-6 shadow-2xl">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-base font-bold text-slate-100 flex items-center space-x-2">
+          <i class="fa-solid fa-key text-amber-400"></i>
+          <span>Model Provider Settings</span>
+        </h3>
+        <button id="btnCloseSettingsModal" class="text-slate-400 hover:text-slate-200">
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+
+      <div class="text-xs text-slate-400 mb-4 bg-slate-800/50 p-3 rounded-lg border border-slate-800">
+        <p><strong>Note:</strong> By default, all modules operate using the built-in Intelligent Simulator that generates realistic code, architecture critiques, and unit tests without needing external keys. You can optionally connect live OpenAI / Anthropic or local Ollama endpoints below.</p>
+      </div>
+
+      <form id="formSettings" class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">OpenAI API Key (for GPT-4o / Copilot)</label>
+          <input type="password" id="inputOpenAiKey" placeholder="sk-..."
+            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Anthropic API Key (for Claude 3.5)</label>
+          <input type="password" id="inputAnthropicKey" placeholder="sk-ant-..."
+            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Custom / Local LLM Base URL (Ollama, LMStudio, vLLM)</label>
+          <input type="text" id="inputOpenAiBaseUrl" placeholder="http://localhost:11434/v1"
+            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+        </div>
+
+        <div class="flex items-center justify-end space-x-2 pt-3 border-t border-slate-800">
+          <button type="button" id="btnCancelSettings" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300">
+            Cancel
+          </button>
+          <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium">
+            Save Configuration
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <footer class="border-t border-slate-800/80 py-3 text-center text-xs text-slate-500">
+    MachineLearningMachine Inter-Module Mesh · Modular Multi-Agent Protocol
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
