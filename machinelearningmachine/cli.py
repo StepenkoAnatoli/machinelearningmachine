@@ -6,7 +6,8 @@ Interactively trigger module conversations, run topologies, or launch the live w
 import argparse
 import asyncio
 import sys
-import uvicorn
+
+from . import _deps
 from .mesh import AgentMesh
 
 
@@ -56,6 +57,15 @@ def main():
     if args.command == "serve" or len(sys.argv) == 1:
         port = getattr(args, "port", 8000)
         host = getattr(args, "host", "0.0.0.0")
+        # Imported here (not at module level) so that `run` works without the
+        # web-dashboard extras, and so a missing one yields a clear message.
+        missing = _deps.missing(["uvicorn", "fastapi"])
+        if missing:
+            print(_deps.install_hint(missing), file=sys.stderr)
+            raise SystemExit(1)
+
+        import uvicorn
+
         print(f"[*] Starting MachineLearningMachine Live Dashboard on http://{host}:{port} ...")
         uvicorn.run("machinelearningmachine.server.app:app", host=host, port=port, log_level="info")
         return
