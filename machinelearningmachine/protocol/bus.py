@@ -13,15 +13,19 @@ logger = logging.getLogger("MessageBus")
 
 
 class MessageBus:
-    def __init__(self):
+    # Prevent unbounded memory growth - keep last N messages
+    MAX_HISTORY = 1000
+
+    def __init__(self, max_history: int = MAX_HISTORY):
         # agent_id -> message handler callback: async def (message: Message) -> None
         self._agents: Dict[str, Callable[[Message], Awaitable[None]]] = {}
         # topic -> set of agent_ids
         self._topics: Dict[str, Set[str]] = {}
         # Global listeners (e.g. WebSockets, logging, metrics)
         self._global_listeners: List[Callable[[Message], Awaitable[None]]] = []
-        # Message history log
+        # Message history log (bounded)
         self._history: List[Message] = []
+        self._max_history = max_history
         self._lock = asyncio.Lock()
 
     def register_agent(self, agent_id: str, handler: Callable[[Message], Awaitable[None]]) -> None:
@@ -58,9 +62,14 @@ class MessageBus:
         """
         Deliver message according to its recipient_id or topic.
         Also records in history and alerts all global listeners.
+        History is bounded to prevent memory exhaustion.
         """
         async with self._lock:
             self._history.append(message)
+            # Prune oldest messages if we exceed max history
+            if len(self._history) > self._max_history:
+                # Keep most recent messages
+                self._history = self._history[-self._max_history:]
 
         # Notify global listeners (UI, logger, etc.)
         for listener in self._global_listeners:

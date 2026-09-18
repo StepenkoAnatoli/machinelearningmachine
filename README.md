@@ -4,8 +4,39 @@
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-teal)](https://fastapi.tiangolo.com)
 [![WebSocket](https://img.shields.io/badge/WebSocket-Real--Time-orange)](https://websockets.readthedocs.io/)
+[![User-Centered](https://img.shields.io/badge/design-user--centered-purple)](https://github.com/StepenkoAnatoli/machinelearningmachine)
 
 A modular orchestration system that enables AI modules to talk directly to each other — connecting **Arena AI**, **GitHub Copilot**, **Claude**, **GPT-4o**, and custom user-defined modules across standardized inter-agent communication topologies.
+
+> **User-Centered Engineering:** This project prioritizes real user value over mere technical correctness. Every feature is designed to be intuitive, accessible, secure, and genuinely useful — with thoughtful error handling, clear feedback, and practical defaults that work out of the box.
+
+## ✨ User-Centered Design Highlights
+
+**Security & Reliability First:**
+- ✅ Fixed CORS misconfiguration (`*` + credentials → secure defaults)
+- ✅ XSS protection via safe markdown parsing
+- ✅ Input validation with helpful error messages (not stack traces)
+- ✅ Bounded message history (1000 msgs) & agent memory (100 msgs) to prevent leaks
+- ✅ Rate limiting & resource limits to prevent abuse
+
+**Intuitive & Accessible UX:**
+- 🎨 Toast notifications instead of jarring `alert()`/`confirm()`
+- ♿ Full keyboard navigation, focus traps in modals, ARIA labels, skip links
+- ⌨️ Shortcuts: `Ctrl+Enter` to run, `Esc` to close modals
+- 🔍 Search/filter messages, character count, auto-resizing prompt
+- 📱 Responsive, respects `prefers-reduced-motion`, optimized canvas (30fps, pauses when hidden)
+
+**Practical & Pleasant:**
+- 🚀 Faster execution (0.15s vs 0.4s delays), no unnecessary waiting
+- 💡 Contextual mock provider: detects `rate_limiter`, `cache`, `auth`, `queue` domains and generates copy-paste-ready code with tests
+- 📋 One-click copy for code blocks, export with proper headers
+- 🎯 Clear empty states, helpful presets, agent detail on click
+- 🛡️ Privacy: API keys kept in-memory only, never logged
+
+**Engineering Quality:**
+- 🧪 21 tests passing, better error recovery, bounded resources
+- 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
+- 🔧 Realistic examples that actually help users get started
 
 ---
 

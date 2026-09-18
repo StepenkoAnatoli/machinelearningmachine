@@ -1,9 +1,16 @@
 """
 AgentMesh: The Central Inter-Module Orchestration Mesh.
 Connects Arena AI, Copilot, Claude, GPT, and custom agents over a shared message bus.
+
+User-centered improvements:
+- Clear validation with helpful error messages
+- Resource limits and safety checks
+- Better documentation
+- Bounded history to prevent memory issues
 """
 
 import asyncio
+import logging
 from typing import Dict, List, Optional, Callable, Awaitable
 from .protocol.bus import MessageBus
 from .protocol.message import Message, MessageType
@@ -19,14 +26,24 @@ from .topologies.pipeline import PipelineTopology
 from .topologies.debate import DebateTopology
 from .topologies.hub_spoke import HubSpokeTopology
 
+logger = logging.getLogger("AgentMesh")
+
 
 class AgentMesh:
     """
     Main communication mesh managing agents, topologies, message routing, and sessions.
+    
+    User-centered design:
+    - Validates inputs early with clear messages
+    - Prevents resource exhaustion
+    - Provides helpful defaults
     """
 
-    def __init__(self, with_default_agents: bool = True):
-        self.bus = MessageBus()
+    MAX_AGENTS = 20
+    MAX_PROMPT_LENGTH = 5000
+
+    def __init__(self, with_default_agents: bool = True, max_history: int = 1000):
+        self.bus = MessageBus(max_history=max_history)
         self.agents: Dict[str, BaseAgent] = {}
 
         if with_default_agents:
@@ -55,15 +72,27 @@ class AgentMesh:
         return self.agents.get("gpt")
 
     def register_agent(self, agent: BaseAgent) -> None:
-        """Register an agent in the mesh."""
+        """Register an agent in the mesh with validation."""
+        if not agent.agent_id or not agent.agent_id.strip():
+            raise ValueError("Agent ID cannot be empty")
+        if len(self.agents) >= self.MAX_AGENTS:
+            raise ValueError(f"Too many agents (max {self.MAX_AGENTS}). Clear or remove some.")
+        if len(agent.agent_id) > 50:
+            raise ValueError("Agent ID too long (max 50 chars)")
+
         self.agents[agent.agent_id] = agent
         agent.attach_bus(self.bus)
+        logger.info(f"Agent registered: {agent.agent_id} ({agent.name})")
 
     def unregister_agent(self, agent_id: str) -> None:
         """Remove an agent from the mesh."""
         if agent_id in self.agents:
+            # Prevent removing all agents
+            if len(self.agents) <= 1:
+                raise ValueError("Cannot remove last agent")
             self.agents[agent_id].detach_bus()
             del self.agents[agent_id]
+            logger.info(f"Agent unregistered: {agent_id}")
 
     def get_agent(self, agent_id: str) -> Optional[BaseAgent]:
         return self.agents.get(agent_id)
@@ -75,6 +104,16 @@ class AgentMesh:
         """Attach a global listener to all bus messages."""
         self.bus.add_global_listener(callback)
 
+    def _validate_prompt(self, prompt: str) -> str:
+        """Validate prompt with user-friendly errors."""
+        if not prompt or not prompt.strip():
+            raise ValueError("Prompt cannot be empty. Please describe the task you want the agents to work on.")
+        if len(prompt) > self.MAX_PROMPT_LENGTH:
+            raise ValueError(f"Prompt too long ({len(prompt)} chars). Max {self.MAX_PROMPT_LENGTH} characters for readability.")
+        if len(prompt.strip()) < 5:
+            raise ValueError("Prompt too short. Please provide more details (min 5 characters).")
+        return prompt.strip()
+
     async def talk_p2p(
         self,
         from_agent_id: str,
@@ -85,11 +124,26 @@ class AgentMesh:
         """
         Direct peer-to-peer dialogue between two modules.
         Example: Arena AI talks to Copilot, or Copilot talks to Claude/GPT.
+        
+        User-centered: validates early, clear errors.
         """
+        prompt = self._validate_prompt(prompt)
+
+        if not from_agent_id or not to_agent_id:
+            raise ValueError("Both from_agent_id and to_agent_id are required")
+        if from_agent_id == to_agent_id:
+            raise ValueError("Cannot start dialogue with same agent. Choose two different agents.")
+        if turns < 1 or turns > 10:
+            raise ValueError("Turns must be between 1 and 10")
+
         agent_a = self.agents.get(from_agent_id)
         agent_b = self.agents.get(to_agent_id)
-        if not agent_a or not agent_b:
-            raise ValueError(f"One or both agents not found: '{from_agent_id}', '{to_agent_id}'")
+        if not agent_a:
+            available = ", ".join(self.agents.keys())
+            raise ValueError(f"Agent '{from_agent_id}' not found. Available: {available}")
+        if not agent_b:
+            available = ", ".join(self.agents.keys())
+            raise ValueError(f"Agent '{to_agent_id}' not found. Available: {available}")
 
         topology = P2PTopology(agent_a=agent_a, agent_b=agent_b, bus=self.bus, max_turns=turns)
         return await topology.execute(prompt)
@@ -103,14 +157,28 @@ class AgentMesh:
         Run a sequential relay pipeline across an ordered sequence of agents.
         Default: Arena AI -> Claude -> Copilot -> GPT.
         """
+        prompt = self._validate_prompt(prompt)
+
         if agent_ids is None:
             agent_ids = ["arena-ai", "claude", "copilot", "gpt"]
 
+        if not agent_ids:
+            raise ValueError("At least one agent ID required for pipeline")
+        if len(agent_ids) > 10:
+            raise ValueError("Too many agents for pipeline (max 10)")
+
         sequence = []
+        missing = []
         for aid in agent_ids:
             agent = self.agents.get(aid)
             if agent:
                 sequence.append(agent)
+            else:
+                missing.append(aid)
+
+        if missing:
+            available = ", ".join(self.agents.keys())
+            raise ValueError(f"Agents not found: {', '.join(missing)}. Available: {available}")
 
         if not sequence:
             raise ValueError("No valid agents found for pipeline sequence")
@@ -127,10 +195,34 @@ class AgentMesh:
         """
         Run a multi-agent debate session.
         """
+        prompt = self._validate_prompt(prompt)
+
         if agent_ids is None:
             agent_ids = ["copilot", "claude", "gpt"]
 
-        participants = [self.agents[aid] for aid in agent_ids if aid in self.agents]
+        if not agent_ids:
+            raise ValueError("At least one agent required for debate")
+        if len(agent_ids) > 10:
+            raise ValueError("Too many agents for debate (max 10)")
+        if rounds < 1 or rounds > 5:
+            raise ValueError("Rounds must be between 1 and 5")
+
+        participants = []
+        missing = []
+        for aid in agent_ids:
+            agent = self.agents.get(aid)
+            if agent:
+                participants.append(agent)
+            else:
+                missing.append(aid)
+
+        if missing:
+            available = ", ".join(self.agents.keys())
+            raise ValueError(f"Agents not found: {', '.join(missing)}. Available: {available}")
+
+        if not participants:
+            raise ValueError("No valid participants for debate")
+
         topology = DebateTopology(agents=participants, bus=self.bus, rounds=rounds)
         return await topology.execute(prompt)
 
@@ -143,14 +235,38 @@ class AgentMesh:
         """
         Run supervisor orchestration: Hub agent plans, delegates to spokes, and aggregates.
         """
+        prompt = self._validate_prompt(prompt)
+
         hub = self.agents.get(hub_id)
         if not hub:
-            raise ValueError(f"Hub agent '{hub_id}' not found")
+            available = ", ".join(self.agents.keys())
+            raise ValueError(f"Hub agent '{hub_id}' not found. Available: {available}")
 
         if spoke_ids is None:
             spoke_ids = [aid for aid in self.agents.keys() if aid != hub_id]
 
-        spokes = [self.agents[aid] for aid in spoke_ids if aid in self.agents]
+        if not spoke_ids:
+            raise ValueError("At least one spoke agent required")
+
+        spokes = []
+        missing = []
+        for aid in spoke_ids:
+            agent = self.agents.get(aid)
+            if agent:
+                spokes.append(agent)
+            else:
+                missing.append(aid)
+
+        if missing:
+            available = ", ".join(self.agents.keys())
+            raise ValueError(f"Spoke agents not found: {', '.join(missing)}. Available: {available}")
+
+        if not spokes:
+            raise ValueError("No valid spoke agents")
+
+        if hub_id in [s.agent_id for s in spokes]:
+            raise ValueError("Hub agent cannot also be a spoke")
+
         topology = HubSpokeTopology(hub_agent=hub, spoke_agents=spokes, bus=self.bus)
         return await topology.execute(prompt)
 
@@ -161,6 +277,7 @@ class AgentMesh:
         self.bus.clear_history()
         for a in self.agents.values():
             a.clear_memory()
+        logger.info("History cleared")
 
     def export_markdown(self) -> str:
         return self.bus.export_markdown()

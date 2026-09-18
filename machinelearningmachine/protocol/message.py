@@ -22,15 +22,18 @@ class MessageType(str, Enum):
     SYSTEM = "system"           # Orchestrator / environment notification
 
 
+MAX_CONTENT_LENGTH = 50_000
+MAX_TOPIC_LENGTH = 100
+
 class Message(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
-    sender_id: str
-    sender_name: str
-    recipient_id: str = "*"     # Specific agent ID or '*' for broadcast
-    recipient_name: Optional[str] = None
-    topic: str = "general"
+    sender_id: str = Field(..., min_length=1, max_length=100)
+    sender_name: str = Field(..., min_length=1, max_length=200)
+    recipient_id: str = Field(default="*", max_length=100)  # Specific agent ID or '*' for broadcast
+    recipient_name: Optional[str] = Field(default=None, max_length=200)
+    topic: str = Field(default="general", max_length=MAX_TOPIC_LENGTH)
     message_type: MessageType = MessageType.PROPOSAL
-    content: str
+    content: str = Field(..., max_length=MAX_CONTENT_LENGTH)
     artifacts: Dict[str, Any] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     timestamp: float = Field(default_factory=time.time)
