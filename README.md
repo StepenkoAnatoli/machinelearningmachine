@@ -57,7 +57,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 192 tests (179 Python + 13 jsdom XSS cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit` and a vendor-integrity check
+- 🧪 197 tests (184 Python + 13 jsdom XSS cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit` and a vendor-integrity check
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -389,7 +389,7 @@ Everything is offline and hermetic - network calls are injected, never performed
 
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment
-pytest -q                                    # 179 tests
+pytest -q                                    # 184 tests
 node --test tests/js/sanitize.test.mjs       # 13 XSS/sanitizer tests (needs: npm install)
 ruff check machinelearningmachine tests      # lint
 ```
@@ -398,8 +398,10 @@ ruff check machinelearningmachine tests      # lint
 $ pytest -q
 ........................................................................ [ 42%]
 ........................................................................ [ 85%]
-..........................                                               [100%]
-179 passed in 5.7s
+........................................................................ [ 39%]
+........................................................................ [ 78%]
+........................................                                 [100%]
+184 passed in 5.3s
 ```
 
 Coverage by area: protocol/bus bounds, agents and topologies, provider provenance and
