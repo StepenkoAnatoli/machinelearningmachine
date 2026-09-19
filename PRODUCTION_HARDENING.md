@@ -159,7 +159,7 @@ server-side tests cannot prove a browser does anything with the frames it is sen
 | Result | |
 |---|---|
 | `pytest -q` | **365 passed** (was 220 at `9cffbd3`), 0 failures, 2 warnings (both starlette/httpx deprecations) |
-| `node --test "tests/js/*.test.mjs"` | **23 pass** (15 sanitizer + 8 client lifecycle) |
+| `node --test tests/js/*.test.mjs` | **23 pass** (15 sanitizer + 8 client lifecycle) |
 | `ruff check machinelearningmachine tests scripts examples` | clean (examples were broken at baseline and are now in CI's scope) |
 | `scripts/e2e_server_check.py` | **33/33 PASS** against a live server |
 | `python scripts/bench_sessions.py` | 50 transcripts, 73.9 MB: `list_sessions` **1.3 ms** vs **213.4 ms** for read+parse-every-file (167×); the script exits non-zero if the header index ever stops paying for itself |
@@ -274,7 +274,7 @@ pool, or a new dependency.
 
 **Done and verified locally, at the commit this milestone produced:**
 
-- `pytest -q` → 365 passed; `node --test "tests/js/*.test.mjs"` → 23 passed;
+- `pytest -q` → 365 passed; `node --test tests/js/*.test.mjs` → 23 passed;
   `ruff check machinelearningmachine tests scripts examples` → clean.
 - The packaged wheel installs into a clean venv, serves, and passes the 33-check
   end-to-end script (this is now a CI step, so the claim is re-checked on every push).

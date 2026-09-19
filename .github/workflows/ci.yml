@@ -175,7 +175,10 @@ jobs:
           git diff --exit-code machinelearningmachine/server/static/vendor \
             || (echo "vendor/ is out of sync with package.json - run: npm install && python3 scripts/build_vendor.py" && exit 1)
       - name: Browser tests (jsdom)
-        run: node --test "tests/js/*.test.mjs"
+        # The shell expands the glob; node does not. Quoting it would ask node to
+        # open a file literally named "tests/js/*.test.mjs", which only works on
+        # node >= 21 (glob support in --test) and fails on the node 20 runner.
+        run: node --test tests/js/*.test.mjs
 
   security:
     name: dependency audit

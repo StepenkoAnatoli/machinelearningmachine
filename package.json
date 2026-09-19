@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "vendor": "python3 scripts/build_vendor.py",
-    "test:js": "node --test \"tests/js/*.test.mjs\"",
+    "test:js": "node --test tests/js/*.test.mjs",
     "audit:js": "npm audit --audit-level=high"
   },
   "devDependencies": {

@@ -207,7 +207,7 @@ input. Rules the frontend follows (`static/markdown.js`):
 
 The XSS payload corpus that the regex filter used to miss is now an executable
 test, and so is the client's reaction to a server that admits it lost data:
-`node --test "tests/js/*.test.mjs"` (jsdom) covers the sanitizer payloads *and* the tab's
+`node --test tests/js/*.test.mjs` (jsdom) covers the sanitizer payloads *and* the tab's
 behaviour on `stream_gap` / `session_released` / a refused run, including the
 invariant that a server-supplied detail string is rendered as text and can never
 execute - which is why `/api/run`'s error text is passed through `_safe_reason`

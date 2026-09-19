@@ -491,7 +491,7 @@ Everything is offline and hermetic - network calls are injected, never performed
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
 pytest -q                                    # 365 tests, all offline
-node --test "tests/js/*.test.mjs"      # 23 jsdom browser tests (needs: npm ci)
+node --test tests/js/*.test.mjs      # 23 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 python scripts/bench_sessions.py                       # saved-session listing: 1.3 ms vs 213 ms

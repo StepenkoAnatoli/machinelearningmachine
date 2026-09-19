@@ -60,10 +60,13 @@ def test_ci_runs_every_jsdom_suite():
     counts = _jsdom_counts()
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     package = (ROOT / "package.json").read_text(encoding="utf-8")
-    assert 'node --test "tests/js/*.test.mjs"' in workflow, (
-        "CI should glob the jsdom directory so a new suite is picked up automatically"
+    assert "node --test tests/js/*.test.mjs\n" in workflow, (
+        "CI should let the shell glob the jsdom directory, so a new suite is picked up "
+        "automatically. Quoting the pattern instead (node --test \"tests/js/*.test.mjs\") "
+        "asks node to open a file with that literal name: fine on node >= 21, a hard "
+        "failure on the node 20 runner this workflow uses."
     )
-    assert "tests/js/*.test.mjs" in package, "npm run test:js must run the same set"
+    assert '"test:js": "node --test tests/js/*.test.mjs"' in package, "npm run test:js must run the same set"
     assert "node --test tests/js/sanitize.test.mjs" not in workflow, (
         "naming one file silently excludes the others"
     )
