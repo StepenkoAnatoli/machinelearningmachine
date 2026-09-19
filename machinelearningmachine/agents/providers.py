@@ -1175,9 +1175,23 @@ class AnthropicProvider(BaseLLMProvider):
         stats: Dict[str, float] = {}
         data = await post_for_json(provider=self, url=url, headers=headers, payload=payload, stats=stats)
 
-        blocks = data.get("content") or [] if isinstance(data, dict) else []
-        texts = [b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
-        content = "\n".join(t for t in texts if t).strip()
+        # A block is text only when its ``text`` *is* a string, and ``content``
+        # itself has to be a list to be iterable. Both guards are load-bearing: a
+        # gateway that answers ``{"text": 123}`` (or a ``content`` that is not even
+        # a list) used to reach the ``join`` below and raise a raw ``TypeError``
+        # from after the retry loop - not a ``ProviderError``, so the turn lost its
+        # provider, its attempt count and its ``waited``, and with fallback off the
+        # run died on a join (D36). A block this provider cannot read is skipped,
+        # exactly as a block that is not ``type: "text"`` already was.
+        blocks = data.get("content") if isinstance(data, dict) else None
+        texts = [
+            block["text"]
+            for block in (blocks if isinstance(blocks, list) else [])
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ]
+        content = "\n".join(texts).strip()
         if not content:
             raise _shape_error(self, "the API response did not contain a text block", stats)
         return content
