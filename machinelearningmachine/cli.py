@@ -12,7 +12,6 @@ User-centered improvements:
 
 import argparse
 import asyncio
-import os
 import sys
 import textwrap
 
@@ -91,12 +90,18 @@ def main():
     serve_parser.add_argument(
         "--auth-token",
         default=None,
-        help=f"Shared token clients must present. Also readable from {AUTH_TOKEN_ENV_VAR}.",
+        help=(
+            f"Shared token clients must present. Also readable from {AUTH_TOKEN_ENV_VAR} "
+            "(or the MODULE_MESH_AUTH_TOKEN alias)."
+        ),
     )
     serve_parser.add_argument(
         "--enable-url-reader",
         action="store_true",
-        help="Turn on /api/read/url so the dashboard can read a web page aloud (SSRF-guarded)",
+        help=(
+            "Turn on /api/read/url so the dashboard can read a web page aloud (SSRF-guarded). "
+            "Also readable from MACHINELEARNINGMACHINE_ENABLE_URL_READER=1"
+        ),
     )
     serve_parser.add_argument(
         "--max-sessions",
@@ -120,7 +125,10 @@ def main():
         action="append",
         default=None,
         metavar="ORIGIN",
-        help="Extra origin allowed to call the API (repeatable). Avoid unless you need it.",
+        help=(
+            "Extra origin allowed to call the API (repeatable). Avoid unless you need it. "
+            "Also readable from MACHINELEARNINGMACHINE_ALLOW_ORIGINS (comma-separated)."
+        ),
     )
 
     # Run command
@@ -178,13 +186,23 @@ def main():
     args = parser.parse_args()
 
     if args.command == "serve" or len(sys.argv) == 1:
-        from .server.config import ServerConfig, normalize_origins, validate_bind_policy
+        from .env import get as env_get
+        from .server.config import (
+            AUTH_TOKEN_SUFFIX,
+            ServerConfig,
+            normalize_origins,
+            origins_from_env,
+            url_reader_enabled_by_env,
+            validate_bind_policy,
+        )
 
         port = getattr(args, "port", 8000)
         host = getattr(args, "host", "127.0.0.1")
         allow_public = bool(getattr(args, "allow_public", False))
-        auth_token = getattr(args, "auth_token", None) or os.environ.get(AUTH_TOKEN_ENV_VAR)
-        enable_url_reader = bool(getattr(args, "enable_url_reader", False))
+        # Env is honoured for every switch a launch script or container may want
+        # to set; both MACHINELEARNINGMACHINE_* and MODULE_MESH_* spellings work.
+        auth_token = getattr(args, "auth_token", None) or env_get(AUTH_TOKEN_SUFFIX)
+        enable_url_reader = bool(getattr(args, "enable_url_reader", False)) or url_reader_enabled_by_env()
 
         try:
             port = int(port)
@@ -213,7 +231,9 @@ def main():
             fallback_to_mock=not getattr(args, "strict_provider_errors", False),
             max_sessions=max(1, int(getattr(args, "max_sessions", DEFAULT_MAX_SESSIONS_CLI))),
             session_idle_ttl=max(60, int(getattr(args, "session_ttl", DEFAULT_SESSION_TTL_CLI // 60)) * 60),
-            allow_origins=normalize_origins(getattr(args, "allow_origin", None)),
+            allow_origins=normalize_origins(
+                list(getattr(args, "allow_origin", None) or []) + list(origins_from_env())
+            ),
             host=host,
             port=port,
         )
@@ -232,7 +252,7 @@ def main():
         banner = [
             f"[*] MachineLearningMachine dashboard: http://{host}:{port}",
             f"[*] Auth:           {'token required (clients must sign in)' if token else 'off - loopback only'}",
-            f"[*] Page reader:    {'enabled (SSRF-guarded)' if enable_url_reader else 'disabled (start with --enable-url-reader)'}",
+            f"[*] Page reader:    {'enabled (SSRF-guarded)' if enable_url_reader else 'disabled (use --enable-url-reader)'}",
             f"[*] Provider errors: {'fail the run' if not server_config.fallback_to_mock else 'labelled simulator fallback'}",
             f"[*] Sessions:       up to {server_config.max_sessions} live meshes, "
             f"idle for {int(server_config.session_idle_ttl // 60)} min then released",

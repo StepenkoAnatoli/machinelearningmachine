@@ -13,14 +13,23 @@ the reasons a launch must be refused and the CLI is what enforces it.
 from __future__ import annotations
 
 import hmac
-import os
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Tuple
+
+from ..env import flag as env_flag
+from ..env import get as env_get
+from ..env import string_list as env_list
 
 #: Hosts that only the machine itself can reach.
 LOOPBACK_HOSTS: Tuple[str, ...] = ("127.0.0.1", "localhost", "::1")
 
 AUTH_TOKEN_ENV_VAR = "MACHINELEARNINGMACHINE_AUTH_TOKEN"  # noqa: S105  - a variable name, not a value
+#: Every setting below is read through :mod:`machinelearningmachine.env`, which
+#: accepts the canonical ``MACHINELEARNINGMACHINE_*`` spelling and the short
+#: ``MODULE_MESH_*`` alias.
+AUTH_TOKEN_SUFFIX = "AUTH_TOKEN"  # noqa: S105  - an env var name suffix, not a value
+URL_READER_SUFFIX = "ENABLE_URL_READER"
+ALLOW_ORIGINS_SUFFIX = "ALLOW_ORIGINS"
 MIN_TOKEN_LENGTH = 16
 
 SESSION_COOKIE_NAME = "mmm_session"
@@ -113,7 +122,7 @@ def validate_bind_policy(
     (CLI, ``python -m``, launch scripts) refuses the same way.
     """
     errors: List[str] = []
-    token = (auth_token or os.environ.get(AUTH_TOKEN_ENV_VAR) or "").strip()
+    token = (auth_token or env_get(AUTH_TOKEN_SUFFIX) or "").strip()
 
     if not is_loopback_host(host):
         if not allow_public:
@@ -138,6 +147,16 @@ def validate_bind_policy(
     if not (1 <= int(port) <= 65535):
         errors.append(f"Port {port} is out of range (1-65535).")
     return errors
+
+
+def origins_from_env() -> Tuple[str, ...]:
+    """Operator-configured CORS origins, from either env spelling."""
+    return normalize_origins(env_list(ALLOW_ORIGINS_SUFFIX))
+
+
+def url_reader_enabled_by_env() -> bool:
+    """``--enable-url-reader`` is the normal switch; the env var is for launch scripts."""
+    return env_flag(URL_READER_SUFFIX)
 
 
 def normalize_origins(origins: Optional[Iterable[str]]) -> Tuple[str, ...]:

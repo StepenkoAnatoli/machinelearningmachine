@@ -6,7 +6,8 @@ so users can store a conversation and continue it later — no export/import
 file juggling required. Sessions are written to the user's home directory
 (``~/.module_mesh/sessions``) so they survive repo updates and are never
 committed to git. Override the location with the environment variable
-``MODULE_MESH_SESSIONS_DIR`` (handy for tests).
+``MACHINELEARNINGMACHINE_SESSIONS_DIR`` (alias ``MODULE_MESH_SESSIONS_DIR``),
+which is also how tests point the store at a temp directory.
 
 User-centered design:
 - Human-friendly session names, sanitized safely for filenames
@@ -18,15 +19,20 @@ User-centered design:
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .env import get as env_get
+
 #: Environment variable that overrides the session storage directory.
+#: Both ``MACHINELEARNINGMACHINE_SESSIONS_DIR`` and this short alias are honoured
+#: (see :mod:`machinelearningmachine.env`); the constant keeps the legacy spelling
+#: because tests and docs refer to it.
 SESSIONS_ENV_VAR = "MODULE_MESH_SESSIONS_DIR"
+SESSIONS_DIR_SUFFIX = "SESSIONS_DIR"
 
 #: Default location: outside the repo, inside the user's home directory.
 DEFAULT_SESSIONS_DIR = Path.home() / ".module_mesh" / "sessions"
@@ -69,8 +75,8 @@ def sessions_dir(namespace: Optional[str] = None) -> Path:
     ``namespace`` selects a per-client sub-folder (see :func:`sanitize_namespace`);
     ``None`` means the shared root, which is what a single-user local install uses.
     """
-    env = os.environ.get(SESSIONS_ENV_VAR, "").strip()
-    directory = Path(env).expanduser() if env else DEFAULT_SESSIONS_DIR
+    override = env_get(SESSIONS_DIR_SUFFIX)
+    directory = Path(override).expanduser() if override else DEFAULT_SESSIONS_DIR
     namespace = sanitize_namespace(namespace)
     if namespace:
         directory = directory / namespace
