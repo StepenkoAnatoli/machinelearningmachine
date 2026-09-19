@@ -53,6 +53,8 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D24** | Hardening record still claims runs are refused and a queue would need persistence | F2, the F2 evidence row, two section-7 bullets and the N1/N2/N4 paragraph contradicted the rewritten decision B; the user-centered-design table promised a `409`; the README test tree said "9 tests" for a 17-test suite and "24" jsdom for 32 | Low (documentation-in-record; the code was already correct) |
 
+| **D25** | The terminal-run record outlives the session, so a resurrected tab can misread a 202 | The browser regression finished run-2, then (release, no reload) queued a new run-2: the stale record released the button with a bogus "Dialogue completed" for a run that was actually waiting | Low (needs release-without-reload plus an id collision; the later `run_started` re-busies the tab, so it flickers rather than wedges) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -354,6 +356,8 @@ exercise was not to add unfounded claims:
 | D23 socket beats HTTP 202 | F15 | `static/app.js` terminal-run record + 202 reconcile (ended → release with its ending; already active → active mode; else queued mode) | jsdom started-before-202 and cancelled-before-202 cases (deferred 202 body) |
 
 | D24 stale no-queue prose | F13, N3 | PRODUCTION_HARDENING.md (F2, §4 F2/F9/F15 rows, §7, §8 N-para), USER_CENTERED_DESIGN.md queue row, README test tree + jsdom count | `test_docs_are_accurate.py` (hardening-agrees, UCD-agrees, listing-counts cases) |
+
+| D25 terminal record outlives the session | F15 | `static/app.js` request-window scoping (`pendingRequestAt`, stamped terminal entries) | jsdom stale-record case (stubbed clock: stale completion, then a colliding 202) |
 
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
 `--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented

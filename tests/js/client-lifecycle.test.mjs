@@ -588,6 +588,42 @@ test("a run cancelled before its 202 arrives releases the tab instead of wedging
     `the tab is told its run was cancelled: ${JSON.stringify(toasts)}`);
 });
 
+test("a terminal record from an earlier session must not reconcile a new 202", async () => {
+  // D25: run ids restart at run-1 in every session, but the terminal record
+  // outlives the session: after a release without reload, a 202 can collide with
+  // a dead run's record. Only frames inside this request's window may reconcile.
+  const { win, calls, socket } = await loadClient((url) => {
+    if (String(url).includes("/api/run")) {
+      return { status: 202, body: { status: "queued", run_id: "run-2", queue_position: 1, max_queued: 5 } };
+    }
+    return okResponder();
+  });
+  let now = 1000;
+  win.Date.now = () => now;
+  // An earlier session ran run-2 to completion, then died (released, no reload).
+  socket().emit({ type: "run_started", run_id: "run-2", topology: "pipeline" });
+  socket().emit({ type: "run_completed", run_id: "run-2", simulated_count: 0, truncated_count: 0 });
+  for (let i = 0; i < 6; i++) await new Promise((r) => win.setTimeout(r, 0));
+  assert.equal(win.document.getElementById("btnRun").disabled, false);
+  // Much later, a new session queues a run that reuses the id.
+  now = 2000;
+  win.document.getElementById("inputPrompt").value = "Design a token bucket rate limiter";
+  win.document.getElementById("btnRun").click();
+  for (let i = 0; i < 10; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  assert.equal(win.document.getElementById("btnRun").disabled, true,
+    "a stale record from a dead session must not release a genuinely queued run");
+  const toasts = [...win.document.querySelectorAll("#toastContainer .toast")].map((t) => t.textContent);
+  assert.ok(toasts.some((t) => /queued at position 1/i.test(t)),
+    `the live run takes the queued identity: ${JSON.stringify(toasts)}`);
+  const stop = win.document.getElementById("btnStop");
+  assert.equal(stop.disabled, false);
+  stop.click();
+  for (let i = 0; i < 6; i++) await new Promise((r) => win.setTimeout(r, 0));
+  assert.ok(calls.fetch.some((c) => c.url === "/api/runs/run-2/cancel" && c.options.method === "POST"),
+    "Stop targets the live queued run");
+});
+
 /*
  * A guard on the harness itself, not on the client.
  *
