@@ -186,3 +186,47 @@ def test_readme_running_tests_block_states_todays_count(request):
     assert all(n == collected for n in counts), (
         f"the Running Tests block claims {counts} but pytest collected {collected}"
     )
+
+
+#: A findings-register row in section 1, and its traceability twin in section 8.
+_S1_ROW = re.compile(r"^\| \*\*D(\d+)\*\* \|", re.M)
+_S8_ROW = re.compile(r"^\| D(\d+) ", re.M)
+
+
+def _section(text, start, end):
+    return text[text.index(start):text.index(end)]
+
+
+def test_the_findings_register_is_in_numeric_order():
+    """
+    D35: the register this document exists to be readable by.
+
+    Measured before the fix: section 1 read
+    ``1..25, 29, 28, 27, 26, 30, 31, 32, 33, 34`` and section 8 read
+    ``1..24, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25``. Both tables covered the
+    same ids with no gaps and no duplicates, so nothing was missing - the rows
+    were simply inverted, because each new finding had been inserted *above* the
+    previous one instead of after it. A reader scanning for D27 finds it between
+    D29 and D26, and a reviewer checking that every finding has a test has to
+    sort the table in their head first.
+
+    Ordering is a claim a test can hold, exactly like the counts above.
+    """
+    prod = (ROOT / "PRODUCTION_HARDENING.md").read_text(encoding="utf-8")
+    s1 = [int(n) for n in _S1_ROW.findall(_section(prod, "## 1. Findings", "## 2. Requirements"))]
+    s8 = [int(n) for n in _S8_ROW.findall(_section(prod, "## 8. Traceability", "## 9. Validation"))]
+
+    assert s1 == sorted(s1), f"section 1's findings are out of order: {s1}"
+    assert s8 == sorted(s8), f"section 8's traceability rows are out of order: {s8}"
+    # No gaps, no duplicates, and the two tables describe the same findings.
+    assert s1 == list(range(1, len(s1) + 1)), f"section 1 skips or repeats an id: {s1}"
+    assert s8 == list(range(1, len(s8) + 1)), f"section 8 skips or repeats an id: {s8}"
+    assert s1 == s8, f"the register and its traceability disagree: {s1} vs {s8}"
+
+
+def test_the_validation_subsections_are_in_numeric_order():
+    """Section 9's addenda are appended per stage, so they must stay chronological."""
+    prod = (ROOT / "PRODUCTION_HARDENING.md").read_text(encoding="utf-8")
+    ids = [int(m) for m in re.findall(r"^### D(\d+)", prod, re.M)]
+    assert ids, "section 9 should carry at least one dated addendum"
+    assert ids == sorted(ids), f"section 9's addenda are out of order: {ids}"
