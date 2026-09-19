@@ -16,7 +16,8 @@ Everything in this module exists to make that impossible-ish:
 * redirects are never followed implicitly - each hop is validated again,
 * response bodies are capped by bytes, not buffered without limit,
 * credentials, cookies and proxy settings are never sent,
-* an operator allowlist (``MODULE_MESH_URL_ALLOWLIST``) can replace "block the
+* an operator allowlist (``MACHINELEARNINGMACHINE_URL_ALLOWLIST``, alias
+  ``MODULE_MESH_URL_ALLOWLIST``) can replace "block the
   bad addresses" with "allow only the good ones", which is the stronger rule.
 
 Residual risk, stated plainly: validation and connection are two separate
@@ -28,12 +29,13 @@ from a network namespace with its own egress policy - see ``SECURITY.md``.
 from __future__ import annotations
 
 import ipaddress
-import os
 import re
 import socket
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
+
+from . import env
 
 # ---------------------------------------------------------------------------
 # Policy constants (imported by the server and by tests)
@@ -57,7 +59,11 @@ READ_TIMEOUT = 15.0
 
 #: Environment variable operators can use to replace the blocklist with an
 #: explicit allowlist of hostnames: ``MODULE_MESH_URL_ALLOWLIST=example.com,blog.example``
+#: Both ``MACHINELEARNINGMACHINE_URL_ALLOWLIST`` and the short alias are read;
+#: see :mod:`machinelearningmachine.env`. The constant keeps the legacy spelling
+#: because it is what the docs and SECURITY.md name.
 URL_ALLOWLIST_ENV_VAR = "MODULE_MESH_URL_ALLOWLIST"
+URL_ALLOWLIST_SUFFIX = "URL_ALLOWLIST"
 
 #: Extra networks ``ipaddress`` does not classify as private that must not be
 #: reachable either (``0.0.0.0/8`` "this network", benchmark range, TEST-NETs).
@@ -107,7 +113,7 @@ class FetchError(RuntimeError):
 def operator_allowlist() -> Optional[Tuple[str, ...]]:
     """Hostnames the operator explicitly permitted, or ``None`` for "use the
     IP blocklist" mode."""
-    raw = os.environ.get(URL_ALLOWLIST_ENV_VAR, "").strip()
+    raw = env.get(URL_ALLOWLIST_SUFFIX)
     if not raw:
         return None
     hosts = tuple(
@@ -206,6 +212,20 @@ def validate_target(url: str, *, resolver: Optional[Callable[[str], Sequence[str
     if parsed.username or parsed.password:
         raise UnsafeURL("Web addresses with embedded credentials are not allowed.")
 
+    host = parsed.hostname.lower().strip(".")
+    # A literal private/loopback address is reported as such *before* the port
+    # check: "http://127.0.0.1:8080/" is a server-side request forgery attempt,
+    # and telling the user "only ports 80/443" would describe the lesser problem.
+    try:
+        literal = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        literal = None
+    if literal is not None and is_blocked_ip(str(literal)):
+        raise UnsafeURL(
+            "That address points at a private or local network, which the page "
+            "reader refuses to contact (server-side request forgery protection)."
+        )
+
     try:
         port = parsed.port
     except ValueError as exc:  # e.g. "http://host:abc/"
@@ -215,20 +235,14 @@ def validate_target(url: str, *, resolver: Optional[Callable[[str], Sequence[str
     if port not in ALLOWED_PORTS:
         raise UnsafeURL(f"Only ports {', '.join(str(p) for p in ALLOWED_PORTS)} are allowed.")
 
-    host = parsed.hostname.lower().strip(".")
     if not allowed_by_operator(host):
         raise UnsafeURL("That host is not in this server's allowlist of readable sites.")
 
-    # A literal IP is checked directly *and* through the resolver, because
-    # glibc also accepts 0x7f000001 / 2130706433 / 0177.0.0.1 as 127.0.0.1 and
-    # the HTTP client will happily connect to whatever the resolver says.
-    # Names are resolved first: "localhost" or "internal.corp" are private
-    # addresses in disguise.
-    try:
-        literal = ipaddress.ip_address(host.strip("[]"))
-    except ValueError:
-        literal = None
-
+    # A literal IP is checked directly *and* through the resolver (already partly
+    # decided above for blocked literals), because glibc also accepts
+    # 0x7f000001 / 2130706433 / 0177.0.0.1 as 127.0.0.1 and the HTTP client will
+    # connect to whatever the resolver says. Names are resolved: "localhost" or
+    # "internal.corp" are private addresses in disguise.
     addresses: List[str] = [str(literal)] if literal is not None else []
     if literal is None and host in _LOCAL_HOSTNAMES:
         raise UnsafeURL(
