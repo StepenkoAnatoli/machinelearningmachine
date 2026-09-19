@@ -1204,6 +1204,9 @@ def _register_routes(
                 "queue_position": position,
                 "queue_depth": position,
                 "topology": req.topology,
+                # A tab that missed run_started (a gap ate it) attributes the
+                # later completion by this id instead of wedging busy.
+                "active_run_id": state.active_run_id,
             })
             return JSONResponse(
                 status_code=202,

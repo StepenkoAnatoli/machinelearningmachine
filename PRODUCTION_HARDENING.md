@@ -47,6 +47,8 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D21** | Queued runs skip validation that identical immediate runs get | `{"topology": "pipeline", "agent_ids": []}` was `400` on an idle session but `202` - and then ran the *default* roster - on a busy one; hub runs with an unknown hub agent or the hub as its own spoke were `400`-now versus `202`-then-`run_error` | Medium (a request that must fail can execute instead - including live provider calls - when the session happens to be busy) |
 
+| **D22** | `run_queued` omits the active run id, so a tab that missed `run_started` wedges busy | The browser regression never saw `run_started` (a gap ate it), went busy on `run_queued` with no id to attribute to, and stayed busy after the queued run was cancelled and the active run completed | Low (needs a 128-frame gap to eat exactly `run_started`; a reconnect heals it via the snapshot) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -337,6 +339,8 @@ exercise was not to add unfounded claims:
 | D20 second run refused | F15 | `server/config.py:MAX_QUEUED_SUFFIX`, `server/state.py:run_queue`, `cli.py:--max-queued`, `server/app.py` queue branch + pump + queued-aware cancel, `static/app.js` queued lifecycle | `test_run_queue.py` (202+position, 429+Retry-After, 0→409, FIFO order, queued cancel, per-scope isolation), `test_cli_live.py` max_queued resolution, jsdom queued-position + queue-full cases, e2e "concurrency in the same tab queues instead of refusing" |
 
 | D21 queued runs skip validation | F11 | `server/app.py:/api/run` pre-busy checks for an empty roster and hub hub/spokes, in mesh order with mesh-identical messages | `test_queued_run_validation.py` (busy/idle parity: empty roster × pipeline/debate/hub, unknown hub, hub-as-own-spoke) |
+
+| D22 queued frame omits the active id | F15 | `server/app.py` `run_queued` carries `active_run_id`, `static/app.js` adopts it on receipt | `test_run_queue.py::test_queued_frame_names_the_active_run_it_waits_behind`, jsdom missed-`run_started` adoption case |
 
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
 `--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented as

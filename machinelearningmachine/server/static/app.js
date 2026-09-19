@@ -870,6 +870,13 @@ document.addEventListener("DOMContentLoaded", () => {
       // waiting. The button stays busy; only an idle tab is told, so the tab
       // that queued it does not get the same position twice (its HTTP already
       // said it).
+      // Adopt the run it waits behind: a tab that missed run_started (a gap ate
+      // it) would otherwise go busy with no id to attribute the later
+      // completion to, and wedge busy forever. Frames arrive in publish order,
+      // so this id is never older than what the tab already tracks.
+      if (data.active_run_id) {
+        activeRunId = data.active_run_id;
+      }
       remoteRunActive = true;
       syncRunActivity();
       if (!localRun && data.queue_position) {

@@ -510,6 +510,31 @@ test("a full queue is reported as retryable, not as a failure", async () => {
     "a refused queue-full run must not leave the button stuck busy");
 });
 
+test("a tab that missed run_started learns the active run from run_queued", async () => {
+  // D22: run_started can be the frame a gap eats. The tab then goes busy on
+  // run_queued with no id to attribute the later completion to - unless the
+  // frame names the run it waits behind.
+  const { win, calls, socket } = await loadClient(okResponder);
+  socket().emit({
+    type: "run_queued", run_id: "run-2", queue_position: 1, queue_depth: 1,
+    topology: "pipeline", active_run_id: "run-1",
+  });
+  assert.equal(win.document.getElementById("btnRun").disabled, true);
+  const stop = win.document.getElementById("btnStop");
+  assert.equal(stop.disabled, false, "Stop targets the adopted active run");
+  stop.click();
+  for (let i = 0; i < 6; i++) await new Promise((r) => win.setTimeout(r, 0));
+  assert.ok(calls.fetch.some((c) => c.url === "/api/runs/run-1/cancel" && c.options.method === "POST"),
+    "the adopted id - not the queued one - is what Stop offers");
+  // The queued run is cancelled before starting; then the active run finishes.
+  // Neither may wedge this tab busy.
+  socket().emit({ type: "run_cancelled", run_id: "run-2", queued: true });
+  socket().emit({ type: "run_completed", run_id: "run-1", simulated_count: 0, truncated_count: 0 });
+  for (let i = 0; i < 6; i++) await new Promise((r) => win.setTimeout(r, 0));
+  assert.equal(win.document.getElementById("btnRun").disabled, false);
+  assert.equal(win.document.getElementById("btnStop").disabled, true);
+});
+
 /*
  * A guard on the harness itself, not on the client.
  *

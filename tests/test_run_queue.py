@@ -268,3 +268,54 @@ def test_queue_is_per_session_like_the_run_lock():
                 assert (await alice_task).status_code == 200
 
     asyncio.run(scenario())
+
+
+def test_queued_frame_names_the_active_run_it_waits_behind():
+    # D22: a tab that missed run_started (a gap ate it) learns the active run
+    # from run_queued - without the id it goes busy with nothing to attribute
+    # the later completion to, and wedges busy forever.
+    async def scenario():
+        app = create_app(ServerConfig(host="127.0.0.1", max_queued=5))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            await http.get("/api/agents")
+            state = app.state.registry._states[http.cookies.get("mmm_session")]
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            class HeldProvider(BaseLLMProvider):
+                async def generate(self, **kwargs):
+                    entered.set()
+                    await release.wait()
+                    return "held reply"
+
+            for agent in state.mesh.agents.values():
+                agent.provider = HeldProvider()
+            frames = []
+            original_publish = state.publish
+
+            def spy(payload):
+                frames.append(payload)
+                return original_publish(payload)
+
+            state.publish = spy
+            first_task = asyncio.create_task(
+                http.post("/api/run", json={
+                    "topology": "pipeline", "prompt": "Design a cache layer", "agent_ids": ["gpt"],
+                })
+            )
+            await asyncio.wait_for(entered.wait(), 2)
+            active_id = state.active_run_id
+            try:
+                queued = await http.post("/api/run", json={
+                    "topology": "pipeline", "prompt": "Design another cache", "agent_ids": ["gpt"],
+                })
+                assert queued.status_code == 202
+                queued_id = queued.json()["run_id"]
+                announced = [f for f in frames if f.get("type") == "run_queued" and f.get("run_id") == queued_id]
+                assert len(announced) == 1, f"expected one run_queued for {queued_id}"
+                assert announced[0]["active_run_id"] == active_id
+            finally:
+                release.set()
+                assert (await first_task).status_code == 200
+
+    asyncio.run(scenario())
