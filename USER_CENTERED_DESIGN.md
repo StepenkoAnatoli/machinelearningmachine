@@ -359,10 +359,10 @@ The second user-centered pass focused on three things users repeatedly hit: **ge
 ### One-Click Launch (no terminal required)
 - **Problem**: The documented install was `git clone` → `python -m venv` → `pip install -e .` → `python -m ...`. Five steps, several of which fail confusingly (PEP 668, wrong interpreter, `ModuleNotFoundError: pydantic`) for non-developers.
 - **Solution**: Three tiny launcher files at the repo root — `launch-windows.bat`, `launch-macos.command`, `launch-linux.sh`. **Double-click the one for your OS.** Each one:
-  1. Detects an installed Python and gives a plain-English install hint if missing.
-  2. Creates a private `.venv` the first time (isolated, no PEP 668 clashes).
+  1. Detects an installed Python and gives a plain-English install hint if missing — and refuses to continue with an interpreter older than 3.10 (including the Microsoft Store placeholder that answers to `python`), naming the download page and the "Add python.exe to PATH" checkbox instead of failing later inside pip (round 4).
+  2. Creates a private `.venv` the first time (isolated, no PEP 668 clashes), and rebuilds it if a previous run left it half-created.
   3. Installs dependencies once, marked by a `.deps_installed` flag so later launches are instant.
-  4. Starts the dashboard on `127.0.0.1:8000` and auto-opens the browser.
+  4. Starts the dashboard on `127.0.0.1` — on port 8000, or on the first free port when 8000 is taken — and auto-opens the browser at the address it actually chose (round 4).
 - **Design choices**: everything happens inside the project folder (`.venv`) so nothing global is touched; failure paths always say what to do next; closing the window stops the app.
 
 ### Saved Sessions (work you can come back to)
@@ -424,22 +424,59 @@ ALL E2E CHECKS PASSED (33 checks, real uvicorn + real WebSocket, two browser ses
 
 ---
 
+## 🪟 Round 4: the install path, for the people the launchers exist for
+
+Rounds 1–3 asked what a user experiences *inside* the app. Round 4 asked what a user
+experiences *before* it - the five minutes in which a beginner decides whether to keep
+going. Three defects, all of them invisible on the machine that wrote them:
+
+| What a beginner on Windows would have experienced | What was actually wrong | What it is now |
+| --- | --- | --- |
+| Double-clicking `launch-windows.bat` - the first click of the whole project | The file was committed with **mixed line endings** (47 CRLF lines, the rest bare LF), and `.gitattributes` forced `eol=lf` on `*.bat`, so every clone produced an LF-only batch file. cmd.exe parses a `.bat` line by line and is unreliable with LF-only input; labels and multi-line `if (...)` blocks are the usual casualties | `.gitattributes` pins `*.bat`/`*.cmd` to CRLF (and the shell launchers to LF), the file is CRLF end to end, and `tests/test_launchers.py` fails the build on a mixed file |
+| A Python 3.8 (or the Microsoft Store placeholder) on PATH: the first run died minutes later in a wall of pip output | The launchers checked that *a* Python existed, never *which* | All three check `sys.version_info >= (3, 10)` and print the consequence in plain words - the download link, the "Add python.exe to PATH" checkbox, and the fact that the Store `python` is a placeholder |
+| A copy of the app left running from yesterday: the window printed "port already in use" and stopped, which reads as "this program is broken" | Every launcher bound port 8000 unconditionally, and the browser opened at 8000 regardless | `scripts/pick_port.py` returns the first free port (8000, 8001, … and an OS-assigned port if the whole range is busy); the launcher prints that address, opens the browser there, and says plainly that 8000 was taken |
+| "How do I install Python?" - the guide assumed you already had a terminal workflow | The README's install section is written for developers (clone, venv, `pip install -e .`) | [`INSTALL-WINDOWS.md`](INSTALL-WINDOWS.md): numbered steps for a complete beginner, the two dialogs Windows actually shows (SmartScreen, "Unblock"), a troubleshooting table keyed on the exact messages the launcher prints, and where the data lives |
+| An empty dashboard, a wall of panels, no idea which button starts anything | The empty state was one sentence and three feature badges | The empty transcript is now three numbered steps (say what you want → click *Execute Dialogue* → read the answers), states that no API key is needed and what "simulated" means, and a **How to use** button reopens the same three steps at any time - both asserted in `tests/js/client-lifecycle.test.mjs` |
+| The new three-step block and How-to-use dialog arrived with none of their layout | The shipped `tailwind.css` is a *build product* committed into the tree, and it was one build behind: `index.html` gained `.max-w-xl`/`.mt-5`/`.sm\:flex`/`.text-left` while the stylesheet kept the previous output. No test compared the stylesheet with the markup it is built from - CI's "vendor integrity" job (rebuild and require a clean tree) was the only thing that noticed, and only after a push | Assets rebuilt and committed, and `tests/test_frontend_security.py` now fails locally - naming the exact missing classes - if the shipped stylesheets do not cover the markup |
+
+**The principle that came out of this round**: the install path is part of the product.
+A file nobody edits is a file that rots silently, so the launchers, the guide and the
+`.gitattributes` rules are asserted by tests like any other behaviour - a mixed-ending
+`.bat` or a launcher that assumes 8000 is free now fails CI instead of failing a user.
+
+### Validation (round 4)
+
+```
+$ pytest -q
+475 passed in 32.5s
+$ node --test tests/js/*.test.mjs
+# tests 39
+# pass 39
+# fail 0
+$ ruff check machinelearningmachine tests scripts examples
+All checks passed!
+$ python scripts/e2e_server_check.py --base http://127.0.0.1:8799
+ALL E2E CHECKS PASSED
+```
+
+---
+
 ## 🔮 Future User-Centered Improvements (Not Yet Done)
 
-1. **Mid-run cancellation**: a run is bounded by `--run-timeout`, not by a stop button;
-   and a second run is refused rather than queued. Queueing is the natural next step.
-2. **Pagination / virtual scrolling**: for 1000+ messages the transcript array is capped
-   and the feed says so, but there is no windowed scroll.
-3. **Dark/light toggle**: currently dark only, some users prefer light.
-4. **Copy prompt button**: quick duplicate of the last prompt.
-5. **Agent presets**: "Security Auditor", "DB Expert" templates.
-6. **Offline support**: service worker for PWA.
-7. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
+1. **Dark/light toggle**: currently dark only, some users prefer light.
+2. **Copy prompt button**: quick duplicate of the last prompt.
+3. **Agent presets**: "Security Auditor", "DB Expert" templates for the *Add Module* form
+   (the existing presets fill in a scenario, not a module).
+4. **Offline support**: service worker for PWA.
+5. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
 
 These are noted but not implemented to keep scope focused on highest user value fixes.
 (An earlier version of this list proposed *session isolation* and *export
 `Content-Disposition`* as future work; both shipped since, so they have been removed
-rather than left as stale claims.)
+rather than left as stale claims. The same rule removed *mid-run cancellation* and
+*windowed scrolling* in round 4: Stop shipped in round 3, and the transcript has
+rendered at most `RENDER_WINDOW` (200) cards since - claiming otherwise made this
+document disagree with the dashboard it describes.)
 
 ---
 

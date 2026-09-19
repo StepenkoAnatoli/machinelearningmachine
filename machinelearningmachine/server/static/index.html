@@ -44,6 +44,10 @@
           <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true"></span>
           <span>Live Mesh Connected</span>
         </div>
+        <button id="btnHelp" class="hidden sm:flex px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" title="Three steps: describe a task, run it, read the answers" aria-label="How to use this page">
+          <i class="fa-regular fa-circle-question" aria-hidden="true"></i>
+          <span>How to use</span>
+        </button>
         <button id="btnSessions" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Open saved sessions">
           <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
           <span>Sessions</span>
@@ -298,9 +302,27 @@
           <div class="w-12 h-12 rounded-full bg-slate-800/80 flex items-center justify-center text-slate-400 text-xl" aria-hidden="true">
             <i class="fa-solid fa-bolt-lightning"></i>
           </div>
-          <div class="text-center max-w-md">
-            <p class="text-sm font-medium text-slate-300">Ready to initiate inter-module dialogue</p>
-            <p class="text-xs text-slate-500 mt-1">Select a scenario above or enter a prompt and click "Execute Dialogue". The mock simulator works without API keys and generates realistic code examples.</p>
+          <div class="text-center max-w-xl">
+            <p class="text-sm font-medium text-slate-300">Nothing has been asked yet — here is how it works</p>
+            <ol class="howto-steps text-left text-xs text-slate-400 mt-4 space-y-2">
+              <li>
+                <span class="step-dot" aria-hidden="true">1</span>
+                <span><strong class="text-slate-300">Say what you want done.</strong> Type it in the box above, or click one of the “Quick Scenarios” buttons to fill it in for you.</span>
+              </li>
+              <li>
+                <span class="step-dot" aria-hidden="true">2</span>
+                <span><strong class="text-slate-300">Click “Execute Dialogue”</strong> (or press <kbd class="px-1 py-0.5 bg-slate-800 border border-slate-700 rounded text-[10px]">Ctrl+Enter</kbd>). The modules answer one after another.</span>
+              </li>
+              <li>
+                <span class="step-dot" aria-hidden="true">3</span>
+                <span><strong class="text-slate-300">Read the answers below</strong> — copy a code block, hear it with 🔊, or keep the whole conversation with <em>Sessions</em>.</span>
+              </li>
+            </ol>
+            <p class="text-[11px] text-slate-500 mt-4">
+              No API keys or internet needed: every module answers from the built-in simulator and labels its
+              replies <span class="prov-badge prov-sim">simulated</span> (no real AI model was called).
+              Real model answers are optional — see <strong>Settings / Keys</strong>.
+            </p>
             <div class="mt-4 flex flex-wrap justify-center gap-2">
               <span class="text-[11px] px-2 py-1 rounded-full bg-slate-800 border border-slate-700">No setup needed</span>
               <span class="text-[11px] px-2 py-1 rounded-full bg-slate-800 border border-slate-700">Real-time streaming</span>
@@ -507,6 +529,49 @@
           </button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- How-to-use Modal - the same three steps as the empty transcript, available any time -->
+  <div id="helpModal" class="modal-backdrop fixed inset-0 z-50 hidden flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="help-modal-title" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-lg w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto custom-scroll">
+      <div class="flex items-center justify-between mb-4">
+        <h3 id="help-modal-title" class="text-base font-bold text-slate-100 flex items-center space-x-2">
+          <i class="fa-regular fa-circle-question text-indigo-400" aria-hidden="true"></i>
+          <span>How to use this page</span>
+        </h3>
+        <button id="btnCloseHelpModal" class="text-slate-400 hover:text-slate-200 p-1 rounded focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Close how-to-use">
+          <i class="fa-solid fa-xmark text-lg" aria-hidden="true"></i>
+        </button>
+      </div>
+
+      <ol class="howto-steps text-xs text-slate-300 space-y-3">
+        <li>
+          <span class="step-dot" aria-hidden="true">1</span>
+          <span><strong>Say what you want done.</strong> Type it in the “Task Specification / Prompt” box — in your own words is fine, for example
+          “Write a Python function that retries a failed download three times”. Or click one of the <em>Quick Scenarios</em> buttons at the top of the controls to fill it in for you.</span>
+        </li>
+        <li>
+          <span class="step-dot" aria-hidden="true">2</span>
+          <span><strong>Click “Execute Dialogue”.</strong> The four modules take turns and answer in the transcript below. It usually takes a few seconds.</span>
+        </li>
+        <li>
+          <span class="step-dot" aria-hidden="true">3</span>
+          <span><strong>Read what came back.</strong> Every reply has a <i class="fa-regular fa-copy" aria-hidden="true"></i> Copy button, a 🔊 speaker button, and a badge saying where the answer came from.</span>
+        </li>
+      </ol>
+
+      <div class="text-[11px] text-slate-400 mt-5 bg-slate-800/50 p-3 rounded-lg border border-slate-800 space-y-2">
+        <p><strong class="text-slate-300">You do not need an API key.</strong> With none configured, every module answers from the built-in simulator and its replies carry the badge <span class="prov-badge prov-sim">simulated</span> — meaning no real AI model was called. Real answers from OpenAI or Claude are optional: <strong class="text-slate-300">Settings / Keys</strong>.</p>
+        <p><strong class="text-slate-300">Handy:</strong> <kbd class="px-1 py-0.5 bg-slate-900 border border-slate-700 rounded text-[10px]">Ctrl+Enter</kbd> runs the dialogue · <em>Sessions</em> saves a conversation on your computer · <em>Export MD</em> downloads it as text · <em>Read All</em> reads it aloud.</p>
+        <p><strong class="text-slate-300">To stop the app</strong>, close the black window that started it (or press <kbd class="px-1 py-0.5 bg-slate-900 border border-slate-700 rounded text-[10px]">Ctrl+C</kbd> in it). Closing this browser tab does not stop it.</p>
+      </div>
+
+      <div class="flex items-center justify-end pt-4">
+        <button id="btnDoneHelp" class="px-4 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-indigo-400">
+          Got it
+        </button>
+      </div>
     </div>
   </div>
 
