@@ -54,7 +54,7 @@ from .config import (
     ServerConfig,
 )
 from .feed import ClientFeed
-from .state import LoginThrottle, SessionRegistry, SessionState
+from .state import LoginThrottle, QueuedRun, SessionRegistry, SessionState
 
 logger = logging.getLogger("server")
 
@@ -948,29 +948,168 @@ def _register_routes(
         }
 
     # -- runs -------------------------------------------------------------
+    async def _call_topology(
+        mesh: AgentMesh,
+        *,
+        topology: str,
+        prompt: str,
+        from_agent: Optional[str],
+        to_agent: Optional[str],
+        agent_ids: Optional[List[str]],
+        turns: Optional[int],
+    ) -> List[Message]:
+        """One topology call, shared by immediate and queued executions."""
+        if topology == "p2p":
+            return await mesh.talk_p2p(
+                from_agent_id=from_agent or "arena-ai",
+                to_agent_id=to_agent or "copilot",
+                prompt=prompt,
+                turns=turns or 4,
+            )
+        if topology == "pipeline":
+            return await mesh.run_pipeline(prompt=prompt, agent_ids=agent_ids)
+        if topology == "debate":
+            return await mesh.run_debate(prompt=prompt, agent_ids=agent_ids)
+        if topology == "hub":
+            return await mesh.run_hub_and_spoke(
+                prompt=prompt,
+                hub_id=from_agent or "arena-ai",
+                spoke_ids=agent_ids,
+            )
+        raise ValueError(f"Unknown topology '{topology}'")  # validated by the model
+
+    def _schedule_queued(state: SessionState) -> None:
+        """Start the next waiting run, if any (called before the lock is released)."""
+        if not state.run_queue:
+            return
+        # Both callers are coroutine finally-blocks, so a loop is always running.
+        task = asyncio.get_running_loop().create_task(_run_queued_entry(state))
+        _DETACHED_TASKS.add(task)
+        task.add_done_callback(_DETACHED_TASKS.discard)
+
+    async def _run_queued_entry(state: SessionState) -> None:
+        """Execute the oldest waiting run (FIFO) after the active one released the lock."""
+        await state.run_lock.acquire()
+        if not state.run_queue:
+            # Evicted or cancelled between scheduling and acquiring: nothing to do.
+            state.run_lock.release()
+            return
+        entry = state.run_queue.pop(0)
+        mesh = state.mesh
+        run_id = entry.run_id
+        state.active_run_id = run_id
+        state.cancel_event = asyncio.Event()
+        previous_ids = {m.id for m in mesh.get_history()}
+        cancelled = False
+        state.publish({
+            "type": "run_started",
+            "run_id": run_id,
+            "topology": entry.topology,
+            "prompt": entry.prompt[:200],
+            "queued": True,
+        })
+
+        async def _execute() -> List[Message]:
+            cancel_event.set(state.cancel_event)
+            return await _call_topology(
+                mesh,
+                topology=entry.topology,
+                prompt=entry.prompt,
+                from_agent=entry.from_agent,
+                to_agent=entry.to_agent,
+                agent_ids=entry.agent_ids,
+                turns=entry.turns,
+            )
+
+        transcript: List[Message] = []
+        failed = False
+        try:
+            try:
+                transcript = await asyncio.wait_for(_execute(), timeout=config.run_timeout)
+            except RunCancelled:
+                transcript = [m for m in mesh.get_history() if m.id not in previous_ids]
+            except asyncio.TimeoutError:
+                reason = (
+                    f"the run was stopped after {config.run_timeout:.0f}s: a provider accepted "
+                    "the request and never answered. Check the endpoint in Settings, then try a "
+                    "shorter prompt or a longer --run-timeout."
+                )
+                state.publish({"type": "run_error", "run_id": run_id, "error": reason})
+                failed = True
+            if not failed and state.cancel_event.is_set():
+                cancelled = True
+                notice = Message(
+                    sender_id="system", sender_name="System", message_type=MessageType.SYSTEM,
+                    content="Run cancelled. Replies already received have been kept.",
+                    metadata={"run_id": run_id, "cancelled": True},
+                )
+                await mesh.bus.dispatch(notice)
+                transcript.append(notice)
+        except ProviderError as e:
+            state.publish({
+                "type": "run_error", "run_id": run_id, "error": f"{e.provider}: {e.reason}",
+            })
+            failed = True
+        except ValueError as e:
+            state.publish({"type": "run_error", "run_id": run_id, "error": _safe_reason(e)})
+            failed = True
+        except Exception:
+            logger.error("Queued dialogue execution failed", exc_info=True)
+            state.publish({
+                "type": "run_error", "run_id": run_id, "error": "Internal error during dialogue execution",
+            })
+            failed = True
+        finally:
+            _schedule_queued(state)
+            state.active_run_id = None
+            state.cancel_event = None
+            state.run_lock.release()
+
+        if failed:
+            return
+        meta = [m.metadata or {} for m in transcript]
+        simulated = [md for md in meta if md.get("simulated")]
+        clamped = [md for md in meta if md.get("content_truncated")]
+        warnings = sorted({str(md["provider_error"]) for md in meta if md.get("provider_error")})
+        state.last_run_warnings = warnings
+        state.publish({
+            "type": "run_cancelled" if cancelled else "run_completed",
+            "run_id": run_id,
+            "simulated_count": len(simulated),
+            "truncated_count": len(clamped),
+        })
+
     @app.post("/api/runs/{run_id}/cancel")
     async def cancel_run(run_id: str, state: SessionState = Depends(current_state)):
-        if state.active_run_id != run_id or state.cancel_event is None:
-            raise HTTPException(status_code=404, detail="No active run with that id in this session.")
-        state.cancel_event.set()
-        return {"status": "cancelling", "run_id": run_id}
+        if state.active_run_id == run_id and state.cancel_event is not None:
+            state.cancel_event.set()
+            return {"status": "cancelling", "run_id": run_id}
+        removed = state.remove_queued(run_id)
+        if removed is not None:
+            # Never started, so nothing to keep: no transcript change, just the frame.
+            state.publish({"type": "run_cancelled", "run_id": run_id, "queued": True})
+            return {"status": "cancelled", "run_id": run_id}
+        raise HTTPException(status_code=404, detail="No active or queued run with that id in this session.")
 
     @app.post("/api/run")
     async def run_dialogue(req: RunTaskRequest, request: Request, state: SessionState = Depends(current_state)):
         """
         Execute one multi-agent dialogue for this session.
 
-        Three promises this endpoint did not used to make, and now does:
-
         * **Nothing is stamped as "recent" for a request that never ran.** The
           cooldown used to be spent by invalid prompts, so a typo cost the next
           legitimate run a second of waiting.
-        * **One run at a time.** Agents, transcript, export and provider memory
-          are shared per session; two overlapping runs produced a history that
-          belonged to neither and showed each run's text in the other's context.
-          The second caller is refused, not queued.
-        * **No unbounded wait.** A provider that accepts a connection and never
-          answers is cut off after ``--run-timeout`` with a 504 that says so.
+        * **One run at a time, the rest wait in a bounded per-session queue.**
+          Agents, transcript, export and provider memory are shared per session;
+          two overlapping runs produced a history that belonged to neither. The
+          second caller is queued (202 with a 1-indexed ``queue_position``), not
+          refused - up to ``--max-queued`` waiting runs, then 429 with
+          ``Retry-After``. ``--max-queued 0`` restores the pre-queue 409 refusal.
+          The queue is FIFO, in-memory and per process: a restart or an evicted
+          session drops whatever was waiting.
+        * **No unbounded execution.** A provider that accepts a connection and
+          never answers is cut off after ``--run-timeout`` with a 504 that says
+          so (queued runs are each bounded when they execute, not while waiting).
         """
         mesh = state.mesh
 
@@ -983,35 +1122,109 @@ def _register_routes(
                 raise HTTPException(
                     status_code=400, detail="Cannot start dialogue with same agent as both sides"
                 )
-        elif req.agent_ids:
-            missing = [aid for aid in req.agent_ids if aid not in mesh.agents]
-            if missing:
-                raise HTTPException(status_code=400, detail=f"Agents not found: {', '.join(missing)}")
+        elif req.topology in ("pipeline", "debate", "hub"):
+            # The mesh rejects these before doing any work, with these exact words -
+            # so the endpoint rejects them before the busy check too. Otherwise the
+            # same payload is a 400 when idle and a 202 when busy (an empty list
+            # would even run the default roster, having been stored as None).
+            if req.topology == "hub":
+                hub_id = req.from_agent or "arena-ai"
+                if hub_id not in mesh.agents:
+                    available = ", ".join(mesh.agents.keys())
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Hub agent '{hub_id}' not found. Available: {available}",
+                    )
+            if req.agent_ids is not None and not req.agent_ids:
+                if req.topology == "pipeline":
+                    detail = "At least one agent ID required for pipeline"
+                elif req.topology == "debate":
+                    detail = "At least one agent required for debate"
+                else:  # hub: agent_ids become the spokes
+                    detail = "At least one spoke agent required"
+                raise HTTPException(status_code=400, detail=detail)
+            if req.agent_ids:
+                missing = [aid for aid in req.agent_ids if aid not in mesh.agents]
+                if missing:
+                    raise HTTPException(
+                        status_code=400, detail=f"Agents not found: {', '.join(missing)}"
+                    )
+            if req.topology == "hub" and req.agent_ids and hub_id in req.agent_ids:
+                raise HTTPException(status_code=400, detail="Hub agent cannot also be a spoke")
         # No agent ids for pipeline/debate/hub is not an error: the mesh has a
         # documented default roster, and inventing a requirement here would break
         # every caller that relies on it (the dashboard included).
 
-        # Refuse for the most specific reason first. "another run is in progress"
-        # outranks "you clicked twice", because waiting out the one-second
-        # cooldown would not make the second request runnable.
+        # A session is busy when something runs *or* waits: a lock-free moment with
+        # a non-empty queue still means "behind the queue", or a newcomer would
+        # jump ahead of runs that arrived earlier. Busy outranks the cooldown,
+        # as it always has - waiting out one second would not make the request
+        # runnable - so a double-click while busy queues instead of 429ing.
         #
-        # Checked and acquired with no await in between, so two requests arriving
-        # in the same loop iteration cannot both be accepted.
-        if state.run_lock.locked():
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "A run is already in progress in this browser session"
-                    + (f" ({state.active_run_id})" if state.active_run_id else "")
-                    + ". Wait for it to finish - the transcript, the agents' memory "
-                    "and the export are shared, so a second run would mix into the first."
-                ),
-                headers={"Retry-After": str(int(config.run_timeout) + 1)},
+        # Checked and enqueued with no await in between, so two requests arriving
+        # in the same loop iteration cannot both take the last queue slot.
+        now = time.time()
+        busy = state.run_lock.locked() or bool(state.run_queue)
+        if busy:
+            if config.max_queued <= 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "A run is already in progress in this browser session"
+                        + (f" ({state.active_run_id})" if state.active_run_id else "")
+                        + ". Wait for it to finish - the transcript, the agents' memory "
+                        "and the export are shared, so a second run would mix into the first."
+                    ),
+                    headers={"Retry-After": str(int(config.run_timeout) + 1)},
+                )
+            if len(state.run_queue) >= config.max_queued:
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"Run queue is full ({len(state.run_queue)} waiting, max {config.max_queued}). "
+                        "Wait for a run to finish and try again."
+                    ),
+                    headers={"Retry-After": str(int(config.run_timeout) + 1)},
+                )
+            queued_id = state.next_queued_run_id()
+            state.run_queue.append(QueuedRun(
+                run_id=queued_id,
+                topology=req.topology,
+                prompt=req.prompt,
+                from_agent=req.from_agent,
+                to_agent=req.to_agent,
+                agent_ids=list(req.agent_ids) if req.agent_ids else None,
+                turns=req.turns,
+            ))
+            position = len(state.run_queue)
+            state.last_run_time = now
+            state.publish({
+                "type": "run_queued",
+                "run_id": queued_id,
+                "queue_position": position,
+                "queue_depth": position,
+                "topology": req.topology,
+                # A tab that missed run_started (a gap ate it) attributes the
+                # later completion by this id instead of wedging busy.
+                "active_run_id": state.active_run_id,
+            })
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "queued",
+                    "run_id": queued_id,
+                    "queue_position": position,
+                    "max_queued": config.max_queued,
+                    "detail": (
+                        f"Queued at position {position} behind the active run"
+                        + (f" ({state.active_run_id})" if state.active_run_id else "")
+                        + ". It runs automatically; watch the feed or GET /api/history."
+                    ),
+                },
             )
 
         # Rate limiting only *after* the request is known to be runnable, so a
         # rejected prompt cannot spend the session's cooldown for everybody.
-        now = time.time()
         if now - state.last_run_time < RUN_COOLDOWN_SECONDS:
             wait = max(0.1, RUN_COOLDOWN_SECONDS - (now - state.last_run_time))
             raise HTTPException(
@@ -1036,25 +1249,14 @@ def _register_routes(
         async def _execute() -> List[Message]:
             """One topology call, kept separate so the timeout can wrap exactly it."""
             cancel_event.set(state.cancel_event)  # confined to wait_for's child task
-            if req.topology == "p2p":
-                return await mesh.talk_p2p(
-                    from_agent_id=req.from_agent or "arena-ai",
-                    to_agent_id=req.to_agent or "copilot",
-                    prompt=req.prompt,
-                    turns=req.turns or 4,
-                )
-            if req.topology == "pipeline":
-                return await mesh.run_pipeline(prompt=req.prompt, agent_ids=req.agent_ids)
-            if req.topology == "debate":
-                return await mesh.run_debate(prompt=req.prompt, agent_ids=req.agent_ids)
-            if req.topology == "hub":
-                return await mesh.run_hub_and_spoke(
-                    prompt=req.prompt,
-                    hub_id=req.from_agent or "arena-ai",
-                    spoke_ids=req.agent_ids,
-                )
-            raise HTTPException(  # pragma: no cover - validated by the model
-                status_code=400, detail=f"Unknown topology '{req.topology}'"
+            return await _call_topology(
+                mesh,
+                topology=req.topology,
+                prompt=req.prompt,
+                from_agent=req.from_agent,
+                to_agent=req.to_agent,
+                agent_ids=req.agent_ids,
+                turns=req.turns,
             )
 
         try:
@@ -1099,6 +1301,7 @@ def _register_routes(
             })
             raise HTTPException(status_code=500, detail="Failed to execute dialogue. Please try again.") from exc
         finally:
+            _schedule_queued(state)
             state.active_run_id = None
             state.cancel_event = None
             state.run_lock.release()
@@ -1118,6 +1321,7 @@ def _register_routes(
         return {
             "status": "cancelled" if cancelled else "completed",
             "run_id": run_id,
+            "queue_position": 0,
             "messages": messages,
             # Tell the client what it is looking at; the transcript is never
             # silently "verified" output.
@@ -1157,6 +1361,8 @@ def _register_routes(
                 "type": "init",
                 "active_run_id": state.active_run_id,
                 "cancel_requested": bool(state.cancel_event and state.cancel_event.is_set()),
+                "queued_run_ids": [entry.run_id for entry in state.run_queue],
+                "queue_depth": len(state.run_queue),
                 "agents": state.mesh.list_agents(),
                 "history": [m.to_dict() for m in state.mesh.get_history()],
                 "authenticated": state.authenticated or not config.require_auth,
@@ -1169,6 +1375,7 @@ def _register_routes(
                 "flags": {
                     "url_reader_enabled": config.enable_url_reader,
                     "run_timeout_seconds": config.run_timeout,
+                    "max_queued": config.max_queued,
                 },
             })
             while True:
@@ -1246,6 +1453,9 @@ def _register_routes(
             "provider_mode": state.provider_config.get("mode", "simulated"),
             "last_run_warnings": state.last_run_warnings,
             "url_reader_enabled": config.enable_url_reader,
+            "active_run_id": state.active_run_id,
+            "queued_runs": len(state.run_queue),
+            "max_queued": config.max_queued,
             **registry.stats(),
         }
 

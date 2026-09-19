@@ -51,6 +51,20 @@ EPHEMERAL_SESSION_TTL = 120.0
 
 
 @dataclass
+class QueuedRun:
+    """One run waiting behind the active one (FIFO, per session, in-memory)."""
+
+    run_id: str
+    topology: str
+    prompt: str
+    from_agent: Optional[str] = None
+    to_agent: Optional[str] = None
+    agent_ids: Optional[List[str]] = None
+    turns: Optional[int] = None
+    enqueued_at: float = field(default_factory=time.time)
+
+
+@dataclass
 class SessionState:
     """Everything that belongs to exactly one browser session."""
 
@@ -84,6 +98,10 @@ class SessionState:
     run_seq: int = 0
     active_run_id: Optional[str] = None
     cancel_event: Optional[asyncio.Event] = None
+    #: Runs waiting behind the active one (FIFO). Per session and per process:
+    #: a restart or an evicted session drops whatever was waiting, and with
+    #: --workers > 1 (unsupported) each worker would hold its own queue.
+    run_queue: List[QueuedRun] = field(default_factory=list)
     #: Why this session was released ("idle_timeout", "capacity", "dropped"). Set
     #: just before disposal so the app can tell its open sockets *why* they are
     #: being closed instead of dropping them silently.
@@ -103,6 +121,24 @@ class SessionState:
         self.run_seq += 1
         self.active_run_id = f"run-{self.run_seq}"
         return self.active_run_id
+
+    def next_queued_run_id(self) -> str:
+        """Allocate an id for a run that waits (the active one keeps its id)."""
+        self.run_seq += 1
+        return f"run-{self.run_seq}"
+
+    def queue_position(self, run_id: str) -> Optional[int]:
+        """1-indexed position of ``run_id`` in the waiting queue, if present."""
+        for index, entry in enumerate(self.run_queue):
+            if entry.run_id == run_id:
+                return index + 1
+        return None
+
+    def remove_queued(self, run_id: str) -> Optional[QueuedRun]:
+        for index, entry in enumerate(self.run_queue):
+            if entry.run_id == run_id:
+                return self.run_queue.pop(index)
+        return None
 
     def publish(self, payload: Dict[str, Any]) -> int:
         """
@@ -328,6 +364,9 @@ class SessionRegistry:
     def _dispose(self, state: SessionState) -> None:
         state.provider_config = {"discarded": True}
         state.api_keys = {}
+        # Whatever was waiting is dropped with the session: the queue is
+        # in-memory, per process, and never pretended to survive eviction.
+        state.run_queue.clear()
         if self.on_evict:
             try:
                 self.on_evict(state)

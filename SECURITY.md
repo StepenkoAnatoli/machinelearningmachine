@@ -120,9 +120,11 @@ Three consequences worth knowing:
   bind* - see §4, because that URL is now checked against the outbound policy too.
 - Provider calls send the conversation text to that endpoint. Do not paste
   secrets or personal data into prompts if a live provider is configured.
-- A run is serialised per session (`409` while one is in flight) and bounded by
-  `--run-timeout`, so a live provider cannot hold a session open forever or have two
-  runs rewriting the same transcript at once.
+- Runs are serialised per session (a second run waits in a per-session FIFO bounded
+  by `--max-queued`, default 5; `409` only when queueing is disabled with
+  `--max-queued 0`) and each execution is bounded by `--run-timeout`, so a live
+  provider cannot hold a session open forever or have two runs rewriting the same
+  transcript at once.
 
 ## 4. Outbound requests (SSRF)
 
@@ -244,15 +246,18 @@ Treat anything marked `simulated` as an unreviewed draft.
   change server-wide settings.
 - **No TLS.** Cookies and the token travel in clear text. Terminate TLS in front of
   this server, or use an SSH tunnel.
-- **Single process, in-memory state.** The bounded LRU, the per-connection outboxes
-  and the rate-limit buckets live in one process: no scale-out, and a restart drops
-  every session and every key.
+- **Single process, in-memory state.** The bounded LRU, the per-connection outboxes,
+  the run locks, the run queues and the rate-limit buckets live in one process: no
+  scale-out, and a restart drops every session, every key and every queued run.
 - **Cancellation is cooperative, not an upstream abort.** The dashboard Stop control
   and `POST /api/runs/{run_id}/cancel` stop at agent boundaries in the caller's
-  browser session. The current provider request may finish (and be billed) before
+  browser session - an id that is still queued is removed before it ever starts, with
+  no transcript write. The current provider request may finish (and be billed) before
   stopping; arrived replies and a cancellation notice remain in the transcript.
   `--run-timeout` still bounds a stalled provider; a provider error or timeout may
-  win over a pending stop. Concurrent runs in the same session remain refused.
+  win over a pending stop. A second run in a busy session waits in the queue (bounded
+  by `--max-queued`) rather than being refused, unless the operator disabled
+  queueing or the queue is full.
 - **Frame loss is designed in, recovery is best-effort.** Each connection's outbox
   holds 128 frames and drops the oldest under pressure, then tells the client
   (`stream_gap`), which re-fetches the transcript from the server. A tab that is

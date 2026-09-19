@@ -43,6 +43,16 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D19** | Reconnect snapshots omit run state | Server snapshot regression raised `KeyError: active_run_id`; browser regressions left Stop disabled during an active run and Execute busy after a missed completion | Medium (run controls cannot recover on reconnect) |
 
+| **D20** | A second run is refused instead of waiting | Two concurrent `POST /api/run` in one session answered `200` and `409`; the browser regression found no queue position, no way to cancel a waiting run, and a dashboard that cleared another tab's run state when its own request was refused | Medium (a second tab/user must retry by hand; the refusal path can desynchronise the dashboard buttons) |
+
+| **D21** | Queued runs skip validation that identical immediate runs get | `{"topology": "pipeline", "agent_ids": []}` was `400` on an idle session but `202` - and then ran the *default* roster - on a busy one; hub runs with an unknown hub agent or the hub as its own spoke were `400`-now versus `202`-then-`run_error` | Medium (a request that must fail can execute instead - including live provider calls - when the session happens to be busy) |
+
+| **D22** | `run_queued` omits the active run id, so a tab that missed `run_started` wedges busy | The browser regression never saw `run_started` (a gap ate it), went busy on `run_queued` with no id to attribute to, and stayed busy after the queued run was cancelled and the active run completed | Low (needs a 128-frame gap to eat exactly `run_started`; a reconnect heals it via the snapshot) |
+
+| **D23** | Socket frames beating HTTP 202 wedge the tab busy or show a stale queue position | The browser regressions resolved the 202 after `run_started` (the tab adopted a dead queued identity, and the completion took the wrong branch and never released the button) and after `run_cancelled` (no frame would ever come for the adopted id) | Low (needs HTTP/WS reorder inside one round trip; a reload heals it) |
+
+| **D24** | Hardening record still claims runs are refused and a queue would need persistence | F2, the F2 evidence row, two section-7 bullets and the N1/N2/N4 paragraph contradicted the rewritten decision B; the user-centered-design table promised a `409`; the README test tree said "9 tests" for a 17-test suite and "24" jsdom for 32 | Low (documentation-in-record; the code was already correct) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -53,8 +63,9 @@ headers - come from running them, not from reading the code and reasoning about 
 Functional
 - **F1** A provider answer of any size must complete the run, and truncation must be
   visible in the message (metadata + text notice) — *never* silent, never fatal. (D1)
-- **F2** One run at a time per browser session; a second concurrent run is refused
-  with an actionable message, and every run event carries an id the UI can attribute. (D2)
+- **F2** One run at a time per browser session; a second concurrent run waits in a
+  bounded queue with an actionable position (see F15), and every run event carries
+  an id the UI can attribute. (D2)
 - **F3** No UI client can slow or stop a run: fan-out is bounded, non-blocking, and a
   client that cannot keep up loses frames and is told so. (D3)
 - **F4** `--session-ttl` must actually reclaim idle sessions and their sockets. (D4)
@@ -76,6 +87,10 @@ Functional
   inconvenient (what is installed, what is enforced, what is not offered). (D13)
 
 - **F14** Stop an active run at the next agent boundary, retain arrived replies and a cancellation notice, and scope cancellation to the requesting browser/run. (D18)
+- **F15** A second run in a busy session waits its turn in a bounded per-session FIFO
+  (202 with a 1-indexed position, `429` + `Retry-After` when full, `409` only when
+  `--max-queued 0`), runs in arrival order without interleaving, is cancellable
+  while queued, and is attributable to its tab in the UI. (D20)
 
 Non-functional
 - **N1** No new runtime dependency (retry/backoff, queueing, atomic writes are stdlib).
@@ -98,12 +113,20 @@ and all four topologies are fixed by one change. *Trade-off:* a user loses the t
 very long answer — mitigated by the notice saying exactly that, and by the cap being
 50 KB (≈12 000 words).
 
-**B. Per-session `asyncio.Lock` + 409, rather than a queue.**
-*Alternatives:* queue runs (unbounded waiting, a spammer builds a backlog, results
-arrive long after the user stopped caring); shard the mesh per run (breaks "agents have
-memory" semantics, which is the whole point of the demo). *Chosen:* refuse the second
-run while the first holds the lock. *Trade-off:* two tabs of the same profile cannot run
-at once — correct, since they also share transcripts and agent memory.
+**B. Per-session `asyncio.Lock` + a bounded FIFO, rather than refusal.**
+*Alternatives:* refuse the second run while the first holds the lock (the original
+choice: simple, but every retry is by hand and two tabs of one browser race for the
+lock); shard the mesh per run (breaks "agents have memory" semantics, which is the
+whole point of the demo). *Chosen (D20):* the lock still serialises execution, but a
+request that arrives while the lock is held (or while entries wait) is appended to a
+per-session in-memory queue bounded by `--max-queued` (default 5, `0` restores the
+original refusal) and answered `202` with its 1-indexed position; a full queue answers
+`429` + `Retry-After`. The pump is a lock-handoff chain (each finished entry schedules
+the next before releasing), so at most one run executes per session and queued turns
+cannot interleave with the active one. *Trade-off:* a queued run may wait through up to
+`max_queued` full executions with no per-entry wait timeout, and the queue dies with
+the process like the lock - mitigated by the bound, the visible position, and Stop
+working on a queued run.
 
 **C. Bounded per-connection outbox instead of awaiting sockets.**
 `ClientFeed` gives each WebSocket a queue (128 items) and a pump task; the bus only ever
@@ -135,17 +158,18 @@ Every evidence cell is a test that was run and passed, not a plan. All offline.
 | Req | Implementation | Evidence |
 |---|---|---|
 | F1 | `protocol/message.py: clamp_content`, `agents/base.py` clamp + `fit_context` for injected prompts, `server/app.py: _safe_reason` | `tests/test_provider_output_bounds.py` - 1 k…200 k chars across all four topologies, export wording, `/api/run`'s `truncated_messages`, and `_safe_reason` refusing to echo a payload |
-| F2 | `server/state.py: run_lock` + `active_run_id`, `server/app.py` 409-with-reason, `run_id` on `run_started`/`new_message`/`run_completed` | `tests/test_run_serialization.py` - loser gets 409, transcript untouched, `run_id` consistent across frames, lock freed on error |
+| F2 | `server/state.py: run_lock` + `active_run_id` + bounded `run_queue`, `server/app.py` 202-with-position (`409` only when `--max-queued 0`), `run_id` on every run frame | `tests/test_run_serialization.py` (refusal mode pinned via `max_queued=0`) + `test_run_queue.py` - loser queues with its position, transcript untouched, `run_id` consistent across frames, lock freed on error |
 | F3 | `server/feed.py: ClientFeed` (bounded outbox, drop-oldest, `stream_gap`, send timeout), `SessionState.publish`, `finally:` detach in the WS handler | `tests/test_ws_backpressure.py` - a stalled socket cannot delay the producer, 40 publishes → `dropped >= 30` with the newest frames intact, `/api/run` completes on a saturated feed |
 | F4 | `server/app.py` lifespan sweeper → `SessionRegistry.sweep_expired(reason)`, `on_evict` → `close_feeds(final=…, code=4408)`, `session_released` frame | `tests/test_session_lifecycle.py` - a quiet tab with a live socket is reclaimed with no further request, its next request is a *new* session, capacity eviction prefers ephemeral, sweeper stops with the app |
 | F5 | `sessions.py: _write_atomic`, metadata header (`message_count`, `trimmed`), prefix-only listing, stale-`.tmp` prune, `new_session_id` carries sub-second precision | `tests/test_session_storage.py` - a failed `os.replace` leaves the previous file byte-identical with no temp litter, listing reads ≤ 4 KiB per file, oversized transcripts are trimmed *and flagged*, prune order is timestamp-driven |
 | F6 | `providers.py: post_for_json` retry loop, `max_attempts`/`retry_backoff`/`timeout`, `ProviderError.attempts`, `metadata.provider_attempts` | `tests/test_provider_retry.py` - 429/503 retried up to the budget, 401 not retried, an unparseable 200 costs one request, the wait scales with the attempt, and the transcript records the effort |
 | F7 | `providers.py: allow_env_key`, `server/app.py` builds providers with `allow_env_key=False`, auth headers only when a key exists | `tests/test_env_key_isolation.py` - a real aiohttp capture server asserts the headers it *received*: a keyless session sends none, an operator key is never attached to a session's request, and clearing a key cannot resurrect it from the environment |
 | F8 | `netguard.validate_provider_target`, `server/app.py: _guard_provider_url`, `--allow-insecure-provider-urls`, `ServerConfig.allow_insecure_provider_urls` | `tests/test_provider_url_policy.py` - CGNAT/`192.0.0.1`/IPv6-mapped/decimal-host matrices, loopback bind keeps Ollama on any port, public bind refuses and changes nothing (mode stays `simulated`), operator allowlist honoured |
-| F9 | `cli.py: run --live {openai,anthropic,both}`, `--base-url`, `--provider-timeout`, honest pre-flight banner, exit 1 without a key | `tests/test_cli_live.py` - which agents get wired per mode, nothing dials out without `--live`, the key is never echoed, flag > env > default for `--run-timeout`/`--max-sessions`/`--session-ttl`, and `SESSION_TTL=5m` stops startup instead of being ignored |
+| F9 | `cli.py: run --live {openai,anthropic,both}`, `--base-url`, `--provider-timeout`, honest pre-flight banner, exit 1 without a key | `tests/test_cli_live.py` - which agents get wired per mode, nothing dials out without `--live`, the key is never echoed, flag > env > default for `--run-timeout`/`--max-sessions`/`--session-ttl`/`--max-queued`, and `SESSION_TTL=5m` stops startup instead of being ignored |
 | F10 | `cli.py`/`mesh.py: _delay_kwargs` on all four topologies | `tests/test_cli_live.py` (parametrised over p2p/pipeline/debate/hub) + measured 0.45 s → 0.00 s |
 | F11 | validation before the cooldown stamp, `Retry-After` on 409/429 | `tests/test_run_serialization.py` - `state.last_run_time` unchanged by a 400 |
 | F12 | `server/app.py: _safe_reason` for every failure string that reaches a client | `tests/test_provider_output_bounds.py` (unit cases) |
+| F15 | `server/config.py:MAX_QUEUED_SUFFIX`, `server/state.py:run_queue` + positions, `cli.py:--max-queued`, `server/app.py` queue branch + lock-handoff pump + queued-aware cancel, `static/app.js` queued lifecycle | `test_run_queue.py` (202+position, 429+Retry-After, 0→409, FIFO order, queued cancel, per-session isolation), `test_cli_live.py` max_queued resolution, jsdom queued-position + queue-full + adoption + race cases, e2e "concurrency in the same tab queues instead of refusing" |
 | N1/N2 | stdlib-only core, `asyncio.wait_for` on every await that can block | CI matrix (3.10/3.11/3.12) + `test_import_without_optional_deps` |
 | N3 | README + SECURITY.md rewritten in the same change; `serve` knobs readable from the environment | `tests/test_docs_are_accurate.py` + `tests/test_cli_live.py` |
 | N4 | `--run-timeout` (default 180 s) → 504 with a plain-language reason, `run_error` frame first | `tests/test_run_serialization.py` |
@@ -232,6 +256,22 @@ exercise was not to add unfounded claims:
   A provider error or run timeout can still terminate a pending stop as an error.
   The existing timeout remains the bound; no upstream billing cancellation is promised.
 
+- **The run queue is per-process, bounded in count but not in wait (D20).** Queued
+  entries live in the session object like the lock and the outboxes, so a restart
+  drops them and there is no queue across `--workers > 1`. `--max-queued` bounds how
+  many wait (default 5), but nothing bounds how long one waits: a short prompt behind
+  five long live-provider runs may wait through all of them. `--run-timeout` bounds
+  each execution, not the wait. A `202` response carries no messages; clients learn
+  the outcome from the feed (`run_queued`/`run_started`/completion, all stamped with
+  the run id) or by re-reading `/api/history`.
+
+- **Queued runs validate the roster at enqueue, not at start (D21).** Agents are
+  checked before a run is accepted, idle or queued alike - but a roster change while
+  a run waits (registering or deleting a custom agent between enqueue and execution)
+  surfaces as `run_error` at execution instead of HTTP 400. Same TOCTOU the immediate
+  path always had between validation and execution, with a wider window; the queue
+  does not re-validate at start.
+
 - **DNS rebinding is documented, not closed.** `validate_provider_target` checks
   addresses, then `aiohttp` resolves again. Same pre-existing gap as the page reader.
 - **Backpressure is bounded, not prevented.** A tab that cannot keep up loses frames and
@@ -266,9 +306,12 @@ exercise was not to add unfounded claims:
 
 ## 7. What this milestone deliberately did *not* do
 
-- **Multiple runs per session.** Deliberately refused (decision B).
-- **Per-run meshes or a job queue.** Correct for a multi-user service; this is a local
-  tool with one shared token, and a queue would need persistence to be honest about it.
+- **Multiple runs per session.** Still one at a time (decision B) - but waiting is
+  now queueing, not refusal: a second request is a `202` with a queue position,
+  bounded by `--max-queued` (`0` restores the old `409`).
+- **Per-run meshes, a persistent queue, or a cross-worker queue.** The queue is a
+  per-session in-memory FIFO: it dies with the process and does not span workers.
+  That is the documented limit, not an oversight queued up for later.
 - **Pinning provider connections to the IPs validated at check time.** Same residual
   DNS-rebinding risk netguard already documents; the policy now applies to provider
   URLs, but the transport is still `requests`/`aiohttp`.
@@ -302,10 +345,20 @@ exercise was not to add unfounded claims:
 
 | D19 reconnect loses run controls | F14 | `server/app.py` WebSocket snapshot, `static/app.js` init handling | `test_reconnecting_socket_receives_active_run_and_stop_state`, jsdom reconnect-during-run and missed-completion regressions |
 
+| D20 second run refused | F15 | `server/config.py:MAX_QUEUED_SUFFIX`, `server/state.py:run_queue`, `cli.py:--max-queued`, `server/app.py` queue branch + pump + queued-aware cancel, `static/app.js` queued lifecycle | `test_run_queue.py` (202+position, 429+Retry-After, 0→409, FIFO order, queued cancel, per-scope isolation), `test_cli_live.py` max_queued resolution, jsdom queued-position + queue-full cases, e2e "concurrency in the same tab queues instead of refusing" |
+
+| D21 queued runs skip validation | F11 | `server/app.py:/api/run` pre-busy checks for an empty roster and hub hub/spokes, in mesh order with mesh-identical messages | `test_queued_run_validation.py` (busy/idle parity: empty roster × pipeline/debate/hub, unknown hub, hub-as-own-spoke) |
+
+| D22 queued frame omits the active id | F15 | `server/app.py` `run_queued` carries `active_run_id`, `static/app.js` adopts it on receipt | `test_run_queue.py::test_queued_frame_names_the_active_run_it_waits_behind`, jsdom missed-`run_started` adoption case |
+
+| D23 socket beats HTTP 202 | F15 | `static/app.js` terminal-run record + 202 reconcile (ended → release with its ending; already active → active mode; else queued mode) | jsdom started-before-202 and cancelled-before-202 cases (deferred 202 body) |
+
+| D24 stale no-queue prose | F13, N3 | PRODUCTION_HARDENING.md (F2, §4 F2/F9/F15 rows, §7, §8 N-para), USER_CENTERED_DESIGN.md queue row, README test tree + jsdom count | `test_docs_are_accurate.py` (hardening-agrees, UCD-agrees, listing-counts cases) |
+
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
-`--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented as
-a bounded per-connection outbox and an `asyncio.wait_for` rather than a queue, a worker
-pool, or a new dependency.
+`--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented
+with stdlib parts (a bounded per-connection outbox, an in-memory list as the queue, an
+`asyncio.wait_for` around each execution) rather than a worker pool or a new dependency.
 
 ---
 
@@ -364,5 +417,7 @@ stale controls on reconnect. The snapshot now includes the session-scoped active
 run id and pending cancellation flag; init restores Stop and Execute accordingly.
 The existing local-request guard remains active until its HTTP request settles.
 
+D19 local validation: **366 Python tests passed**, **27 jsdom tests passed**;
+full-scope Ruff and the loopback server e2e gate passed. The gate server was stopped.
 D19 local validation: **366 Python tests passed**, **27 jsdom tests passed**;
 full-scope Ruff and the loopback server e2e gate passed. The gate server was stopped.

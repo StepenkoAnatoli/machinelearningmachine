@@ -35,6 +35,7 @@ ALLOW_ORIGINS_SUFFIX = "ALLOW_ORIGINS"
 RUN_TIMEOUT_SUFFIX = "RUN_TIMEOUT"
 MAX_SESSIONS_SUFFIX = "MAX_SESSIONS"
 SESSION_TTL_SUFFIX = "SESSION_TTL"
+MAX_QUEUED_SUFFIX = "MAX_QUEUED"
 INSECURE_PROVIDER_URLS_SUFFIX = "ALLOW_INSECURE_PROVIDER_URLS"
 MIN_TOKEN_LENGTH = 16
 
@@ -53,6 +54,12 @@ DEFAULT_SESSION_IDLE_TTL = 6 * 60 * 60
 #: Generous on purpose: four agents x a couple of turns x a real model is minutes,
 #: but "until the process restarts" is not a bound a user can act on.
 DEFAULT_RUN_TIMEOUT = 180.0
+
+#: How many runs may wait behind the active one, per browser session. The queue
+#: is FIFO and in-memory (per-process, like the run lock): a restart or an
+#: evicted session drops whatever was waiting. 0 restores the pre-queue refusal
+#: (a second run is a 409 instead of a 202).
+DEFAULT_MAX_QUEUED = 5
 
 
 def is_loopback_host(host: str) -> bool:
@@ -96,6 +103,8 @@ class ServerConfig:
     #: Upper bound on one /api/run, so a provider that accepts the connection and
     #: never answers cannot hold a session (and its run lock) forever.
     run_timeout: float = DEFAULT_RUN_TIMEOUT
+    #: How many runs may wait behind the active one, per browser session (0 = refuse).
+    max_queued: int = DEFAULT_MAX_QUEUED
     #: Opt out of the SSRF rule applied to a *browser-supplied* provider base URL.
     #: Only ever useful on a machine whose own backends (Ollama, vLLM) should be
     #: reachable from a dashboard that other machines can also open.

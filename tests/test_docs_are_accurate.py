@@ -111,3 +111,53 @@ def test_claims_about_vendoring_are_backed_by_files():
         assert f'"{package}"' in manifest, f"{package} is claimed as vendored but is not in the manifest"
     assert (vendor / "licenses").is_dir(), "vendored third-party licenses must ship with them"
     assert "no third-party origins" in README.lower() or "vendored" in README.lower()
+
+
+def test_hardening_doc_agrees_runs_queue_instead_of_refusing():
+    # D24: decision B was rewritten (lock + bounded FIFO), but F2, the F2
+    # evidence row, section 7 and the N1/N2/N4 paragraph still said refusal.
+    prod = (ROOT / "PRODUCTION_HARDENING.md").read_text(encoding="utf-8")
+    flat = re.sub(r"\s+", " ", prod)  # prose wraps; claims should not depend on where
+    for stale in (
+        "a second concurrent run is refused",
+        "loser gets 409",
+        "Deliberately refused (decision B)",
+        "a queue would need persistence to be honest about it",
+        "rather than a queue",
+    ):
+        assert stale not in flat, f"stale no-queue claim still in PRODUCTION_HARDENING.md: {stale!r}"
+    for current in (
+        "waits in a bounded queue",  # F2
+        "202-with-position",  # section 4 F2 row
+        "| F15 |",  # section 4 gained the queue requirement's evidence row
+        "queueing, not refusal",  # section 7
+        "an in-memory list as the queue",  # N1/N2/N4 paragraph
+        "`--run-timeout`/`--max-sessions`/`--session-ttl`/`--max-queued`",  # F9 row
+    ):
+        assert current in flat, f"PRODUCTION_HARDENING.md should say: {current!r}"
+
+
+def test_user_centered_design_agrees_runs_queue():
+    # D24: the "what it is now" column still promised a 409 for a second run.
+    ucd = (ROOT / "USER_CENTERED_DESIGN.md").read_text(encoding="utf-8")
+    assert "A second request is refused with a `409`" not in ucd
+    assert "waits its turn in a bounded per-session queue" in ucd
+
+
+def test_readme_test_listing_counts_are_true():
+    # D24: the tests/ tree said "9 tests" for a 17-test suite, omitted the
+    # run-control suites, and the jsdom how-to line said 24 for 32.
+    counts = _jsdom_counts()
+    for name, actual in counts.items():
+        line = next(line for line in README.splitlines() if name in line and "test" in line)
+        claimed = re.search(r"(\d+)", line)
+        assert claimed, f"README tree should state a count for {name}"
+        assert int(claimed.group(1)) == actual, (
+            f"README tree claims {claimed.group(1)} tests for {name}, file has {actual}"
+        )
+    howto = next(line for line in README.splitlines() if "jsdom browser tests" in line)
+    claimed_total = re.search(r"(\d+) jsdom browser tests", howto)
+    assert claimed_total, "README should state the jsdom total where it shows the command"
+    assert int(claimed_total.group(1)) == sum(counts.values())
+    for suite in ("test_run_cancellation.py", "test_run_queue.py", "test_queued_run_validation.py"):
+        assert suite in README, f"README tests/ tree omits {suite}"

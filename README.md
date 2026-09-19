@@ -37,9 +37,12 @@ A modular orchestration system that enables AI modules to talk directly to each 
   anywhere you did not aim it: providers configured by a browser session are built with
   `allow_env_key=False`, and the CLI only dials out when you pass `--live` (which prints
   the endpoint, model and where the key came from before it sends a byte)
-- 🧵 One run at a time per browser session - a second concurrent run is refused with a
-  `409` that names the run in flight, because agents, transcript and provider memory are
-  shared per session. A run that never answers is cut off after `--run-timeout` (504)
+- 🧵 One run at a time per browser session - a second run waits its turn in a bounded
+  per-session queue (`202` with its position, `429` + `Retry-After` when the queue is
+  full, `409` only when `--max-queued 0` restores refusal), because agents, transcript
+  and provider memory are shared per session. A run that never answers is cut off after
+  `--run-timeout` (504); a queued run that never starts is dropped with the process,
+  like the lock itself
 - 🩺 A slow tab cannot stall a run: each connection has its own bounded outbox
   (128 frames, drop-oldest), and when frames are dropped the client is told and
   re-pulls the transcript instead of showing you a conversation with holes in it
@@ -47,9 +50,9 @@ A modular orchestration system that enables AI modules to talk directly to each 
   sockets with a visible "session released" notice, and the next request from that
   browser starts clean rather than silently inheriting a mesh nobody owns
 - 🚫 What you still do **not** get: per-user authorisation beyond one shared token,
-  encryption at rest, or multi-worker scaling - see SECURITY.md §1 and §7. A run cannot
-  be cancelled mid-flight (it is bounded by `--run-timeout`), and a second run is refused
-  rather than queued
+  encryption at rest, or multi-worker scaling - see SECURITY.md §1 and §7. Stop is
+  cooperative (the current provider request finishes before stopping), and the run
+  queue is per-process: it dies with the server and does not span workers
 
 **Intuitive & Accessible UX:**
 - 🎨 Toast notifications instead of jarring `alert()`/`confirm()`
@@ -72,7 +75,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 393 tests (366 Python + 27 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 422 tests (390 Python + 32 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -213,6 +216,7 @@ place, so a misspelled value never silently enables a feature.
 | `MACHINELEARNINGMACHINE_RUN_TIMEOUT` | Seconds a single dialogue may run before it is failed with a 504 (5-3600) |
 | `MACHINELEARNINGMACHINE_SESSION_TTL` | Minutes an idle browser session keeps its mesh (swept, not just counted) |
 | `MACHINELEARNINGMACHINE_MAX_SESSIONS` | How many browser sessions keep a live mesh at once (LRU-evicted) |
+| `MACHINELEARNINGMACHINE_MAX_QUEUED` | How many runs may wait behind the active one per session (0-100, default 5; `0` refuses instead of queueing) |
 | `MACHINELEARNINGMACHINE_ALLOW_INSECURE_PROVIDER_URLS` | Lets a *publicly bound* dashboard dial out to private/loopback provider URLs. Off unless `1`/`true`/`yes`/`on` |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Read **only** by `run --live …` (and by `OpenAIProvider()`/`AnthropicProvider()` if you construct them yourself). `serve` never reads them |
 
@@ -272,7 +276,9 @@ actually appear and what to do about each.
 
 | You see | What happened | What to do |
 | --- | --- | --- |
-| *A run is already in progress in this browser session (run-3)* | One run per session is the rule: agents, transcript and export are shared, so a second concurrent run would be written into the first. | Wait for it. A run that never finishes is stopped by `--run-timeout` and reported as `504`. |
+| *Queued at position 2 (run-7). It runs automatically when the active run finishes.* | This session is busy, so the run waits its turn (per-session FIFO, bounded by `--max-queued`). Stop cancels the queued run; the position is also in the `202` response. | Nothing - it starts on its own. The queue is per-process: a restart drops it. |
+| *Run queue is full (5 waiting, max 5). Wait for a run to finish and try again.* | The queue is bounded. The response is `429` with a `Retry-After` header. | Wait for a completion, then retry. Operators can raise `--max-queued` (0-100). |
+| *A run is already in progress in this browser session (run-3)* | Only with `--max-queued 0`: queueing disabled, so a second run is refused. Agents, transcript and export are shared, so runs cannot overlap. | Wait for it. A run that never finishes is stopped by `--run-timeout` and reported as `504`. |
 | *Please wait 0.8s between runs* | The per-session run cadence gate (also applied to page reads). | Nothing - the button re-enables itself. |
 | *the run was stopped after 180s: a provider accepted the request and never answered* | A live endpoint that hangs. The run is cut off rather than left running against your session. | Check the base URL/model in Settings; raise `--run-timeout` for a slow local model. |
 | *Some messages were skipped while this tab was not keeping up (N) - refetched* | This tab's send queue (128 frames) overflowed - a backgrounded tab, a stalled connection. The transcript on the bus is intact; only this tab missed frames, so it re-pulled them. | Nothing. If it happens on every run, close other tabs on that session. |
@@ -417,6 +423,7 @@ and a message that names both fixes; it does not quietly run the simulator inste
 python3 -m machinelearningmachine.cli serve                      # 127.0.0.1:8000
 python3 -m machinelearningmachine.cli serve --run-timeout 60     # cut off a stuck provider sooner
 python3 -m machinelearningmachine.cli serve --session-ttl 30 --max-sessions 16
+python3 -m machinelearningmachine.cli serve --max-queued 0       # refuse a second run instead of queueing it
 python3 -m machinelearningmachine.cli serve --help               # every switch, with its default
 ```
 
@@ -491,7 +498,7 @@ Everything is offline and hermetic - network calls are injected, never performed
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
 pytest -q                                    # 357 tests, all offline
-node --test tests/js/*.test.mjs          # 24 jsdom browser tests (needs: npm ci)
+node --test tests/js/*.test.mjs          # 32 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 ```
@@ -599,6 +606,9 @@ machinelearningmachine/
 │   ├── test_provider_retry.py        # retry budget, backoff, attempt accounting
 │   ├── test_provider_output_bounds.py# long replies and long prompts stay loadable
 │   ├── test_run_serialization.py     # one run at a time, 409, no interleaved history
+│   ├── test_run_cancellation.py      # Stop at agent boundaries, scoped cancel, 404s
+│   ├── test_run_queue.py             # bounded FIFO: 202+position, 429, FIFO order, queued cancel
+│   ├── test_queued_run_validation.py # invalid runs fail identically idle or busy
 │   ├── test_ws_backpressure.py       # stalled tabs, dropped frames, gap notice, recovery
 │   ├── test_session_lifecycle.py     # the reaper, eviction reasons, close 4408
 │   ├── test_session_storage.py       # atomic saves, header listings, trimming, pruning
@@ -609,7 +619,7 @@ machinelearningmachine/
 │   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
-│       └── client-lifecycle.test.mjs  # 9 tests: gap refetch, released session, 409, badges
+│       └── client-lifecycle.test.mjs  # 17 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,
 │                            #   vendor integrity, jsdom, pip-audit, npm audit, secret scan
 ├── .github/dependabot.yml   # pip + npm + actions

@@ -19,6 +19,7 @@ from typing import List
 from . import _deps
 from .mesh import AgentMesh
 from .server.config import AUTH_TOKEN_ENV_VAR
+from .server.config import DEFAULT_MAX_QUEUED as DEFAULT_MAX_QUEUED_CLI
 from .server.config import DEFAULT_MAX_SESSIONS as DEFAULT_MAX_SESSIONS_CLI
 from .server.config import DEFAULT_RUN_TIMEOUT as DEFAULT_RUN_TIMEOUT_CLI
 from .server.config import DEFAULT_SESSION_IDLE_TTL as DEFAULT_SESSION_TTL_CLI
@@ -137,6 +138,17 @@ def main():
         ),
     )
     serve_parser.add_argument(
+        "--max-queued",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            f"How many runs may wait behind the active one, per browser session (default: "
+            f"{DEFAULT_MAX_QUEUED_CLI}; or MACHINELEARNINGMACHINE_MAX_QUEUED). 0 restores the "
+            "pre-queue refusal: a second run is a 409 instead of a queued 202."
+        ),
+    )
+    serve_parser.add_argument(
         "--allow-insecure-provider-urls",
         action="store_true",
         help=(
@@ -249,6 +261,7 @@ def main():
         from .server.config import (
             AUTH_TOKEN_SUFFIX,
             INSECURE_PROVIDER_URLS_SUFFIX,
+            MAX_QUEUED_SUFFIX,
             MAX_SESSIONS_SUFFIX,
             RUN_TIMEOUT_SUFFIX,
             SESSION_TTL_SUFFIX,
@@ -306,6 +319,11 @@ def main():
                 label="--session-ttl", default=DEFAULT_SESSION_TTL_CLI // 60,
                 minimum=1.0, maximum=43200.0,
             )
+            max_queued = resolve_number(
+                getattr(args, "max_queued", None), MAX_QUEUED_SUFFIX,
+                label="--max-queued", default=DEFAULT_MAX_QUEUED_CLI,
+                minimum=0.0, maximum=100.0,
+            )
         except EnvValueError as exc:
             _print_error(str(exc))
             raise SystemExit(2) from exc
@@ -321,6 +339,7 @@ def main():
                 or env_flag(INSECURE_PROVIDER_URLS_SUFFIX)
             ),
             max_sessions=int(max_sessions),
+            max_queued=int(max_queued),
             session_idle_ttl=session_ttl_minutes * 60,
             allow_origins=normalize_origins(
                 list(getattr(args, "allow_origin", None) or []) + list(origins_from_env())
@@ -347,7 +366,12 @@ def main():
             f"[*] Provider errors: {'fail the run' if not server_config.fallback_to_mock else 'labelled simulator fallback'}",
             f"[*] Sessions:       up to {server_config.max_sessions} live meshes, "
             f"idle for {int(server_config.session_idle_ttl // 60)} min then released by the reaper",
-            f"[*] Run limit:      {server_config.run_timeout:.0f}s per dialogue; one run at a time per browser session",
+            f"[*] Run limit:      {server_config.run_timeout:.0f}s per dialogue; one run at a time per browser session"
+            + (
+                ", no queue (--max-queued 0: a second run is refused)"
+                if server_config.max_queued <= 0
+                else f", up to {server_config.max_queued} queued"
+            ),
         ]
         if not server_config.on_loopback:
             banner.append(

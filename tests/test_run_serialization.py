@@ -12,7 +12,9 @@ different task. The exported session and the saved transcript inherit both.
 
 The rules the endpoint now keeps:
 * validation happens before the rate-limit stamp is spent;
-* a second concurrent run is refused (409), not queued and not interleaved;
+* one run executes at a time, never interleaved (a second concurrent run queues
+  by default - see test_run_queue.py - and is refused with 409 only when the
+  operator sets --max-queued 0, which is what this file pins);
 * every run event carries the run's id, so a browser can tell its own run from
   another tab's.
 """
@@ -46,7 +48,9 @@ class PacedProvider(BaseLLMProvider):
 
 @pytest.fixture
 def paced_app():
-    app = create_app(ServerConfig(host="127.0.0.1"))
+    # Refusal mode: --max-queued 0 restores the pre-queue 409, which is what the
+    # two tests below pin. Queue mode lives in test_run_queue.py.
+    app = create_app(ServerConfig(host="127.0.0.1", max_queued=0))
     return app
 
 
