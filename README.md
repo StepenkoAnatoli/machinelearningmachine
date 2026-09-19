@@ -75,7 +75,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 419 tests (387 Python + 32 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 422 tests (390 Python + 32 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -498,7 +498,7 @@ Everything is offline and hermetic - network calls are injected, never performed
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
 pytest -q                                    # 357 tests, all offline
-node --test tests/js/*.test.mjs          # 24 jsdom browser tests (needs: npm ci)
+node --test tests/js/*.test.mjs          # 32 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 ```
@@ -606,6 +606,9 @@ machinelearningmachine/
 │   ├── test_provider_retry.py        # retry budget, backoff, attempt accounting
 │   ├── test_provider_output_bounds.py# long replies and long prompts stay loadable
 │   ├── test_run_serialization.py     # one run at a time, 409, no interleaved history
+│   ├── test_run_cancellation.py      # Stop at agent boundaries, scoped cancel, 404s
+│   ├── test_run_queue.py             # bounded FIFO: 202+position, 429, FIFO order, queued cancel
+│   ├── test_queued_run_validation.py # invalid runs fail identically idle or busy
 │   ├── test_ws_backpressure.py       # stalled tabs, dropped frames, gap notice, recovery
 │   ├── test_session_lifecycle.py     # the reaper, eviction reasons, close 4408
 │   ├── test_session_storage.py       # atomic saves, header listings, trimming, pruning
@@ -616,7 +619,7 @@ machinelearningmachine/
 │   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
-│       └── client-lifecycle.test.mjs  # 9 tests: gap refetch, released session, 409, badges
+│       └── client-lifecycle.test.mjs  # 17 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,
 │                            #   vendor integrity, jsdom, pip-audit, npm audit, secret scan
 ├── .github/dependabot.yml   # pip + npm + actions

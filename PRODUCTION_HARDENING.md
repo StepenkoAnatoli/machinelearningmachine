@@ -51,6 +51,8 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D23** | Socket frames beating HTTP 202 wedge the tab busy or show a stale queue position | The browser regressions resolved the 202 after `run_started` (the tab adopted a dead queued identity, and the completion took the wrong branch and never released the button) and after `run_cancelled` (no frame would ever come for the adopted id) | Low (needs HTTP/WS reorder inside one round trip; a reload heals it) |
 
+| **D24** | Hardening record still claims runs are refused and a queue would need persistence | F2, the F2 evidence row, two section-7 bullets and the N1/N2/N4 paragraph contradicted the rewritten decision B; the user-centered-design table promised a `409`; the README test tree said "9 tests" for a 17-test suite and "24" jsdom for 32 | Low (documentation-in-record; the code was already correct) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -61,8 +63,9 @@ headers - come from running them, not from reading the code and reasoning about 
 Functional
 - **F1** A provider answer of any size must complete the run, and truncation must be
   visible in the message (metadata + text notice) — *never* silent, never fatal. (D1)
-- **F2** One run at a time per browser session; a second concurrent run is refused
-  with an actionable message, and every run event carries an id the UI can attribute. (D2)
+- **F2** One run at a time per browser session; a second concurrent run waits in a
+  bounded queue with an actionable position (see F15), and every run event carries
+  an id the UI can attribute. (D2)
 - **F3** No UI client can slow or stop a run: fan-out is bounded, non-blocking, and a
   client that cannot keep up loses frames and is told so. (D3)
 - **F4** `--session-ttl` must actually reclaim idle sessions and their sockets. (D4)
@@ -155,17 +158,18 @@ Every evidence cell is a test that was run and passed, not a plan. All offline.
 | Req | Implementation | Evidence |
 |---|---|---|
 | F1 | `protocol/message.py: clamp_content`, `agents/base.py` clamp + `fit_context` for injected prompts, `server/app.py: _safe_reason` | `tests/test_provider_output_bounds.py` - 1 k…200 k chars across all four topologies, export wording, `/api/run`'s `truncated_messages`, and `_safe_reason` refusing to echo a payload |
-| F2 | `server/state.py: run_lock` + `active_run_id`, `server/app.py` 409-with-reason, `run_id` on `run_started`/`new_message`/`run_completed` | `tests/test_run_serialization.py` - loser gets 409, transcript untouched, `run_id` consistent across frames, lock freed on error |
+| F2 | `server/state.py: run_lock` + `active_run_id` + bounded `run_queue`, `server/app.py` 202-with-position (`409` only when `--max-queued 0`), `run_id` on every run frame | `tests/test_run_serialization.py` (refusal mode pinned via `max_queued=0`) + `test_run_queue.py` - loser queues with its position, transcript untouched, `run_id` consistent across frames, lock freed on error |
 | F3 | `server/feed.py: ClientFeed` (bounded outbox, drop-oldest, `stream_gap`, send timeout), `SessionState.publish`, `finally:` detach in the WS handler | `tests/test_ws_backpressure.py` - a stalled socket cannot delay the producer, 40 publishes → `dropped >= 30` with the newest frames intact, `/api/run` completes on a saturated feed |
 | F4 | `server/app.py` lifespan sweeper → `SessionRegistry.sweep_expired(reason)`, `on_evict` → `close_feeds(final=…, code=4408)`, `session_released` frame | `tests/test_session_lifecycle.py` - a quiet tab with a live socket is reclaimed with no further request, its next request is a *new* session, capacity eviction prefers ephemeral, sweeper stops with the app |
 | F5 | `sessions.py: _write_atomic`, metadata header (`message_count`, `trimmed`), prefix-only listing, stale-`.tmp` prune, `new_session_id` carries sub-second precision | `tests/test_session_storage.py` - a failed `os.replace` leaves the previous file byte-identical with no temp litter, listing reads ≤ 4 KiB per file, oversized transcripts are trimmed *and flagged*, prune order is timestamp-driven |
 | F6 | `providers.py: post_for_json` retry loop, `max_attempts`/`retry_backoff`/`timeout`, `ProviderError.attempts`, `metadata.provider_attempts` | `tests/test_provider_retry.py` - 429/503 retried up to the budget, 401 not retried, an unparseable 200 costs one request, the wait scales with the attempt, and the transcript records the effort |
 | F7 | `providers.py: allow_env_key`, `server/app.py` builds providers with `allow_env_key=False`, auth headers only when a key exists | `tests/test_env_key_isolation.py` - a real aiohttp capture server asserts the headers it *received*: a keyless session sends none, an operator key is never attached to a session's request, and clearing a key cannot resurrect it from the environment |
 | F8 | `netguard.validate_provider_target`, `server/app.py: _guard_provider_url`, `--allow-insecure-provider-urls`, `ServerConfig.allow_insecure_provider_urls` | `tests/test_provider_url_policy.py` - CGNAT/`192.0.0.1`/IPv6-mapped/decimal-host matrices, loopback bind keeps Ollama on any port, public bind refuses and changes nothing (mode stays `simulated`), operator allowlist honoured |
-| F9 | `cli.py: run --live {openai,anthropic,both}`, `--base-url`, `--provider-timeout`, honest pre-flight banner, exit 1 without a key | `tests/test_cli_live.py` - which agents get wired per mode, nothing dials out without `--live`, the key is never echoed, flag > env > default for `--run-timeout`/`--max-sessions`/`--session-ttl`, and `SESSION_TTL=5m` stops startup instead of being ignored |
+| F9 | `cli.py: run --live {openai,anthropic,both}`, `--base-url`, `--provider-timeout`, honest pre-flight banner, exit 1 without a key | `tests/test_cli_live.py` - which agents get wired per mode, nothing dials out without `--live`, the key is never echoed, flag > env > default for `--run-timeout`/`--max-sessions`/`--session-ttl`/`--max-queued`, and `SESSION_TTL=5m` stops startup instead of being ignored |
 | F10 | `cli.py`/`mesh.py: _delay_kwargs` on all four topologies | `tests/test_cli_live.py` (parametrised over p2p/pipeline/debate/hub) + measured 0.45 s → 0.00 s |
 | F11 | validation before the cooldown stamp, `Retry-After` on 409/429 | `tests/test_run_serialization.py` - `state.last_run_time` unchanged by a 400 |
 | F12 | `server/app.py: _safe_reason` for every failure string that reaches a client | `tests/test_provider_output_bounds.py` (unit cases) |
+| F15 | `server/config.py:MAX_QUEUED_SUFFIX`, `server/state.py:run_queue` + positions, `cli.py:--max-queued`, `server/app.py` queue branch + lock-handoff pump + queued-aware cancel, `static/app.js` queued lifecycle | `test_run_queue.py` (202+position, 429+Retry-After, 0→409, FIFO order, queued cancel, per-session isolation), `test_cli_live.py` max_queued resolution, jsdom queued-position + queue-full + adoption + race cases, e2e "concurrency in the same tab queues instead of refusing" |
 | N1/N2 | stdlib-only core, `asyncio.wait_for` on every await that can block | CI matrix (3.10/3.11/3.12) + `test_import_without_optional_deps` |
 | N3 | README + SECURITY.md rewritten in the same change; `serve` knobs readable from the environment | `tests/test_docs_are_accurate.py` + `tests/test_cli_live.py` |
 | N4 | `--run-timeout` (default 180 s) → 504 with a plain-language reason, `run_error` frame first | `tests/test_run_serialization.py` |
@@ -302,9 +306,12 @@ exercise was not to add unfounded claims:
 
 ## 7. What this milestone deliberately did *not* do
 
-- **Multiple runs per session.** Deliberately refused (decision B).
-- **Per-run meshes or a job queue.** Correct for a multi-user service; this is a local
-  tool with one shared token, and a queue would need persistence to be honest about it.
+- **Multiple runs per session.** Still one at a time (decision B) - but waiting is
+  now queueing, not refusal: a second request is a `202` with a queue position,
+  bounded by `--max-queued` (`0` restores the old `409`).
+- **Per-run meshes, a persistent queue, or a cross-worker queue.** The queue is a
+  per-session in-memory FIFO: it dies with the process and does not span workers.
+  That is the documented limit, not an oversight queued up for later.
 - **Pinning provider connections to the IPs validated at check time.** Same residual
   DNS-rebinding risk netguard already documents; the policy now applies to provider
   URLs, but the transport is still `requests`/`aiohttp`.
@@ -346,10 +353,12 @@ exercise was not to add unfounded claims:
 
 | D23 socket beats HTTP 202 | F15 | `static/app.js` terminal-run record + 202 reconcile (ended → release with its ending; already active → active mode; else queued mode) | jsdom started-before-202 and cancelled-before-202 cases (deferred 202 body) |
 
+| D24 stale no-queue prose | F13, N3 | PRODUCTION_HARDENING.md (F2, §4 F2/F9/F15 rows, §7, §8 N-para), USER_CENTERED_DESIGN.md queue row, README test tree + jsdom count | `test_docs_are_accurate.py` (hardening-agrees, UCD-agrees, listing-counts cases) |
+
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
-`--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented as
-a bounded per-connection outbox and an `asyncio.wait_for` rather than a queue, a worker
-pool, or a new dependency.
+`--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented
+with stdlib parts (a bounded per-connection outbox, an in-memory list as the queue, an
+`asyncio.wait_for` around each execution) rather than a worker pool or a new dependency.
 
 ---
 
