@@ -72,7 +72,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 381 tests (357 Python + 24 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 393 tests (366 Python + 27 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -656,3 +656,8 @@ sha384 hash.
 Designed for collaborative multi-agent engineering. No warranty: as the license says,
 the software is provided "AS IS" - which is also the honest description of the
 simulator's code snippets.
+
+An active dashboard run can be stopped with **Stop**. Cancellation takes effect at
+the next agent boundary, keeping the current reply and a cancellation notice in
+the transcript. It does not abort or undo an upstream provider request; the run
+timeout still applies while waiting. Stop is disabled while idle.

@@ -11,9 +11,8 @@ ran through the whole codebase:
 2. exactly one browser drives one mesh, one run at a time, and it is always
    listening.
 
-Neither is true the moment you configure a real model and leave a tab open. Every
-finding below was reproduced against the code at commit `9cffbd3` before being
-fixed, and each fix has a regression test named after it.
+Neither is true the moment you configure a real model and leave a tab open. The original findings were reproduced against commit `9cffbd3`; D18 was
+reproduced against the parent of the cancellation change before being fixed, and each fix has a regression test named after it.
 
 ---
 
@@ -38,7 +37,11 @@ fixed, and each fix has a regression test named after it.
 | **D14** | `save_session`'s size-trim loop cannot terminate | A transcript whose *single* last message exceeds `MAX_SESSION_BYTES` halves a one-element list forever: `[len//2:]` == `[0:]`. Reached in tests with a small cap; in production reachable via a large `agents` blob. The pre-existing code had the same shape | Medium (wedge inside the request thread) |
 | **D15** | Session pruning ordered by `mtime` and broke ties with the filename's random suffix | Several saves inside one second (or a filesystem with one-second granularity: FAT, some NFS) can evict **the session you just saved** | Medium (silent data loss, filesystem-dependent) |
 | **D16** | `metadata.content_truncated` was written by the agent and rendered by nobody, while `app.js` carried a comment asserting "the badge on the message says it too" | The only visible sign of a clipped answer was inside the Markdown body; the comment was a lie about the UI | Low (documentation-in-code) |
-| **D17** | A CI step that only worked on the maintainer's Node | The jsdom step added in this milestone ran `node --test "tests/js/*.test.mjs"`. Node >= 21 expands that pattern itself; the workflow's node 20 does not, so node tried to open a file literally named `tests/js/*.test.mjs` and the job died 15 seconds in - green locally, red on the runner. Found by CI, not by review | Medium (a job that can never pass is worse than a missing one: it trains people to ignore red) |
+| **D17** | A CI step that only worked on the maintainer's Node | The jsdom step already existed on main as `node --test tests/js/sanitize.test.mjs`; this milestone widened it to a glob and initially ran `node --test "tests/js/*.test.mjs"`. Node >= 21 expands that pattern itself; the workflow's node 20 does not, so node tried to open a file literally named `tests/js/*.test.mjs` and the job died 15 seconds in - green locally, red on the runner. Found by CI, not by review. Narrowing back to one file would have hidden the red while leaving the second suite unexecuted forever | Medium (a job that can never pass is worse than a missing one: it trains people to ignore red) |
+
+| **D18** | Runs cannot be stopped by the user | The cancellation regression received HTTP 404 for an active run in every topology; the browser regression found no Stop control | Medium (unwanted provider turns continue until completion or timeout) |
+
+| **D19** | Reconnect snapshots omit run state | Server snapshot regression raised `KeyError: active_run_id`; browser regressions left Stop disabled during an active run and Execute busy after a missed completion | Medium (run controls cannot recover on reconnect) |
 
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
@@ -71,6 +74,8 @@ Functional
   visible where the user reads, not only in metadata. (D6, D16)
 - **F13** Documents describe the code as it is *today*, including the parts that are
   inconvenient (what is installed, what is enforced, what is not offered). (D13)
+
+- **F14** Stop an active run at the next agent boundary, retain arrived replies and a cancellation notice, and scope cancellation to the requesting browser/run. (D18)
 
 Non-functional
 - **N1** No new runtime dependency (retry/backoff, queueing, atomic writes are stdlib).
@@ -219,6 +224,14 @@ exercise was not to add unfounded claims:
 
 ## 6. Residual risks and limits of what was proven
 
+- **Run-control recovery requires connectivity (D19).** Reconnection restores the active
+  run and pending-stop state, but an offline tab cannot deliver a cancellation request.
+
+- **Cancellation is cooperative (D18).** Stop does not abort an in-flight provider request
+  or its retry/backoff. It prevents the next agent call; the current reply is kept.
+  A provider error or run timeout can still terminate a pending stop as an error.
+  The existing timeout remains the bound; no upstream billing cancellation is promised.
+
 - **DNS rebinding is documented, not closed.** `validate_provider_target` checks
   addresses, then `aiohttp` resolves again. Same pre-existing gap as the page reader.
 - **Backpressure is bounded, not prevented.** A tab that cannot keep up loses frames and
@@ -253,9 +266,6 @@ exercise was not to add unfounded claims:
 
 ## 7. What this milestone deliberately did *not* do
 
-- **Mid-run cancellation.** A run is bounded by `--run-timeout` instead. A real
-  Stop button needs the topologies to check a cancellation flag between turns; with a
-  lock and a timeout in place the worst case is now bounded and visible.
 - **Multiple runs per session.** Deliberately refused (decision B).
 - **Per-run meshes or a job queue.** Correct for a multi-user service; this is a local
   tool with one shared token, and a queue would need persistence to be honest about it.
@@ -287,6 +297,10 @@ exercise was not to add unfounded claims:
 | D15 prune order tie | F5 | `sessions.py:_prune_sort_key`, sub-second `new_session_id` | `test_session_storage.py` (2 prune cases) |
 | D16 badge claimed but absent | F12, F1 | `static/app.js`, `static/style.css` | `tests/js/client-lifecycle.test.mjs` ("clamped reply is badged") |
 | D17 CI step assumed node ≥ 21 | N3 | `.github/workflows/ci.yml` (shell-expanded glob), every copyable command in the docs | `test_ci_runs_every_jsdom_suite`, `test_the_documented_way_to_run_the_browser_tests_works` |
+
+| D18 no Stop control | F14 | `run_control.py`, `agents/base.py`, `server/state.py`, `server/app.py`, dashboard Stop | `test_run_cancellation.py`, `tests/js/client-lifecycle.test.mjs` (Stop lifecycle) |
+
+| D19 reconnect loses run controls | F14 | `server/app.py` WebSocket snapshot, `static/app.js` init handling | `test_reconnecting_socket_receives_active_run_and_stop_state`, jsdom reconnect-during-run and missed-completion regressions |
 
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
 `--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented as
@@ -321,3 +335,34 @@ pool, or a new dependency.
 - The GitHub Actions workflow changes are unexecuted here (this environment has no
   runner); the steps were reproduced by hand locally, which is how the `[web]`-extra
   mistake was caught before commit.
+
+### D18 cancellation contract
+
+`POST /api/runs/{run_id}/cancel` sets a fresh per-run `asyncio.Event` and returns
+`status: cancelling`. Repeated requests while active are harmless; unknown, finished,
+or another browser's run returns 404 through the normal authenticated session route.
+The run task carries the event in a task-local context, checked before each agent
+starts, so every topology shares the same boundary without mutable agent flags.
+The original run response returns `status: cancelled`; the feed emits `run_cancelled`.
+A system message in history records cancellation and survives saving/exporting along
+with the replies already received. Stop is disabled while idle and while awaiting
+acknowledgement/completion; it becomes available once `run_started` supplies the id.
+Tests were written first: active cancellation returned 404 and the DOM lacked Stop.
+Tests cover early and final-agent cancellation, repeat/stale requests, browser isolation,
+retained history, lock release, and a subsequent successful run with a fresh event.
+
+Local D18 validation: `pytest -q` reported **365 passed**;
+`node --test tests/js/*.test.mjs` reported **25 passed**. The full lint scope
+passed, and `scripts/e2e_server_check.py` reported `ALL E2E CHECKS PASSED` against
+`serve --port 8799` on its unchanged loopback default. The server was stopped
+following the check. No real-provider or cross-browser validation was performed.
+
+### D19 final review
+
+Failing tests first reproduced missing run state in the WebSocket snapshot and
+stale controls on reconnect. The snapshot now includes the session-scoped active
+run id and pending cancellation flag; init restores Stop and Execute accordingly.
+The existing local-request guard remains active until its HTTP request settles.
+
+D19 local validation: **366 Python tests passed**, **27 jsdom tests passed**;
+full-scope Ruff and the loopback server e2e gate passed. The gate server was stopped.

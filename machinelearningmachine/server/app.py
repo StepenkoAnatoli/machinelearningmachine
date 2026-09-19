@@ -45,7 +45,8 @@ from ..agents.custom import CustomAgent
 from ..agents.providers import AnthropicProvider, OpenAIProvider, ProviderError
 from ..mesh import AgentMesh
 from ..protocol.bus import MessageBus
-from ..protocol.message import Message
+from ..protocol.message import Message, MessageType
+from ..run_control import RunCancelled, cancel_event
 from .config import (
     AUTH_TOKEN_ENV_VAR,
     CLIENT_COOKIE_NAME,
@@ -947,6 +948,13 @@ def _register_routes(
         }
 
     # -- runs -------------------------------------------------------------
+    @app.post("/api/runs/{run_id}/cancel")
+    async def cancel_run(run_id: str, state: SessionState = Depends(current_state)):
+        if state.active_run_id != run_id or state.cancel_event is None:
+            raise HTTPException(status_code=404, detail="No active run with that id in this session.")
+        state.cancel_event.set()
+        return {"status": "cancelling", "run_id": run_id}
+
     @app.post("/api/run")
     async def run_dialogue(req: RunTaskRequest, request: Request, state: SessionState = Depends(current_state)):
         """
@@ -1014,6 +1022,9 @@ def _register_routes(
         state.last_run_time = now
         await state.run_lock.acquire()
         run_id = state.next_run_id()
+        state.cancel_event = asyncio.Event()
+        previous_ids = {m.id for m in mesh.get_history()}
+        cancelled = False
 
         state.publish({
             "type": "run_started",
@@ -1024,6 +1035,7 @@ def _register_routes(
 
         async def _execute() -> List[Message]:
             """One topology call, kept separate so the timeout can wrap exactly it."""
+            cancel_event.set(state.cancel_event)  # confined to wait_for's child task
             if req.topology == "p2p":
                 return await mesh.talk_p2p(
                     from_agent_id=req.from_agent or "arena-ai",
@@ -1048,6 +1060,8 @@ def _register_routes(
         try:
             try:
                 transcript = await asyncio.wait_for(_execute(), timeout=config.run_timeout)
+            except RunCancelled:
+                transcript = [m for m in mesh.get_history() if m.id not in previous_ids]
             except asyncio.TimeoutError as exc:
                 reason = (
                     f"the run was stopped after {config.run_timeout:.0f}s: a provider accepted "
@@ -1056,6 +1070,15 @@ def _register_routes(
                 )
                 state.publish({"type": "run_error", "run_id": run_id, "error": reason})
                 raise HTTPException(status_code=504, detail=reason) from exc
+            if state.cancel_event.is_set():
+                cancelled = True
+                notice = Message(
+                    sender_id="system", sender_name="System", message_type=MessageType.SYSTEM,
+                    content="Run cancelled. Replies already received have been kept.",
+                    metadata={"run_id": run_id, "cancelled": True},
+                )
+                await mesh.bus.dispatch(notice)
+                transcript.append(notice)
         except HTTPException:
             raise
         except ProviderError as e:
@@ -1077,6 +1100,7 @@ def _register_routes(
             raise HTTPException(status_code=500, detail="Failed to execute dialogue. Please try again.") from exc
         finally:
             state.active_run_id = None
+            state.cancel_event = None
             state.run_lock.release()
 
         messages = [m.to_dict() for m in transcript]
@@ -1086,13 +1110,13 @@ def _register_routes(
         warnings = sorted({str(md["provider_error"]) for md in meta if md.get("provider_error")})
         state.last_run_warnings = warnings
         state.publish({
-            "type": "run_completed",
+            "type": "run_cancelled" if cancelled else "run_completed",
             "run_id": run_id,
             "simulated_count": len(simulated),
             "truncated_count": len(clamped),
         })
         return {
-            "status": "completed",
+            "status": "cancelled" if cancelled else "completed",
             "run_id": run_id,
             "messages": messages,
             # Tell the client what it is looking at; the transcript is never
@@ -1131,6 +1155,8 @@ def _register_routes(
         try:
             feed.publish({
                 "type": "init",
+                "active_run_id": state.active_run_id,
+                "cancel_requested": bool(state.cancel_event and state.cancel_event.is_set()),
                 "agents": state.mesh.list_agents(),
                 "history": [m.to_dict() for m in state.mesh.get_history()],
                 "authenticated": state.authenticated or not config.require_auth,
