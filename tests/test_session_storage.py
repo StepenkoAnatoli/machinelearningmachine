@@ -200,6 +200,29 @@ def test_an_oversized_session_is_trimmed_and_says_so(tmp_path, monkeypatch):
     assert listed[0]["trimmed"] is True, "the list row must not imply a full transcript"
 
 
+def test_large_trimmed_session_stores_trimmed_flag_in_header_and_fast_path_reads_it(tmp_path):
+    """
+    D30: when a session with 1000+ messages exceeds MAX_SESSION_BYTES and is trimmed,
+    the 'trimmed' flag must live in the leading header so _head_meta can see it without
+    reading past META_HEAD_BYTES, and save_session must return trimmed=True.
+    """
+    big = _messages(1000, size=10_000)
+    meta = store.save_session("large-trimmed", AGENTS, big)
+    assert meta.get("trimmed") is True, "save_session must return trimmed=True for trimmed session"
+
+    path = store._path_for(meta["id"])
+    assert path.stat().st_size > store.META_HEAD_BYTES, "test requires a file larger than META_HEAD_BYTES"
+
+    # _head_meta only reads META_HEAD_BYTES:
+    head = store._head_meta(path)
+    assert head is not None, "fast path must match"
+    assert head.get("trimmed") is True, "fast path must read trimmed=True from header without full parse"
+
+    listed = store.list_sessions()
+    assert listed[0]["id"] == meta["id"]
+    assert listed[0].get("trimmed") is True, "list_sessions must report trimmed=True from header"
+
+
 def test_the_kept_messages_are_the_most_recent_ones(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "MAX_SESSION_BYTES", 4000)
     messages = _messages(60, size=400)

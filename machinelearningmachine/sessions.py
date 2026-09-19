@@ -181,34 +181,39 @@ def save_session(
     saved_at = time.time()
 
     # Key order is part of the format: list_sessions() reads metadata out of the
-    # first kilobytes, so "message_count" has to be in the header, not derived
-    # from the transcript body.
-    payload = {
-        "id": session_id,
-        "version": 1,
-        "name": clean_name,
-        "created_at": saved_at,
-        "message_count": len(messages),
-        "agents": agents,
-        "messages": messages,
-        "extra": extra or {},
-    }
-
-    # If the session is huge, trim oldest messages until it fits the cap - and say
-    # in the file itself what was dropped, so a trimmed transcript never reads as
-    # the complete conversation.
+    # first kilobytes, so "message_count" and "trimmed" have to be in the header,
+    # not placed after the transcript body.
     dropped_on_trim = 0
+    payload_messages = list(messages)
+
+    def _build_payload(msgs: List[Dict[str, Any]], dropped: int) -> Dict[str, Any]:
+        p: Dict[str, Any] = {
+            "id": session_id,
+            "version": 1,
+            "name": clean_name,
+            "created_at": saved_at,
+            "message_count": len(msgs),
+        }
+        if dropped:
+            p["trimmed"] = True
+            p["messages_dropped_on_save"] = dropped
+        p["agents"] = agents
+        p["messages"] = msgs
+        p["extra"] = extra or {}
+        return p
+
+    payload = _build_payload(payload_messages, dropped_on_trim)
     data = json.dumps(payload, ensure_ascii=False)
     # The guard and the "cut == 0" branch both exist because halving a list of one
     # makes no progress: a single oversized message used to spin here forever, in
     # the request thread, with the file still unwritten.
     for _ in range(64):
-        if len(data.encode("utf-8")) <= MAX_SESSION_BYTES or not payload["messages"]:
+        if len(data.encode("utf-8")) <= MAX_SESSION_BYTES or not payload_messages:
             break
-        cut = len(payload["messages"]) // 2
-        payload["messages"] = payload["messages"][cut:] if cut else []
+        cut = len(payload_messages) // 2
+        payload_messages = payload_messages[cut:] if cut else []
         dropped_on_trim += cut or 1
-        payload["message_count"] = len(payload["messages"])
+        payload = _build_payload(payload_messages, dropped_on_trim)
         data = json.dumps(payload, ensure_ascii=False)
     else:
         if len(data.encode("utf-8")) > MAX_SESSION_BYTES:
@@ -217,14 +222,10 @@ def save_session(
                 "the saved agents and their prompts alone are that large. Remove some "
                 "custom modules or shorten their system prompts, then save again."
             )
-    if dropped_on_trim:
-        payload["messages_dropped_on_save"] = dropped_on_trim
-        payload["trimmed"] = True
-        data = json.dumps(payload, ensure_ascii=False)
 
     _write_atomic(_path_for(session_id, namespace), data)
     _prune_old_sessions(namespace)
-    return _meta(session_id, clean_name, len(payload["messages"]), saved_at)
+    return _meta(session_id, clean_name, len(payload["messages"]), saved_at, trimmed=bool(dropped_on_trim))
 
 
 def _write_atomic(path: Path, data: str) -> None:
