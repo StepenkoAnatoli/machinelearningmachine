@@ -75,7 +75,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 422 tests (390 Python + 32 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 466 tests (433 Python + 33 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -411,7 +411,7 @@ python3 -m machinelearningmachine.cli run --live both --provider-timeout 30 --pr
 | --- | --- |
 | `--live {openai,anthropic,both}` | Which modules get real providers. `--live openai` wires `@gpt` and `@copilot`; `anthropic` wires `@claude` and `@arena-ai`; `both` wires all four |
 | `--base-url URL` | Send the live calls somewhere else (Ollama, vLLM, LM Studio, a proxy). Validated by the same outbound policy as the dashboard |
-| `--provider-timeout SECONDS` | Per-request ceiling for a live call (1-900) |
+| `--provider-timeout SECONDS` | Per-request ceiling for a live call (1-900), and the ceiling on the *total* time one turn may spend waiting between retries: an upstream `Retry-After` longer than that is reported, not slept |
 | `--strict-provider-errors` | A provider failure fails the run instead of falling back to the labelled simulator |
 
 `--live openai` with no `OPENAI_API_KEY` and no `--base-url` is refused with exit code 1
@@ -497,15 +497,15 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 357 tests, all offline
-node --test tests/js/*.test.mjs          # 32 jsdom browser tests (needs: npm ci)
+pytest -q                                    # 433 tests, all offline
+node --test tests/js/*.test.mjs          # 33 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 ```
 
 ```
 $ pytest -q
-357 passed in 21.3s
+433 passed, 2 warnings in 29.45s   # the count is asserted by CI; the seconds are your machine's
 ```
 
 Coverage by area: protocol/bus bounds, agents and topologies, provider provenance,
@@ -603,7 +603,7 @@ machinelearningmachine/
 │   ├── test_netguard.py     # SSRF policy matrix (48 cases, all offline)
 │   ├── test_provider_url_policy.py   # provider base URLs meet the same policy, per bind
 │   ├── test_env_key_isolation.py     # an ambient OPENAI_API_KEY is never used or sent
-│   ├── test_provider_retry.py        # retry budget, backoff, attempt accounting
+│   ├── test_provider_retry.py        # retry budget, Retry-After, backoff, attempt accounting
 │   ├── test_provider_output_bounds.py# long replies and long prompts stay loadable
 │   ├── test_run_serialization.py     # one run at a time, 409, no interleaved history
 │   ├── test_run_cancellation.py      # Stop at agent boundaries, scoped cancel, 404s
@@ -619,7 +619,7 @@ machinelearningmachine/
 │   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
-│       └── client-lifecycle.test.mjs  # 17 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery
+│       └── client-lifecycle.test.mjs  # 18 tests: gap refetch, released session, 409/queue lifecycle, badges, retry-wait wording, reconnect recovery
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,
 │                            #   vendor integrity, jsdom, pip-audit, npm audit, secret scan
 ├── .github/dependabot.yml   # pip + npm + actions

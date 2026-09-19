@@ -414,6 +414,42 @@ test("a clamped reply is badged where it hangs, not only in the toast", async ()
   assert.match(badges[0].title, /20000 characters/, "and says how much is missing");
 });
 
+test("a degraded reply's badge says how long the retries waited", async () => {
+  /*
+   * D28's browser half. The server now records what a retry cost in seconds
+   * (`metadata.provider_waited`, and the same number inside `provider_error`).
+   * A number only in metadata is the D16 mistake - written by the agent,
+   * rendered by nobody - so this asserts it reaches the badge the user hovers.
+   */
+  const { win, socket } = await loadClient(() => ({ status: 200, body: [] }));
+  socket().emit({ type: "init", authenticated: true, agents: [], history: [], limits: {}, flags: {} });
+  socket().emit({
+    type: "new_message",
+    run_id: "run-1",
+    message: {
+      id: "m1", sender_id: "gpt", sender_name: "GPT-4o", recipient_id: "*", topic: "general",
+      message_type: "answer",
+      content: "> \u26a0\ufe0f **OpenAI failed** (rate limited). The reply below is the simulator talking.",
+      artifacts: {},
+      metadata: {
+        simulated: true,
+        provider: "OpenAI -> simulator",
+        provider_error: "the API answered HTTP 429 (after 3 attempts, 4s spent waiting)",
+        provider_status_code: 429,
+        provider_attempts: 3,
+        provider_waited: 4,
+      },
+      timestamp: 1700000000,
+    },
+  });
+  for (let i = 0; i < 8; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  const badges = [...win.document.querySelectorAll("#messagesContainer .prov-degraded")];
+  assert.equal(badges.length, 1, "the degraded message carries exactly one badge");
+  assert.match(badges[0].title, /after 3 attempts/, "the badge names the effort");
+  assert.match(badges[0].title, /4s spent waiting/, "and the time it cost, not only the count");
+});
+
 test("Stop targets the active run and is disabled while idle", async () => {
   const { win, calls, socket } = await loadClient(okResponder);
   const stop = win.document.getElementById("btnStop");

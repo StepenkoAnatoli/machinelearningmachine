@@ -52,3 +52,29 @@ def hermetic_environment(monkeypatch, tmp_path):
     # Never let a test suite write into the developer's real ~/.module_mesh.
     monkeypatch.setenv("MACHINELEARNINGMACHINE_SESSIONS_DIR", str(tmp_path / "sessions"))
     yield
+
+
+@pytest.fixture(autouse=True)
+def backoffs(monkeypatch):
+    """
+    Every retry wait in this suite is *recorded*, never spent.
+
+    Autouse on purpose. A rate-limit-aware retry is exactly the code that would
+    sleep for the seconds an upstream asked for - honouring a ``Retry-After: 30``
+    in a test would add half a minute to the suite and prove nothing more than
+    the recorded number does. Tests that assert on the waits ask for this
+    fixture by name and read the list; tests that do not care get the guarantee
+    for free.
+
+    The seam is :func:`machinelearningmachine.agents.providers._backoff_sleep`,
+    not ``asyncio.sleep``: patching the loop's sleep would also swallow every
+    other wait in the call stack (a debounce, a poll, a cooperative pause) and
+    then report a number the retry policy did not produce.
+    """
+    waits: list = []
+
+    async def _record(delay) -> None:
+        waits.append(float(delay))
+
+    monkeypatch.setattr("machinelearningmachine.agents.providers._backoff_sleep", _record)
+    return waits

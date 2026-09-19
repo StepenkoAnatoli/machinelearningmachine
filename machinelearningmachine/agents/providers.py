@@ -21,6 +21,9 @@ import asyncio
 import logging
 import os
 import random
+import re
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -61,6 +64,8 @@ class ProviderError(RuntimeError):
         status_code: Optional[int] = None,
         retryable: bool = False,
         attempts: int = 1,
+        retry_after: Optional[float] = None,
+        waited: float = 0.0,
     ) -> None:
         super().__init__(f"{provider}: {reason}" + (f" [{detail}]" if detail else ""))
         self.provider = provider
@@ -73,6 +78,16 @@ class ProviderError(RuntimeError):
         #: transient 429 or 503 cost the whole turn (and, with
         #: ``--strict-provider-errors``, the whole run).
         self.attempts = max(1, int(attempts))
+        #: Seconds the upstream asked for in a ``Retry-After`` header, or
+        #: ``None`` when it did not ask (or asked in a form nobody can parse).
+        #: Kept on the error so a caller can say *why* the wait was what it was
+        #: instead of only that there was one.
+        self.retry_after = None if retry_after is None else float(retry_after)
+        #: Seconds this client actually spent waiting between attempts. Recorded
+        #: because a wait is something the client *did*: without it a turn that
+        #: burned four seconds on rate limits is indistinguishable from a slow
+        #: model, in the log and in the saved transcript alike.
+        self.waited = max(0.0, float(waited))
 
 
 def _aiohttp():
@@ -96,6 +111,86 @@ DEFAULT_MAX_ATTEMPTS = 2
 DEFAULT_RETRY_BACKOFF = 0.5
 #: Seconds an HTTP call may take before the provider is considered unreachable.
 DEFAULT_REQUEST_TIMEOUT = 60.0
+#: The header an upstream uses to say how long a client should wait. Read
+#: case-insensitively - aiohttp's ``CIMultiDict`` does that, and the parser
+#: below does not need to.
+RETRY_AFTER_HEADER = "Retry-After"
+#: RFC 9110 ``delay-seconds`` is ``1*DIGIT``: no sign, no fraction, no units.
+#: Anything else is a header we did not understand, and "did not understand"
+#: must never be read as "you may retry immediately".
+_DELAY_SECONDS = re.compile(r"^\d+$")
+
+
+async def _backoff_sleep(delay: float) -> None:
+    """
+    The one place a retry wait happens - the seam tests replace.
+
+    Not ``asyncio.sleep`` called inline: patching the event loop's sleep to
+    measure a retry policy also swallows every other wait in the call stack, so
+    the number a test records stops being evidence about *this* policy. Tests
+    replace this function (the ``backoffs`` fixture does it for the whole suite)
+    and assert on the delay that was asked for, which is why a
+    ``Retry-After: 600`` can be tested without anybody waiting ten minutes.
+
+    A non-positive delay is not slept at all, so a zero wait is a no-op rather
+    than a trip through the loop.
+    """
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+def parse_retry_after(value: Any, *, now: Optional[datetime] = None) -> Optional[float]:
+    """
+    Seconds the upstream asked us to wait, or ``None`` when it did not say.
+
+    Both forms RFC 9110 allows are understood: ``delay-seconds`` ("3") and an
+    HTTP-date ("Wed, 21 Oct 2026 07:28:00 GMT"). Everything else - absent,
+    empty, negative, fractional, a word, an impossible date - returns ``None``,
+    which means "no opinion" and leaves the exponential budget in charge.
+
+    Guessing zero for a header we could not read would be the wrong kind of
+    helpful: it retries at once against a server that just said "not now", and
+    turns one rate limit into a longer one.
+
+    ``now`` exists so an HTTP-date can be tested against a fixed instant
+    instead of against whatever the clock says when the suite runs.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("ascii", "replace")
+        except Exception:  # pragma: no cover - decode above cannot realistically fail
+            return None
+    if not isinstance(value, str):
+        # aiohttp hands back strings; a numeric header object from some other
+        # transport is still usable, anything else is not a header.
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = str(int(value)) if float(value).is_integer() else str(value)
+        else:
+            return None
+    text = value.strip()
+    if not text:
+        return None
+    if _DELAY_SECONDS.match(text):
+        return float(int(text))
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        # An IMF-fixdate is always GMT; a naive date from a sloppy server is
+        # read as UTC rather than as local time, which would otherwise make the
+        # wait depend on the machine's timezone.
+        when = when.replace(tzinfo=timezone.utc)
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    # A date already behind us means "now". Not ``None``: that would invent an
+    # exponential delay the server never asked for.
+    return max(0.0, (when - reference).total_seconds())
 
 
 class BaseLLMProvider:
@@ -121,6 +216,83 @@ class BaseLLMProvider:
         raise NotImplementedError
 
 
+def _wait_does_not_fit(
+    err: ProviderError,
+    delay: float,
+    *,
+    remaining: float,
+    budget: float,
+    waited: float,
+) -> ProviderError:
+    """
+    Turn "we could wait, but not that long" into the error it deserves.
+
+    The alternative shapes were both worse. Sleeping a *truncated* wait retries
+    before the upstream's limit resets, spends the attempt, and usually earns a
+    second 429 - the D25 bug wearing a different hat. Sleeping the full wait
+    hands the upstream control of this client's clock, which is how a
+    ``Retry-After: 600`` from one server becomes a ten-minute hang the operator
+    cannot explain, because ``--provider-timeout`` says 60.
+
+    So the loop stops, and the reason carries both numbers: what was asked for
+    and what this client is allowed to spend. It stays ``retryable`` - the
+    upstream failure *is* transient, this client just ran out of patience.
+    """
+    asked = (
+        f"and asked to wait {delay:g}s"
+        if err.retry_after is not None
+        else f"and the next retry would wait {delay:g}s"
+    )
+    room = (
+        f"more than the {budget:g}s this client may spend waiting between attempts"
+        if remaining >= budget
+        else f"more than the {remaining:g}s left of the {budget:g}s this client may spend waiting"
+    )
+    return ProviderError(
+        err.provider,
+        f"{err.reason} {asked}, {room}",
+        detail=err.detail,
+        status_code=err.status_code,
+        retryable=True,
+        attempts=err.attempts,
+        retry_after=err.retry_after,
+        waited=waited,
+    )
+
+
+def _labelled_with_attempts(err: ProviderError, *, waited: float = 0.0) -> ProviderError:
+    """
+    Make ``attempts``, ``reason`` and ``str(exc)`` tell one story, then raise it.
+
+    The suffix used to be gated on ``retryable`` as well as ``attempts > 1``, so a
+    turn that began with a 429 and *ended* on a 401 reported ``attempts=2`` -
+    correctly - next to ``"the API answered HTTP 401"``, which describes one
+    request. ``metadata.provider_attempts`` said 2 and the sentence beside it said
+    nothing, and a reader had no way to tell which was the truth. Both are: two
+    requests were sent and the last answer was a 401.
+
+    ``args`` is rebuilt from the same pieces ``__init__`` used, because ``str(exc)``
+    is what reaches the toast and the ``run_error`` frame while ``reason`` is what
+    reaches the transcript - two strings for one failure is how a user ends up with
+    "timed out" on screen and "timed out (after 2 attempts)" in the export.
+
+    A single attempt is never labelled: "(after 1 attempts)" would be noise, and a
+    test pins its absence so the count cannot drift into decoration.
+    """
+    err.waited = round(max(0.0, float(waited)), 3)
+    if err.attempts > 1:
+        note = f"after {err.attempts} attempts"
+        if err.waited > 0:
+            # Named only when it happened: "(after 2 attempts, 0s spent waiting)"
+            # would be a claim about a wait that never took place.
+            note += f", {err.waited:g}s spent waiting"
+        err.reason = f"{err.reason} ({note})"
+        err.args = (
+            f"{err.provider}: {err.reason}" + (f" [{err.detail}]" if err.detail else ""),
+        )
+    return err
+
+
 async def post_for_json(
     *,
     provider: BaseLLMProvider,
@@ -135,10 +307,18 @@ async def post_for_json(
     a "this is why it failed" message cannot drift between them:
 
     * only statuses in :data:`RETRYABLE_STATUSES` (and transport errors/timeouts) are
-      retried, at most ``provider.max_attempts`` times in total, with a short jittered
-      backoff - a flaky 429 should cost a second, not the run;
+      retried, at most ``provider.max_attempts`` times in total;
+    * the wait before a retry is the upstream's own ``Retry-After`` when it sent one
+      (:func:`parse_retry_after`), and the jittered exponential budget only when it did
+      not - a server that says "come back in 3 s" is not retried after 0.8 s;
+    * every wait goes through :func:`_backoff_sleep`, the seam a test can measure
+      instead of sleep;
+    * the *sum* of those waits may not exceed ``provider.timeout`` - the operator's
+      ``--provider-timeout`` is a ceiling on how long one turn may spend waiting, so a
+      server that asks for ten minutes gets an error naming both numbers rather than a
+      client that sleeps for ten;
     * the failure that ends the loop is raised as :class:`ProviderError` carrying
-      ``attempts``, so the transcript can say how hard it tried;
+      ``attempts`` and ``retry_after``, so the transcript can say how hard it tried;
     * response bodies are truncated before they reach a log line or an error, and an
       API key is never part of either.
     """
@@ -146,6 +326,13 @@ async def post_for_json(
     attempts = provider.max_attempts
     backoff = provider.retry_backoff
     timeout = provider.timeout
+    #: The ceiling on *waiting*, charged across the whole call: the same number
+    #: the operator gave one request (``--provider-timeout``) is what the sum of
+    #: the waits between attempts may not exceed. Without it the flag bounded a
+    #: single request and nothing bounded the sleeps around it - measured at
+    #: 454.1 s of waiting against ``timeout=2.0`` with ``retry_backoff=100``.
+    wait_budget = max(0.0, float(timeout))
+    waited = 0.0
     last_error: ProviderError
 
     for attempt in range(1, attempts + 1):
@@ -156,13 +343,27 @@ async def post_for_json(
                     if status != 200:
                         err_txt = (await resp.text())[:400]
                         logger.error("%s error %s: %s", provider.label, status, err_txt)
+                        retryable = status in RETRYABLE_STATUSES
+                        # ``Retry-After`` is only read for a status this client
+                        # would actually retry. Recording "asked to wait an
+                        # hour" on a 401 it never intended to wait for would be
+                        # a claim about a wait that did not happen.
+                        asked_for = None
+                        if retryable:
+                            resp_headers = getattr(resp, "headers", None)
+                            asked_for = parse_retry_after(
+                                resp_headers.get(RETRY_AFTER_HEADER)
+                                if resp_headers is not None
+                                else None
+                            )
                         raise ProviderError(
                             provider.label,
                             f"the API answered HTTP {status}",
                             detail=err_txt,
                             status_code=status,
-                            retryable=status in RETRYABLE_STATUSES,
+                            retryable=retryable,
                             attempts=attempt,
+                            retry_after=asked_for,
                         )
                     try:
                         data = await resp.json()
@@ -207,24 +408,47 @@ async def post_for_json(
                 attempts=attempt,
             )
         if last_error.retryable and attempt < attempts:
-            # Jitter so parallel agents do not retry in lockstep. Not a
-            # security-relevant use of random(): a fixed delay would be a
-            # worse request, not an unsafe one.
-            delay = backoff * attempt + random.uniform(0, backoff)  # noqa: S311
-            if delay > 0:
-                await asyncio.sleep(delay)
-            continue
-        if last_error.attempts > 1 and last_error.retryable:
-            # Say how hard the provider was tried in ``args`` as well as in
-            # ``reason``: two strings describing one failure is how a user ends up
-            # with "timed out" in the transcript and "timed out (after 2 attempts)"
-            # in the log.
-            last_error.reason = f"{last_error.reason} (after {last_error.attempts} attempts)"
-            last_error.args = (
-                f"{last_error.provider}: {last_error.reason}"
-                + (f" [{last_error.detail}]" if last_error.detail else ""),
+            # The upstream gets the first word: it knows when its own
+            # rate-limit window opens and this client does not. Only when it
+            # said nothing - no header, or one nobody can parse - does the
+            # exponential budget decide, and it is jittered so parallel agents
+            # do not retry in lockstep. Not a security-relevant use of
+            # random(): a fixed delay would be a worse request, not an unsafe one.
+            if last_error.retry_after is not None:
+                delay = last_error.retry_after
+            else:
+                delay = backoff * attempt + random.uniform(0, backoff)  # noqa: S311
+            remaining = wait_budget - waited
+            if delay > remaining:
+                # Cannot be honoured without outliving the operator's ceiling,
+                # and truncating it would retry before the limit resets. Stop,
+                # and say which two numbers collided.
+                raise _labelled_with_attempts(
+                    _wait_does_not_fit(
+                        last_error, delay, remaining=remaining, budget=wait_budget, waited=waited
+                    ),
+                    waited=waited,
+                )
+            waited += delay
+            # Announced *before* it is spent and at WARNING, not DEBUG: this is
+            # the only record of where a slow turn's wall clock went, and a wait
+            # the log does not mention is a wait nobody can explain afterwards.
+            logger.warning(
+                "%s: waiting %.2fs before attempt %d/%d (%s)",
+                provider.label,
+                delay,
+                attempt + 1,
+                attempts,
+                # Two different waits with two different meanings, named so a
+                # reader cannot mistake one for the other: this delay came from
+                # the server, or it came from this client's own budget.
+                f"upstream Retry-After: {delay:g}s"
+                if last_error.retry_after is not None
+                else "jittered backoff, no usable Retry-After",
             )
-        raise last_error
+            await _backoff_sleep(delay)
+            continue
+        raise _labelled_with_attempts(last_error, waited=waited)
 
 
 class MockLLMProvider(BaseLLMProvider):

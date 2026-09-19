@@ -229,8 +229,11 @@ class BaseAgent:
                     "simulated": True,
                     "provider_error": e.reason,
                     "provider_status_code": e.status_code,
-                    # Honest about how hard the provider was tried before giving up.
+                    # Honest about how hard the provider was tried before giving up,
+                    # and about what that cost in seconds - a degraded turn that took
+                    # four seconds of rate-limit waiting should not read like a slow model.
                     "provider_attempts": e.attempts,
+                    "provider_waited": e.waited,
                 }
             )
             self.status = "degraded"
