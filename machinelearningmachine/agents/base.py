@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..protocol.bus import MessageBus
 from ..protocol.message import Message, MessageType, clamp_content
+from ..run_control import check_cancelled
 from .providers import FALLBACK_NOTICE_TEMPLATE, BaseLLMProvider, MockLLMProvider, ProviderError
 
 logger = logging.getLogger("BaseAgent")
@@ -166,6 +167,7 @@ class BaseAgent:
           answer. Either the simulator answers *and says which provider failed*,
           or the error propagates so the run can be reported as failed.
         """
+        check_cancelled()
         self.status = "thinking"
 
         # The incoming context is a *budget*, not a precondition. A real provider

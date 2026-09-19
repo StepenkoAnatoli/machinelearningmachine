@@ -414,6 +414,22 @@ test("a clamped reply is badged where it hangs, not only in the toast", async ()
   assert.match(badges[0].title, /20000 characters/, "and says how much is missing");
 });
 
+test("Stop targets the active run and is disabled while idle", async () => {
+  const { win, calls, socket } = await loadClient(okResponder);
+  const stop = win.document.getElementById("btnStop");
+  assert.ok(stop, "the dashboard offers Stop");
+  assert.equal(stop.disabled, true);
+  socket().emit({ type: "run_started", run_id: "run-18", topology: "pipeline" });
+  assert.equal(stop.disabled, false);
+  stop.click();
+  for (let i = 0; i < 6; i++) await new Promise(r => win.setTimeout(r, 0));
+  assert.ok(calls.fetch.some(c => c.url === "/api/runs/run-18/cancel" && c.options.method === "POST"));
+  socket().emit({ type: "run_cancelled", run_id: "run-18" });
+  assert.equal(stop.disabled, true);
+  assert.equal(win.document.getElementById("btnRun").disabled, false);
+  assert.match(body(win, "toastContainer"), /cancelled/i);
+});
+
 /*
  * A guard on the harness itself, not on the client.
  *
@@ -428,3 +444,4 @@ test("no window outlives its test", () => {
   assert.equal(windowsClosed, windowsOpened,
     "an unclosed jsdom window keeps its timers alive after the last assertion");
 });
+

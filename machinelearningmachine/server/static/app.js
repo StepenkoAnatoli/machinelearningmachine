@@ -15,6 +15,8 @@ document.addEventListener("DOMContentLoaded", () => {
    */
   let localRun = false;
   let remoteRunActive = false;
+  let activeRunId = null;
+  let stopRequested = false;
   /** The server released this session's mesh; reconnecting would only re-allocate. */
   let sessionReleased = false;
   let activePacket = null;
@@ -45,6 +47,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const selectAgentB = document.getElementById("selectAgentB");
   const selectTurns = document.getElementById("selectTurns");
   const inputPrompt = document.getElementById("inputPrompt");
+  const btnStop = document.getElementById("btnStop");
   const btnRun = document.getElementById("btnRun");
   const btnClear = document.getElementById("btnClear");
   const btnExportMd = document.getElementById("btnExportMd");
@@ -841,13 +844,18 @@ document.addEventListener("DOMContentLoaded", () => {
       renderAllMessages();
       showToast("Session cleared successfully", "success");
     } else if (data.type === "run_started") {
+      activeRunId = data.run_id;
+      stopRequested = false;
       remoteRunActive = true;
       syncRunActivity();
       showToast(`Starting ${data.topology} dialogue${data.run_id ? " (" + data.run_id + ")" : ""}...`, "info", 2000);
-    } else if (data.type === "run_completed" || data.type === "run_error") {
+    } else if (data.type === "run_completed" || data.type === "run_error" || data.type === "run_cancelled") {
       remoteRunActive = false;
+      activeRunId = null;
       syncRunActivity();
-      if (data.type === "run_error") {
+      if (data.type === "run_cancelled") {
+        showToast("Run cancelled. Replies already received have been kept.", "info");
+      } else if (data.type === "run_error") {
         showToast("Dialogue failed: " + (data.error || "Unknown error"), "error", 5000);
       } else if (data.truncated_count) {
         // The transcript the user is about to export is missing the tail of an
@@ -868,6 +876,7 @@ document.addEventListener("DOMContentLoaded", () => {
       sessionReleased = true;
       localRun = false;
       remoteRunActive = false;
+      activeRunId = null;
       syncRunActivity();
       showToast(data.detail || "This session was released by the server. Reload the page.", "warning", 12000);
     }
@@ -878,6 +887,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const busy = localRun || remoteRunActive;
     isExecuting = busy;
     btnRun.disabled = busy;
+    btnStop.disabled = !busy || !activeRunId || stopRequested;
     if (busy) {
       btnRun.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i><span>Modules Communicating...</span>';
       btnRun.setAttribute("aria-busy", "true");
@@ -1522,6 +1532,21 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // Execute Dialogue with better error handling
+  btnStop.addEventListener("click", async () => {
+    if (!activeRunId || stopRequested) return;
+    stopRequested = true;
+    syncRunActivity();
+    try {
+      const resp = await apiFetch(`/api/runs/${encodeURIComponent(activeRunId)}/cancel`, { method: "POST" });
+      if (!resp.ok) throw new Error("Stop request was refused. The run may already have ended.");
+      showToast("Stopping after the current agent replies...", "info");
+    } catch (err) {
+      stopRequested = false;
+      showToast(err.message || "Could not request Stop", "error");
+      syncRunActivity();
+    }
+  });
+
   btnRun.addEventListener("click", async () => {
     const prompt = inputPrompt.value.trim();
     if (!prompt) {
@@ -1585,7 +1610,9 @@ document.addEventListener("DOMContentLoaded", () => {
       } else {
         const data = await resp.json().catch(() => ({}));
         // Say what the transcript actually is - simulated vs. real provider output.
-        if (data && data.simulated) {
+        if (data.status === "cancelled") {
+          resyncHistoryFromServer("Run cancelled. Replies already received have been kept.");
+        } else if (data && data.simulated) {
           showToast(
             "Done - these are simulated answers. Nothing was compiled, executed, or tested.",
             "warning",
@@ -1604,6 +1631,8 @@ document.addEventListener("DOMContentLoaded", () => {
       showToast("Network error - check connection and try again", "error", 5000);
     } finally {
       localRun = false;
+      remoteRunActive = false;
+      activeRunId = null;
       syncRunActivity();
     }
   });

@@ -83,6 +83,7 @@ class SessionState:
     #: matched to the run that caused them even if the user starts another.
     run_seq: int = 0
     active_run_id: Optional[str] = None
+    cancel_event: Optional[asyncio.Event] = None
     #: Why this session was released ("idle_timeout", "capacity", "dropped"). Set
     #: just before disposal so the app can tell its open sockets *why* they are
     #: being closed instead of dropping them silently.

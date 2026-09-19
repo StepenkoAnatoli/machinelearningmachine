@@ -247,10 +247,12 @@ Treat anything marked `simulated` as an unreviewed draft.
 - **Single process, in-memory state.** The bounded LRU, the per-connection outboxes
   and the rate-limit buckets live in one process: no scale-out, and a restart drops
   every session and every key.
-- **No mid-run cancellation.** A run is bounded by `--run-timeout` (default 180 s),
-  not by a cancel button; a second run in the same session is refused with `409`
-  rather than queued. A provider that streams slowly can therefore occupy its
-  session's single run slot for the whole timeout.
+- **Cancellation is cooperative, not an upstream abort.** The dashboard Stop control
+  and `POST /api/runs/{run_id}/cancel` stop at agent boundaries in the caller's
+  browser session. The current provider request may finish (and be billed) before
+  stopping; arrived replies and a cancellation notice remain in the transcript.
+  `--run-timeout` still bounds a stalled provider; a provider error or timeout may
+  win over a pending stop. Concurrent runs in the same session remain refused.
 - **Frame loss is designed in, recovery is best-effort.** Each connection's outbox
   holds 128 frames and drops the oldest under pressure, then tells the client
   (`stream_gap`), which re-fetches the transcript from the server. A tab that is
