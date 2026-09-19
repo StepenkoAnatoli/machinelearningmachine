@@ -27,6 +27,7 @@ suite the assertion and not thirty seconds.
 
 
 import asyncio
+import re
 
 import pytest
 
@@ -667,3 +668,115 @@ async def test_anthropic_shares_the_wait_budget(monkeypatch, backoffs):
     assert backoffs == [], backoffs
     assert exc.value.attempts == 1
     assert "600" in exc.value.reason and "60" in exc.value.reason, exc.value.reason
+
+
+# ------------------------------- D27: attempts, reason and str(exc) agree
+
+
+#: The only place a reader learns how hard the provider was tried.
+_ATTEMPTS_IN_TEXT = re.compile(r"after (\d+) attempts")
+
+
+@pytest.mark.parametrize(
+    "statuses,max_attempts,expected_requests",
+    [
+        ([503, 503], 2, 2),                              # budget spent on a transient status
+        ([429, 401], 3, 2),                              # transient, then a permanent answer
+        ([ConnectionError("reset by peer"), 401], 3, 2),  # transport blip, then permanent
+        ([503, 429, 401], 3, 3),                          # two retries, then permanent
+        ([401], 3, 1),                                    # never retried at all
+    ],
+)
+async def test_attempts_reason_and_str_tell_one_story(
+    monkeypatch, backoffs, statuses, max_attempts, expected_requests
+):
+    """
+    ``attempts`` counted requests; the sentence did not always.
+
+    Reproduced before the fix with ``[429, 401]`` and ``max_attempts=3``: two
+    requests were really sent and ``err.attempts`` said 2, but ``err.reason`` was
+    ``"the API answered HTTP 401"`` and ``str(err)`` was
+    ``"OpenAI: the API answered HTTP 401 [upstream said: too many requests]"`` -
+    no mention of 2 anywhere. The suffix was gated on ``last_error.retryable``,
+    so a turn that ended on a *permanent* status after transient ones reported
+    ``metadata.provider_attempts = 2`` next to text describing a single request.
+    A reader could not tell which of the two to believe.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp(statuses, calls),
+    )
+    provider = _provider(max_attempts=max_attempts, retry_backoff=0.5, timeout=120.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    err = exc.value
+    # attempts counts requests actually sent - nothing else.
+    assert len(calls) == expected_requests, calls
+    assert err.attempts == expected_requests, (err.attempts, calls)
+
+    found = _ATTEMPTS_IN_TEXT.search(err.reason)
+    if expected_requests > 1:
+        assert found, f"{err.reason!r} does not say how many of the {expected_requests} requests were sent"
+        assert int(found.group(1)) == err.attempts, (found.group(1), err.attempts)
+    else:
+        assert not found, f"a single request must not claim retries: {err.reason!r}"
+
+    # ``str(exc)`` is what reaches the toast and the run_error frame; ``reason``
+    # is what reaches the transcript. They cannot disagree.
+    assert err.reason in str(err), f"{str(err)!r} does not carry {err.reason!r}"
+    assert _ATTEMPTS_IN_TEXT.search(str(err)) is not None or expected_requests == 1
+    if found:
+        assert int(_ATTEMPTS_IN_TEXT.search(str(err)).group(1)) == err.attempts
+
+
+async def test_the_transcript_and_its_text_agree_about_the_effort(monkeypatch, backoffs):
+    """
+    The metadata number and the sentence next to it are read together in the UI
+    and in an exported Markdown file, so they must be the same claim.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 401], calls),
+    )
+    mesh = AgentMesh()
+    for agent in mesh.agents.values():
+        agent.provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=120.0)
+    transcript = await mesh.talk_p2p("arena-ai", "copilot", "build a rate limiter", turns=2)
+    assert len(transcript) == 2 and len(calls) == 3, (len(transcript), len(calls))
+
+    # The agent that was retried: two requests, and the sentence says two.
+    meta = transcript[0].metadata
+    assert meta["simulated"] is True and meta["provider_error"]
+    assert meta["provider_attempts"] == 2
+    assert f"after {meta['provider_attempts']} attempts" in meta["provider_error"], meta["provider_error"]
+    assert meta["provider_status_code"] == 401
+
+    # The agent that was not: one request, and no retry language to justify.
+    second = transcript[1].metadata
+    assert second["provider_attempts"] == 1
+    assert "attempts" not in second["provider_error"], second["provider_error"]
+
+
+async def test_the_wait_budget_error_also_counts_its_attempts(monkeypatch, backoffs):
+    """D26's refusal path is a raise of its own: it must obey the same rule."""
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 429, 429, 200], calls, headers={429: {"Retry-After": "4"}}),
+    )
+    provider = _provider(max_attempts=4, retry_backoff=0.5, timeout=10.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    err = exc.value
+    assert len(calls) == 3 and err.attempts == 3
+    found = _ATTEMPTS_IN_TEXT.search(err.reason)
+    assert found and int(found.group(1)) == 3, err.reason
+    assert err.reason in str(err)

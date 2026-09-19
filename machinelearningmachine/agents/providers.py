@@ -252,6 +252,33 @@ def _wait_does_not_fit(
     )
 
 
+def _labelled_with_attempts(err: ProviderError) -> ProviderError:
+    """
+    Make ``attempts``, ``reason`` and ``str(exc)`` tell one story, then raise it.
+
+    The suffix used to be gated on ``retryable`` as well as ``attempts > 1``, so a
+    turn that began with a 429 and *ended* on a 401 reported ``attempts=2`` -
+    correctly - next to ``"the API answered HTTP 401"``, which describes one
+    request. ``metadata.provider_attempts`` said 2 and the sentence beside it said
+    nothing, and a reader had no way to tell which was the truth. Both are: two
+    requests were sent and the last answer was a 401.
+
+    ``args`` is rebuilt from the same pieces ``__init__`` used, because ``str(exc)``
+    is what reaches the toast and the ``run_error`` frame while ``reason`` is what
+    reaches the transcript - two strings for one failure is how a user ends up with
+    "timed out" on screen and "timed out (after 2 attempts)" in the export.
+
+    A single attempt is never labelled: "(after 1 attempts)" would be noise, and a
+    test pins its absence so the count cannot drift into decoration.
+    """
+    if err.attempts > 1:
+        err.reason = f"{err.reason} (after {err.attempts} attempts)"
+        err.args = (
+            f"{err.provider}: {err.reason}" + (f" [{err.detail}]" if err.detail else ""),
+        )
+    return err
+
+
 async def post_for_json(
     *,
     provider: BaseLLMProvider,
@@ -382,21 +409,13 @@ async def post_for_json(
                 # Cannot be honoured without outliving the operator's ceiling,
                 # and truncating it would retry before the limit resets. Stop,
                 # and say which two numbers collided.
-                raise _wait_does_not_fit(last_error, delay, remaining=remaining, budget=wait_budget)
+                raise _labelled_with_attempts(
+                    _wait_does_not_fit(last_error, delay, remaining=remaining, budget=wait_budget)
+                )
             waited += delay
             await _backoff_sleep(delay)
             continue
-        if last_error.attempts > 1 and last_error.retryable:
-            # Say how hard the provider was tried in ``args`` as well as in
-            # ``reason``: two strings describing one failure is how a user ends up
-            # with "timed out" in the transcript and "timed out (after 2 attempts)"
-            # in the log.
-            last_error.reason = f"{last_error.reason} (after {last_error.attempts} attempts)"
-            last_error.args = (
-                f"{last_error.provider}: {last_error.reason}"
-                + (f" [{last_error.detail}]" if last_error.detail else ""),
-            )
-        raise last_error
+        raise _labelled_with_attempts(last_error)
 
 
 class MockLLMProvider(BaseLLMProvider):
