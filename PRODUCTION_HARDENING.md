@@ -43,6 +43,8 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D19** | Reconnect snapshots omit run state | Server snapshot regression raised `KeyError: active_run_id`; browser regressions left Stop disabled during an active run and Execute busy after a missed completion | Medium (run controls cannot recover on reconnect) |
 
+| **D20** | A second run is refused instead of waiting | Two concurrent `POST /api/run` in one session answered `200` and `409`; the browser regression found no queue position, no way to cancel a waiting run, and a dashboard that cleared another tab's run state when its own request was refused | Medium (a second tab/user must retry by hand; the refusal path can desynchronise the dashboard buttons) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -76,6 +78,10 @@ Functional
   inconvenient (what is installed, what is enforced, what is not offered). (D13)
 
 - **F14** Stop an active run at the next agent boundary, retain arrived replies and a cancellation notice, and scope cancellation to the requesting browser/run. (D18)
+- **F15** A second run in a busy session waits its turn in a bounded per-session FIFO
+  (202 with a 1-indexed position, `429` + `Retry-After` when full, `409` only when
+  `--max-queued 0`), runs in arrival order without interleaving, is cancellable
+  while queued, and is attributable to its tab in the UI. (D20)
 
 Non-functional
 - **N1** No new runtime dependency (retry/backoff, queueing, atomic writes are stdlib).
@@ -98,12 +104,20 @@ and all four topologies are fixed by one change. *Trade-off:* a user loses the t
 very long answer — mitigated by the notice saying exactly that, and by the cap being
 50 KB (≈12 000 words).
 
-**B. Per-session `asyncio.Lock` + 409, rather than a queue.**
-*Alternatives:* queue runs (unbounded waiting, a spammer builds a backlog, results
-arrive long after the user stopped caring); shard the mesh per run (breaks "agents have
-memory" semantics, which is the whole point of the demo). *Chosen:* refuse the second
-run while the first holds the lock. *Trade-off:* two tabs of the same profile cannot run
-at once — correct, since they also share transcripts and agent memory.
+**B. Per-session `asyncio.Lock` + a bounded FIFO, rather than refusal.**
+*Alternatives:* refuse the second run while the first holds the lock (the original
+choice: simple, but every retry is by hand and two tabs of one browser race for the
+lock); shard the mesh per run (breaks "agents have memory" semantics, which is the
+whole point of the demo). *Chosen (D20):* the lock still serialises execution, but a
+request that arrives while the lock is held (or while entries wait) is appended to a
+per-session in-memory queue bounded by `--max-queued` (default 5, `0` restores the
+original refusal) and answered `202` with its 1-indexed position; a full queue answers
+`429` + `Retry-After`. The pump is a lock-handoff chain (each finished entry schedules
+the next before releasing), so at most one run executes per session and queued turns
+cannot interleave with the active one. *Trade-off:* a queued run may wait through up to
+`max_queued` full executions with no per-entry wait timeout, and the queue dies with
+the process like the lock - mitigated by the bound, the visible position, and Stop
+working on a queued run.
 
 **C. Bounded per-connection outbox instead of awaiting sockets.**
 `ClientFeed` gives each WebSocket a queue (128 items) and a pump task; the bus only ever
@@ -232,6 +246,15 @@ exercise was not to add unfounded claims:
   A provider error or run timeout can still terminate a pending stop as an error.
   The existing timeout remains the bound; no upstream billing cancellation is promised.
 
+- **The run queue is per-process, bounded in count but not in wait (D20).** Queued
+  entries live in the session object like the lock and the outboxes, so a restart
+  drops them and there is no queue across `--workers > 1`. `--max-queued` bounds how
+  many wait (default 5), but nothing bounds how long one waits: a short prompt behind
+  five long live-provider runs may wait through all of them. `--run-timeout` bounds
+  each execution, not the wait. A `202` response carries no messages; clients learn
+  the outcome from the feed (`run_queued`/`run_started`/completion, all stamped with
+  the run id) or by re-reading `/api/history`.
+
 - **DNS rebinding is documented, not closed.** `validate_provider_target` checks
   addresses, then `aiohttp` resolves again. Same pre-existing gap as the page reader.
 - **Backpressure is bounded, not prevented.** A tab that cannot keep up loses frames and
@@ -301,6 +324,8 @@ exercise was not to add unfounded claims:
 | D18 no Stop control | F14 | `run_control.py`, `agents/base.py`, `server/state.py`, `server/app.py`, dashboard Stop | `test_run_cancellation.py`, `tests/js/client-lifecycle.test.mjs` (Stop lifecycle) |
 
 | D19 reconnect loses run controls | F14 | `server/app.py` WebSocket snapshot, `static/app.js` init handling | `test_reconnecting_socket_receives_active_run_and_stop_state`, jsdom reconnect-during-run and missed-completion regressions |
+
+| D20 second run refused | F15 | `server/config.py:MAX_QUEUED_SUFFIX`, `server/state.py:run_queue`, `cli.py:--max-queued`, `server/app.py` queue branch + pump + queued-aware cancel, `static/app.js` queued lifecycle | `test_run_queue.py` (202+position, 429+Retry-After, 0→409, FIFO order, queued cancel, per-scope isolation), `test_cli_live.py` max_queued resolution, jsdom queued-position + queue-full cases, e2e "concurrency in the same tab queues instead of refusing" |
 
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
 `--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented as

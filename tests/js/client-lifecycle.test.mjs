@@ -447,6 +447,69 @@ test("reconnecting after a missed completion clears stale busy state", async () 
   assert.equal(win.document.getElementById("btnRun").disabled, false);
 });
 
+test("a queued run shows its position and Stop targets the queued run", async () => {
+  const { win, calls, socket } = await loadClient((url) => {
+    if (String(url).includes("/api/run")) {
+      return {
+        status: 202,
+        body: {
+          status: "queued",
+          run_id: "run-7",
+          queue_position: 2,
+          max_queued: 5,
+          detail: "Queued at position 2 behind the active run (run-6).",
+        },
+      };
+    }
+    return okResponder();
+  });
+
+  win.document.getElementById("inputPrompt").value = "Design a token bucket rate limiter";
+  win.document.getElementById("btnRun").click();
+  for (let i = 0; i < 10; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  const toasts = [...win.document.querySelectorAll("#toastContainer .toast")].map((t) => t.textContent);
+  assert.ok(toasts.some((t) => /queued/i.test(t) && /position 2/.test(t) && /run-7/.test(t)),
+    `the queue position is user-visible: ${JSON.stringify(toasts)}`);
+  assert.equal(win.document.getElementById("btnRun").disabled, true,
+    "a queued run keeps the button busy until its own completion frame");
+  const stop = win.document.getElementById("btnStop");
+  assert.equal(stop.disabled, false, "Stop is offered for the queued run");
+  stop.click();
+  for (let i = 0; i < 6; i++) await new Promise((r) => win.setTimeout(r, 0));
+  assert.ok(calls.fetch.some((c) => c.url === "/api/runs/run-7/cancel" && c.options.method === "POST"),
+    "Stop targets the queued run, not the active one");
+
+  // The queued run starts (its own run_started) and then completes: only its own
+  // frames release this tab, not another tab's.
+  socket().emit({ type: "run_completed", run_id: "run-6" });
+  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
+  assert.equal(win.document.getElementById("btnRun").disabled, true,
+    "another tab's completion must not release this tab's queued run");
+  socket().emit({ type: "run_started", run_id: "run-7", topology: "pipeline" });
+  socket().emit({ type: "run_completed", run_id: "run-7", simulated_count: 0, truncated_count: 0 });
+  for (let i = 0; i < 6; i++) await new Promise((r) => win.setTimeout(r, 0));
+  assert.equal(win.document.getElementById("btnRun").disabled, false);
+  assert.equal(win.document.getElementById("btnStop").disabled, true);
+});
+
+test("a full queue is reported as retryable, not as a failure", async () => {
+  const { win } = await loadClient((url) => {
+    if (String(url).includes("/api/run")) {
+      return { status: 429, body: { detail: "Run queue is full (5 waiting, max 5). Wait for a run to finish and try again." } };
+    }
+    return okResponder();
+  });
+  win.document.getElementById("inputPrompt").value = "Design a token bucket rate limiter";
+  win.document.getElementById("btnRun").click();
+  for (let i = 0; i < 10; i++) await new Promise((r) => win.setTimeout(r, 0));
+  const toasts = [...win.document.querySelectorAll("#toastContainer .toast")].map((t) => t.textContent);
+  assert.ok(toasts.some((t) => /queue is full/i.test(t)),
+    `the queue-full reason is surfaced: ${JSON.stringify(toasts)}`);
+  assert.equal(win.document.getElementById("btnRun").disabled, false,
+    "a refused queue-full run must not leave the button stuck busy");
+});
+
 /*
  * A guard on the harness itself, not on the client.
  *

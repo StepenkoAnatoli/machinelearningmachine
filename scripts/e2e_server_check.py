@@ -128,9 +128,9 @@ async def main():
         _, stat_mid, _ = request("GET", "/api/status", None, cookie_a)
         check("the registry counts both live sessions", stat_mid["live_sessions"] >= 2, str(stat_mid["live_sessions"]))
 
-        print("\n== concurrency in the same tab ==")
+        print("\n== concurrency in the same tab queues instead of refusing ==")
         # The run cadence gate is one second, so wait it out first: otherwise the
-        # request that loses the race is refused for the wrong reason (429, not 409).
+        # immediate run is refused for the wrong reason (429, not queued).
         await asyncio.sleep(1.2)
         tasks = await asyncio.gather(
             asyncio.to_thread(request, "POST", "/api/run",
@@ -139,18 +139,25 @@ async def main():
                               {"topology": "p2p", "turns": 2, "prompt": "bravo-run-token please"}, cookie_a),
         )
         codes = sorted(t[0] for t in tasks)
-        check("one run was accepted, the other refused with 409", codes == [200, 409], f"codes={codes}")
-        refused = next(t for t in tasks if t[0] == 409)
-        check("the refusal is actionable", "already in progress" in json.dumps(refused[1]), str(refused[1])[:120])
-        frames = await collect_until(ws, {"run_completed"}, timeout=10)
-        check("the accepted run still completed on the socket", any(f["type"] == "run_completed" for f in frames))
+        check("one run was immediate, the other queued with 202", codes == [200, 202], f"codes={codes}")
+        queued = next(t for t in tasks if t[0] == 202)
+        check("the queued response names its position",
+              queued[1].get("status") == "queued" and queued[1].get("queue_position") == 1 and bool(queued[1].get("run_id")),
+              str(queued[1])[:160])
+        # Two runs, two completions: the immediate one, then the queued one in the
+        # background. Collect twice, since the helper stops at the first match.
+        first_frames = await collect_until(ws, {"run_completed", "run_cancelled"}, timeout=10)
+        second_frames = await collect_until(ws, {"run_completed", "run_cancelled"}, timeout=15)
+        completed = [f for f in first_frames + second_frames if f["type"] == "run_completed"]
+        check("both runs completed on the socket in FIFO order", len(completed) == 2,
+              str([f.get("run_id") for f in completed]))
         status, hist, _ = request("GET", "/api/history", None, cookie_a)
         ids = [m["content"] for m in hist]
         transcript = " ".join(ids)
         saw_alpha = "alpha-run-token" in transcript
         saw_bravo = "bravo-run-token" in transcript
-        check("only one of the two runs reached the shared transcript",
-              saw_alpha != saw_bravo, f"{len(ids)} messages, alpha={saw_alpha} bravo={saw_bravo}")
+        check("both queued runs reached the shared transcript, sequentially",
+              saw_alpha and saw_bravo, f"{len(ids)} messages, alpha={saw_alpha} bravo={saw_bravo}")
 
         print("\n== the documented prompt limit is the real limit ==")
         await asyncio.sleep(1.2)

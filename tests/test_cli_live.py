@@ -119,12 +119,28 @@ def test_numeric_settings_follow_flag_then_environment_then_default(monkeypatch,
     assert config.run_timeout == expected
 
 
+@pytest.mark.parametrize("argv,env,expected", [
+    ([], {}, 5),
+    ([], {"MACHINELEARNINGMACHINE_MAX_QUEUED": "2"}, 2),
+    ([], {"MODULE_MESH_MAX_QUEUED": "3"}, 3),
+    (["--max-queued", "1"], {"MACHINELEARNINGMACHINE_MAX_QUEUED": "4"}, 1),
+    (["--max-queued", "0"], {}, 0),
+    ([], {"MACHINELEARNINGMACHINE_MAX_QUEUED": "0"}, 0),
+])
+def test_max_queued_follows_flag_then_environment_then_default(monkeypatch, argv, env, expected):
+    config = _serve_config(monkeypatch, ["serve", *argv], env)
+    assert config.max_queued == expected
+
+
 @pytest.mark.parametrize("name,value", [
     ("MACHINELEARNINGMACHINE_RUN_TIMEOUT", "5m"),
     ("MACHINELEARNINGMACHINE_SESSION_TTL", "nan"),
     ("MACHINELEARNINGMACHINE_SESSION_TTL", "-3"),
     ("MACHINELEARNINGMACHINE_MAX_SESSIONS", "0"),
     ("MACHINELEARNINGMACHINE_MAX_SESSIONS", "inf"),
+    ("MACHINELEARNINGMACHINE_MAX_QUEUED", "many"),
+    ("MACHINELEARNINGMACHINE_MAX_QUEUED", "-1"),
+    ("MACHINELEARNINGMACHINE_MAX_QUEUED", "101"),
 ])
 def test_an_unusable_number_stops_startup_rather_than_ignoring_it(monkeypatch, name, value):
     """
@@ -172,8 +188,9 @@ def _serve_config(monkeypatch, argv, env):
                  "MACHINELEARNINGMACHINE_ALLOW_INSECURE_PROVIDER_URLS",
                  "MODULE_MESH_ALLOW_INSECURE_PROVIDER_URLS",
                  "MACHINELEARNINGMACHINE_RUN_TIMEOUT", "MACHINELEARNINGMACHINE_MAX_SESSIONS",
-                 "MACHINELEARNINGMACHINE_SESSION_TTL", "MODULE_MESH_RUN_TIMEOUT",
-                 "MODULE_MESH_MAX_SESSIONS", "MODULE_MESH_SESSION_TTL"):
+                 "MACHINELEARNINGMACHINE_SESSION_TTL", "MACHINELEARNINGMACHINE_MAX_QUEUED",
+                 "MODULE_MESH_RUN_TIMEOUT",
+                 "MODULE_MESH_MAX_SESSIONS", "MODULE_MESH_SESSION_TTL", "MODULE_MESH_MAX_QUEUED"):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)

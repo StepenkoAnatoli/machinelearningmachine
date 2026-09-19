@@ -17,6 +17,11 @@ document.addEventListener("DOMContentLoaded", () => {
   let remoteRunActive = false;
   let activeRunId = null;
   let stopRequested = false;
+  /** This tab's own run while it waits (202): its id and 1-indexed position. */
+  let queuedRunId = null;
+  let queuePosition = null;
+  /** True when this tab's run was queued (its HTTP already returned 202). */
+  let localQueued = false;
   /** The server released this session's mesh; reconnecting would only re-allocate. */
   let sessionReleased = false;
   let activePacket = null;
@@ -794,6 +799,19 @@ document.addEventListener("DOMContentLoaded", () => {
       activeRunId = data.active_run_id || null;
       remoteRunActive = Boolean(activeRunId);
       stopRequested = Boolean(data.cancel_requested);
+      // A queued run that the snapshot no longer knows (restart, eviction) will
+      // never start: release this tab instead of leaving it busy forever.
+      if (localQueued && queuedRunId) {
+        const stillQueued = Array.isArray(data.queued_run_ids) && data.queued_run_ids.indexOf(queuedRunId) !== -1;
+        const nowActive = data.active_run_id === queuedRunId;
+        if (!stillQueued && !nowActive) {
+          localQueued = false;
+          queuedRunId = null;
+          queuePosition = null;
+          localRun = false;
+          showToast("The queued run was lost (the server restarted or released this session). Try again.", "warning", 6000);
+        }
+      }
       syncRunActivity();
       agents = data.agents || [];
       messages = (data.history || []).slice(-maxMessagesClient);
@@ -847,29 +865,96 @@ document.addEventListener("DOMContentLoaded", () => {
       setModeBanner(null);
       renderAllMessages();
       showToast("Session cleared successfully", "success");
+    } else if (data.type === "run_queued") {
+      // Another tab (or this tab's own 202, arriving over the socket first) is
+      // waiting. The button stays busy; only an idle tab is told, so the tab
+      // that queued it does not get the same position twice (its HTTP already
+      // said it).
+      remoteRunActive = true;
+      syncRunActivity();
+      if (!localRun && data.queue_position) {
+        showToast(`A run was queued at position ${data.queue_position}${data.run_id ? " (" + data.run_id + ")" : ""}`, "info", 4000);
+      }
     } else if (data.type === "run_started") {
+      // This tab's queued run is now the active one: it keeps localRun (its HTTP
+      // returned long ago) but no longer needs its queued identity.
+      if (queuedRunId && data.run_id === queuedRunId) {
+        queuedRunId = null;
+        queuePosition = null;
+      }
       activeRunId = data.run_id;
       stopRequested = false;
       remoteRunActive = true;
       syncRunActivity();
       showToast(`Starting ${data.topology} dialogue${data.run_id ? " (" + data.run_id + ")" : ""}...`, "info", 2000);
     } else if (data.type === "run_completed" || data.type === "run_error" || data.type === "run_cancelled") {
-      remoteRunActive = false;
-      activeRunId = null;
-      syncRunActivity();
-      if (data.type === "run_cancelled") {
-        showToast("Run cancelled. Replies already received have been kept.", "info");
-      } else if (data.type === "run_error") {
-        showToast("Dialogue failed: " + (data.error || "Unknown error"), "error", 5000);
-      } else if (data.truncated_count) {
-        // The transcript the user is about to export is missing the tail of an
-        // answer. The message itself carries a "Truncated:" notice and a badge, but
-        // neither is visible while you are reading a wall of code, so say it out loud.
-        showToast(`${data.truncated_count} ${data.truncated_count === 1 ? "reply was" : "replies were"} longer than the 50,000-character message limit, so the transcript is cut short`, "warning", 8000);
-      } else if (data.simulated_count) {
-        showToast(`${data.simulated_count} simulated answer${data.simulated_count === 1 ? "" : "s"} - nothing was executed or tested`, "warning", 6000);
+      const ownQueuedDone = Boolean(queuedRunId && data.run_id === queuedRunId);
+      const activeDone = Boolean(activeRunId && data.run_id === activeRunId);
+      if (ownQueuedDone) {
+        // This tab's queued run ended before it ever started (Stop while queued).
+        // The active run (another tab's) is untouched.
+        const wasQueuedCancel = data.type === "run_cancelled";
+        queuedRunId = null;
+        queuePosition = null;
+        localQueued = false;
+        localRun = false;
+        syncRunActivity();
+        if (wasQueuedCancel) {
+          showToast("Queued run cancelled before it started.", "info");
+        } else if (data.type === "run_error") {
+          showToast("Dialogue failed: " + (data.error || "Unknown error"), "error", 5000);
+        } else {
+          showToast("Dialogue completed", "success");
+        }
+        apiFetch("/api/status").then((r) => (r.ok ? r.json() : null)).then(applyStatus).catch(() => {});
+      } else if (activeDone) {
+        const ownActiveWasQueued = Boolean(localQueued && localRun);
+        remoteRunActive = false;
+        activeRunId = null;
+        if (ownActiveWasQueued) {
+          // This tab's run was queued, became active, and has now finished: its
+          // HTTP returned 202 long ago, so this frame is what releases the button.
+          localQueued = false;
+          localRun = false;
+          apiFetch("/api/status").then((r) => (r.ok ? r.json() : null)).then(applyStatus).catch(() => {});
+        }
+        syncRunActivity();
+        if (data.type === "run_cancelled") {
+          if (ownActiveWasQueued && data.queued) {
+            showToast("Queued run cancelled before it started.", "info");
+          } else {
+            showToast("Run cancelled. Replies already received have been kept.", "info");
+          }
+        } else if (data.type === "run_error") {
+          showToast("Dialogue failed: " + (data.error || "Unknown error"), "error", 5000);
+        } else if (data.truncated_count) {
+          // The transcript the user is about to export is missing the tail of an
+          // answer. The message itself carries a "Truncated:" notice and a badge, but
+          // neither is visible while you are reading a wall of code, so say it out loud.
+          showToast(`${data.truncated_count} ${data.truncated_count === 1 ? "reply was" : "replies were"} longer than the 50,000-character message limit, so the transcript is cut short`, "warning", 8000);
+        } else if (data.simulated_count) {
+          showToast(`${data.simulated_count} simulated answer${data.simulated_count === 1 ? "" : "s"} - nothing was executed or tested`, "warning", 6000);
+        } else {
+          showToast("Dialogue completed", "success");
+        }
+      } else if (!activeRunId && !queuedRunId && !localRun) {
+        // No run tracked here at all (a completion without its start, or another
+        // tab's run on an idle tab): say what happened, but touch no buttons.
+        if (data.type === "run_cancelled") {
+          showToast("Run cancelled. Replies already received have been kept.", "info");
+        } else if (data.type === "run_error") {
+          showToast("Dialogue failed: " + (data.error || "Unknown error"), "error", 5000);
+        } else if (data.truncated_count) {
+          showToast(`${data.truncated_count} ${data.truncated_count === 1 ? "reply was" : "replies were"} longer than the 50,000-character message limit, so the transcript is cut short`, "warning", 8000);
+        } else if (data.simulated_count) {
+          showToast(`${data.simulated_count} simulated answer${data.simulated_count === 1 ? "" : "s"} - nothing was executed or tested`, "warning", 6000);
+        } else {
+          showToast("Dialogue completed", "success");
+        }
       } else {
-        showToast("Dialogue completed", "success");
+        // Another tab's run completed while this tab tracks its own (active or
+        // queued): leave this tab's buttons exactly as they are, so its own
+        // completion frame - not someone else's - is what releases it.
       }
     } else if (data.type === "stream_gap") {
       // The server could not keep this tab's send queue fed (a throttled tab, a
@@ -879,6 +964,9 @@ document.addEventListener("DOMContentLoaded", () => {
     } else if (data.type === "session_released") {
       sessionReleased = true;
       localRun = false;
+      localQueued = false;
+      queuedRunId = null;
+      queuePosition = null;
       remoteRunActive = false;
       activeRunId = null;
       syncRunActivity();
@@ -891,7 +979,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const busy = localRun || remoteRunActive;
     isExecuting = busy;
     btnRun.disabled = busy;
-    btnStop.disabled = !busy || !activeRunId || stopRequested;
+    const stopTarget = queuedRunId || activeRunId;
+    btnStop.disabled = !busy || !stopTarget || stopRequested;
     if (busy) {
       btnRun.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i><span>Modules Communicating...</span>';
       btnRun.setAttribute("aria-busy", "true");
@@ -1537,13 +1626,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Execute Dialogue with better error handling
   btnStop.addEventListener("click", async () => {
-    if (!activeRunId || stopRequested) return;
+    const target = queuedRunId || activeRunId;
+    if (!target || stopRequested) return;
+    const stoppingQueued = Boolean(queuedRunId);
     stopRequested = true;
     syncRunActivity();
     try {
-      const resp = await apiFetch(`/api/runs/${encodeURIComponent(activeRunId)}/cancel`, { method: "POST" });
+      const resp = await apiFetch(`/api/runs/${encodeURIComponent(target)}/cancel`, { method: "POST" });
       if (!resp.ok) throw new Error("Stop request was refused. The run may already have ended.");
-      showToast("Stopping after the current agent replies...", "info");
+      showToast(stoppingQueued ? "Cancelling the queued run..." : "Stopping after the current agent replies...", "info");
     } catch (err) {
       stopRequested = false;
       showToast(err.message || "Could not request Stop", "error");
@@ -1596,6 +1687,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     localRun = true;
     syncRunActivity();
+    let ownStarted = false;
+    let ownQueued = false;
     try {
       const resp = await apiFetch("/api/run", {
         method: "POST",
@@ -1603,16 +1696,45 @@ document.addEventListener("DOMContentLoaded", () => {
         body: JSON.stringify(payload),
       });
 
-      if (resp.status === 409) {
-        // A run is already holding this session's mesh (another tab, or a stale
-        // request). Refusing is the correct answer; say so in those words.
+      if (resp.status === 202) {
+        // This session is busy, so this run waits its turn (FIFO, bounded by
+        // --max-queued). The button stays busy until this run's own completion
+        // frame arrives; Stop targets the queued run, not the active one.
+        const queued = await resp.json().catch(() => ({}));
+        if (queued && queued.status === "queued" && queued.run_id) {
+          ownQueued = true;
+          localQueued = true;
+          queuedRunId = queued.run_id;
+          queuePosition = queued.queue_position || null;
+          showToast(
+            `Queued at position ${queued.queue_position || 1} (${queued.run_id}). It runs automatically when the active run finishes.`,
+            "info",
+            6000
+          );
+          syncRunActivity();
+        } else {
+          showToast("Failed: the server queued the run but did not name it", "error", 5000);
+        }
+      } else if (resp.status === 409) {
+        // --max-queued 0: a run is already holding this session's mesh (another
+        // tab, or a stale request). Refusing is the configured answer; say so.
         const conflict = await resp.json().catch(() => ({}));
         showToast(conflict.detail || "A run is already in progress in this session", "info", 6000);
+      } else if (resp.status === 429) {
+        const limited = await resp.json().catch(() => ({}));
+        const detail = limited.detail || "Too many requests";
+        // A full queue is "wait and retry", like a 409 - not a failure.
+        if (/queue/i.test(detail)) {
+          showToast(detail, "info", 6000);
+        } else {
+          showToast("Failed: " + detail, "error", 5000);
+        }
       } else if (!resp.ok) {
         const err = await resp.json().catch(() => ({ detail: "Unknown error" }));
         showToast("Failed: " + (err.detail || "Unknown error"), "error", 5000);
       } else {
         const data = await resp.json().catch(() => ({}));
+        ownStarted = true;
         // Say what the transcript actually is - simulated vs. real provider output.
         if (data.status === "cancelled") {
           resyncHistoryFromServer("Run cancelled. Replies already received have been kept.");
@@ -1634,9 +1756,23 @@ document.addEventListener("DOMContentLoaded", () => {
       console.error("Run error:", err);
       showToast("Network error - check connection and try again", "error", 5000);
     } finally {
-      localRun = false;
-      remoteRunActive = false;
-      activeRunId = null;
+      if (ownQueued) {
+        // The HTTP returned 202 but the run has not executed: keep localRun until
+        // this run's own completion frame (run_started/run_completed with its id).
+      } else if (ownStarted) {
+        // This tab's run executed synchronously; release everything, so a missed
+        // socket frame cannot leave the spinner running forever.
+        localRun = false;
+        localQueued = false;
+        queuedRunId = null;
+        queuePosition = null;
+        remoteRunActive = false;
+        activeRunId = null;
+      } else {
+        // Refused or failed before starting: only this tab's click ends. The
+        // feed's picture of another tab's run (if any) is left untouched.
+        localRun = false;
+      }
       syncRunActivity();
     }
   });
