@@ -119,6 +119,33 @@ class AgentMesh:
             raise ValueError("Prompt too short. Please provide more details (min 5 characters).")
         return prompt.strip()
 
+    def _resolve_agents(self, agent_ids: List[str], *, label: str = "Agents") -> List[BaseAgent]:
+        """
+        Turn agent ids into agents, or say exactly which ones do not exist.
+
+        Every topology entry point needs this, and the wording is what makes it
+        worth sharing: it names the ids that were not found *and* the ones that
+        are, which is the difference between "your pipeline is broken" and
+        something the caller can act on. Each entry point used to carry its own
+        copy of the loop and the message, so a change to one - a clearer wording,
+        a different case-folding rule - quietly applied to one topology only.
+        ``label`` keeps the hub-and-spoke phrasing ("Spoke agents not found") that
+        callers already get.
+        """
+        resolved: List[BaseAgent] = []
+        missing: List[str] = []
+        for aid in agent_ids:
+            agent = self.agents.get(aid)
+            if agent:
+                resolved.append(agent)
+            else:
+                missing.append(aid)
+
+        if missing:
+            available = ", ".join(self.agents.keys())
+            raise ValueError(f"{label} not found: {', '.join(missing)}. Available: {available}")
+        return resolved
+
     async def talk_p2p(
         self,
         from_agent_id: str,
@@ -180,18 +207,7 @@ class AgentMesh:
         if len(agent_ids) > 10:
             raise ValueError("Too many agents for pipeline (max 10)")
 
-        sequence = []
-        missing = []
-        for aid in agent_ids:
-            agent = self.agents.get(aid)
-            if agent:
-                sequence.append(agent)
-            else:
-                missing.append(aid)
-
-        if missing:
-            available = ", ".join(self.agents.keys())
-            raise ValueError(f"Agents not found: {', '.join(missing)}. Available: {available}")
+        sequence = self._resolve_agents(agent_ids)
 
         if not sequence:
             raise ValueError("No valid agents found for pipeline sequence")
@@ -223,18 +239,7 @@ class AgentMesh:
         if rounds < 1 or rounds > 5:
             raise ValueError("Rounds must be between 1 and 5")
 
-        participants = []
-        missing = []
-        for aid in agent_ids:
-            agent = self.agents.get(aid)
-            if agent:
-                participants.append(agent)
-            else:
-                missing.append(aid)
-
-        if missing:
-            available = ", ".join(self.agents.keys())
-            raise ValueError(f"Agents not found: {', '.join(missing)}. Available: {available}")
+        participants = self._resolve_agents(agent_ids)
 
         if not participants:
             raise ValueError("No valid participants for debate")
@@ -268,18 +273,7 @@ class AgentMesh:
         if not spoke_ids:
             raise ValueError("At least one spoke agent required")
 
-        spokes = []
-        missing = []
-        for aid in spoke_ids:
-            agent = self.agents.get(aid)
-            if agent:
-                spokes.append(agent)
-            else:
-                missing.append(aid)
-
-        if missing:
-            available = ", ".join(self.agents.keys())
-            raise ValueError(f"Spoke agents not found: {', '.join(missing)}. Available: {available}")
+        spokes = self._resolve_agents(spoke_ids, label="Spoke agents")
 
         if not spokes:
             raise ValueError("No valid spoke agents")

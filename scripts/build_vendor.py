@@ -81,6 +81,18 @@ LICENSES = {
 }
 
 
+#: Classes that appear in ``class="..."`` but are never meant to be styled by
+#: Tailwind, so their absence from the generated CSS is correct rather than a
+#: bug: three are JavaScript selector hooks (``querySelector(".preset-btn")``
+#: and friends - the utilities that actually style those elements sit in the
+#: same class attribute), and ``dark`` is the marker ``darkMode: "class"`` is
+#: configured to key off, which generates nothing until a ``dark:`` utility is
+#: used. Naming them matters: without this the check printed the same four
+#: names on every rebuild, and a warning that always fires is a warning nobody
+#: reads - which is how a genuinely missing class would slip through unnoticed.
+JS_HOOK_CLASSES = frozenset({"btn-show-earlier", "dark", "no-results-msg", "preset-btn"})
+
+
 def pkg_version(name: str) -> str:
     """Version npm actually installed for ``name`` (from its package.json)."""
     candidates = [NODE_MODULES / name / "package.json"]
@@ -167,10 +179,13 @@ def build_tailwind(out_dir: Path) -> None:
         for c in used
         if escaped(c) not in generated
         and c not in local
+        and c not in JS_HOOK_CLASSES
         and not c.startswith(("fa-", "msg-", "toast", "reader-", "session-", "agent-"))
     )
     if missing:
         print(f"  ! classes not found in the build (usually template-literal noise): {missing[:15]}")
+    else:
+        print("  every class in the markup is generated or styled locally")
 
 
 def main() -> int:

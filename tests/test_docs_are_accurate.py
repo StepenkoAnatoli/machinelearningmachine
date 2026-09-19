@@ -173,3 +173,33 @@ def test_readme_test_tree_lists_every_suite():
     assert suites, "no Python suites found"
     missing = [name for name in suites if name not in tree]
     assert not missing, f"README tests/ tree omits: {', '.join(missing)}"
+
+
+def _readme_structure_tree() -> str:
+    """The 📂 Project Structure block, which is the map this file keeps honest."""
+    start = README.index("## 📂 Project Structure")
+    end = README.index("└── requirements.txt")
+    return README[start:end]
+
+
+def test_readme_tree_lists_every_script_and_top_level_module():
+    """
+    D26 pinned the ``tests/`` half of the tree against the directory; the other
+    two halves then rotted exactly the same way, in merges that added a file and
+    updated no map:
+
+    * ``scripts/bench_sessions.py`` was shipped in the sdist and cited twice in
+      PRODUCTION_HARDENING.md, but appeared nowhere in the structure block;
+    * five package modules were missing - ``env.py`` (the two-spelling env
+      contract), ``run_control.py`` (cooperative cancellation), ``_deps.py``,
+      ``__init__.py`` and ``__main__.py``.
+
+    A file the map does not name is a file a reader cannot find, so the map is
+    checked against the filesystem rather than against a hand-kept list.
+    """
+    tree = _readme_structure_tree()
+    scripts = sorted(path.name for path in (ROOT / "scripts").glob("*.py"))
+    modules = sorted(path.name for path in (ROOT / "machinelearningmachine").glob("*.py"))
+    assert scripts and modules, "expected both scripts/ and package modules to map"
+    missing = [name for name in scripts + modules if name not in tree]
+    assert not missing, f"README structure tree omits: {', '.join(missing)}"

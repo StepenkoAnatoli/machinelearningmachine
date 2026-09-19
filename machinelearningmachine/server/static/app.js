@@ -614,11 +614,6 @@ document.addEventListener("DOMContentLoaded", () => {
     return MeshRender.render(content);
   }
 
-  /** Render markdown to a sanitized HTML string (only where a string is needed). */
-  function safeMarkdownParse(content) {
-    return MeshRender.renderToString(content);
-  }
-
   /** Set text safely; used everywhere a value came from a user or a file. */
   function setText(el, value) {
     if (el) el.textContent = value == null ? "" : String(value);
@@ -632,11 +627,6 @@ document.addEventListener("DOMContentLoaded", () => {
   function paintChip(el, color, alphaSuffix) {
     return MeshRender.paintChip(el, color, alphaSuffix);
   }
-
-  function isAuthError(resp) {
-    return resp && resp.status === 401;
-  }
-
 
   // Focus trap for modals - accessibility
   function trapFocus(modal) {

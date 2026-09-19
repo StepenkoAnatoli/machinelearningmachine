@@ -16,7 +16,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..protocol.bus import MessageBus
-from ..protocol.message import Message, MessageType, clamp_content
+from ..protocol.message import MAX_CONTENT_LENGTH, Message, MessageType, clamp_content
 from ..run_control import check_cancelled
 from .providers import FALLBACK_NOTICE_TEMPLATE, BaseLLMProvider, MockLLMProvider, ProviderError
 
@@ -294,6 +294,52 @@ class BaseAgent:
 
         return msg
 
+    async def _emit(
+        self,
+        content: str,
+        message_type: MessageType,
+        topic: str,
+        artifacts: Optional[Dict[str, Any]],
+        *,
+        recipient_id: str,
+        recipient_name: Optional[str] = None,
+        label: str = "Message",
+    ) -> Message:
+        """
+        Validate, build, remember and dispatch one outbound message.
+
+        :meth:`send_to` and :meth:`broadcast` are the same act with a different
+        addressee, and each used to carry a full copy of it - including the
+        content limit as a bare ``50000`` twice, beside the protocol's own
+        :data:`~machinelearningmachine.protocol.message.MAX_CONTENT_LENGTH` that
+        the ``Message`` model actually enforces. Two copies of a validation is two
+        chances for the friendly error raised here to drift away from the real
+        limit, at which point the agent rejects a message the protocol would have
+        accepted (or waves through one that then dies as a ``ValidationError``
+        mid-run). ``label`` keeps the two wordings callers already get.
+        """
+        if not content or not content.strip():
+            raise ValueError(f"{label} content cannot be empty")
+        if len(content) > MAX_CONTENT_LENGTH:
+            raise ValueError(f"{label} content too long (max {MAX_CONTENT_LENGTH} chars)")
+
+        msg = Message(
+            sender_id=self.agent_id,
+            sender_name=self.name,
+            recipient_id=recipient_id,
+            recipient_name=recipient_name,
+            topic=topic,
+            message_type=message_type,
+            content=content,
+            artifacts=artifacts or {},
+        )
+        self.memory.append(msg)
+        if len(self.memory) > self.MAX_MEMORY:
+            self.memory = self.memory[-self.MAX_MEMORY:]
+        if self.bus:
+            await self.bus.dispatch(msg)
+        return msg
+
     async def send_to(
         self,
         recipient: "BaseAgent",
@@ -303,27 +349,12 @@ class BaseAgent:
         artifacts: Optional[Dict[str, Any]] = None,
     ) -> Message:
         """Direct message to another agent with validation."""
-        if not content or not content.strip():
-            raise ValueError("Message content cannot be empty")
-        if len(content) > 50000:
-            raise ValueError("Message content too long (max 50000 chars)")
-
-        msg = Message(
-            sender_id=self.agent_id,
-            sender_name=self.name,
+        return await self._emit(
+            content, message_type, topic, artifacts,
             recipient_id=recipient.agent_id,
             recipient_name=recipient.name,
-            topic=topic,
-            message_type=message_type,
-            content=content,
-            artifacts=artifacts or {},
+            label="Message",
         )
-        self.memory.append(msg)
-        if len(self.memory) > self.MAX_MEMORY:
-            self.memory = self.memory[-self.MAX_MEMORY:]
-        if self.bus:
-            await self.bus.dispatch(msg)
-        return msg
 
     async def broadcast(
         self,
@@ -333,26 +364,11 @@ class BaseAgent:
         artifacts: Optional[Dict[str, Any]] = None,
     ) -> Message:
         """Broadcast message to all connected agents with validation."""
-        if not content or not content.strip():
-            raise ValueError("Broadcast content cannot be empty")
-        if len(content) > 50000:
-            raise ValueError("Broadcast content too long (max 50000 chars)")
-
-        msg = Message(
-            sender_id=self.agent_id,
-            sender_name=self.name,
+        return await self._emit(
+            content, message_type, topic, artifacts,
             recipient_id="*",
-            topic=topic,
-            message_type=message_type,
-            content=content,
-            artifacts=artifacts or {},
+            label="Broadcast",
         )
-        self.memory.append(msg)
-        if len(self.memory) > self.MAX_MEMORY:
-            self.memory = self.memory[-self.MAX_MEMORY:]
-        if self.bus:
-            await self.bus.dispatch(msg)
-        return msg
 
     def clear_memory(self) -> None:
         self.memory.clear()

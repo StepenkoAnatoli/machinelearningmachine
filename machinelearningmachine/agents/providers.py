@@ -216,6 +216,9 @@ class BaseLLMProvider:
     is_simulated = False
     #: Short label used in message metadata and error notices.
     label = "provider"
+    #: When False, provider problems raise :class:`ProviderError` instead of
+    #: quietly answering with the simulator.
+    fallback_to_mock: bool = True
     #: Total HTTP attempts per turn (1 disables retrying). Transient failures only.
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     retry_backoff: float = DEFAULT_RETRY_BACKOFF
@@ -230,6 +233,22 @@ class BaseLLMProvider:
         task_context: Optional[str] = None,
     ) -> str:
         raise NotImplementedError
+
+    async def _simulate(self, system_prompt, messages, agent_role, agent_name, task_context, reason: str) -> str:
+        """
+        Simulator answer, explicitly labelled as *not* an answer from this provider.
+
+        Lives on the base class because the label is the entire point: the text has
+        to name the provider that failed and say the simulator answered instead.
+        Each live provider used to carry its own byte-identical copy, which is two
+        chances for one of them to drift into a notice the transcript cannot trust -
+        and a fallback that does not announce itself is indistinguishable from a
+        real answer.
+        """
+        if not self.fallback_to_mock:
+            raise ProviderError(self.label, reason)
+        text = await MockLLMProvider().generate(system_prompt, messages, agent_role, agent_name, task_context)
+        return FALLBACK_NOTICE_TEMPLATE.format(provider=self.label, reason=reason) + text
 
 
 def _wait_does_not_fit(
@@ -367,7 +386,12 @@ async def post_for_json(
       says otherwise is the D27 disagreement one frame up.
     """
     aiohttp = _aiohttp()
-    attempts = provider.max_attempts
+    # Clamped here as well as in the provider constructors: with ``attempts`` at 0
+    # the loop would run zero times and fall out of the bottom of this function
+    # returning ``None``, which a caller annotated ``Dict[str, Any]`` then indexes.
+    # "1 disables retrying" is the documented floor, so a hand-rolled provider that
+    # says 0 gets one attempt rather than a ``TypeError`` two frames up.
+    attempts = max(1, int(provider.max_attempts))
     backoff = provider.retry_backoff
     timeout = provider.timeout
     #: The ceiling on *waiting*, charged across the whole call: the same number
@@ -496,6 +520,15 @@ async def post_for_json(
             await _backoff_sleep(delay)
             continue
         raise _labelled_with_attempts(last_error, waited=waited)
+
+    # Unreachable: every path above returns, continues or raises, and ``attempts``
+    # is clamped to at least 1 so the loop body always runs. It is stated anyway
+    # because falling off the end of a function annotated ``Dict[str, Any]`` would
+    # hand the caller a ``None`` to index - a ``TypeError`` two frames away from
+    # the reason, with no provider label attached to it.
+    raise ProviderError(
+        provider.label, "the retry loop ended without a result", attempts=attempts
+    )
 
 
 class MockLLMProvider(BaseLLMProvider):
@@ -1042,19 +1075,10 @@ class OpenAIProvider(BaseLLMProvider):
         self.api_key = (api_key or env_key).strip()
         self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
         self.model = model
-        #: When False, provider problems raise :class:`ProviderError` instead of
-        #: quietly answering with the simulator.
         self.fallback_to_mock = fallback_to_mock
         self.timeout = float(timeout)
         self.max_attempts = max(1, int(max_attempts))
         self.retry_backoff = max(0.0, float(retry_backoff))
-
-    async def _simulate(self, system_prompt, messages, agent_role, agent_name, task_context, reason: str) -> str:
-        """Simulator answer, explicitly labelled as *not* an OpenAI answer."""
-        if not self.fallback_to_mock:
-            raise ProviderError(self.label, reason)
-        text = await MockLLMProvider().generate(system_prompt, messages, agent_role, agent_name, task_context)
-        return FALLBACK_NOTICE_TEMPLATE.format(provider=self.label, reason=reason) + text
 
     async def generate(
         self,
@@ -1127,12 +1151,6 @@ class AnthropicProvider(BaseLLMProvider):
         self.max_attempts = max(1, int(max_attempts))
         self.retry_backoff = max(0.0, float(retry_backoff))
         self.base_url = "https://api.anthropic.com/v1"
-
-    async def _simulate(self, system_prompt, messages, agent_role, agent_name, task_context, reason: str) -> str:
-        if not self.fallback_to_mock:
-            raise ProviderError(self.label, reason)
-        text = await MockLLMProvider().generate(system_prompt, messages, agent_role, agent_name, task_context)
-        return FALLBACK_NOTICE_TEMPLATE.format(provider=self.label, reason=reason) + text
 
     async def generate(
         self,

@@ -183,7 +183,11 @@ def default_resolver(host: str) -> List[str]:
             "Could not find that address - check the URL for typos.",
             detail=str(exc),
         ) from exc
-    return sorted({info[4][0] for info in infos})
+    # ``str()`` is not decoration: getaddrinfo's address tuple is a 2-tuple for
+    # IPv4 and a 3-tuple for IPv6, so a checker that cannot narrow the union sees
+    # ``str | int`` here. Slot 0 is the address text in both, and this function is
+    # annotated as returning addresses - so say so instead of leaving it inferred.
+    return sorted({str(info[4][0]) for info in infos})
 
 
 def check_url(url: str, *, resolver: Optional[Callable[[str], Sequence[str]]] = None) -> str:

@@ -335,7 +335,8 @@ input:focus-visible {
 /* ===== Message body rendered from markdown =====
    The transcript used to lean on Tailwind's `prose` classes, which the CDN build
    never actually included. These styles are ours, self-contained, and apply to the
-   DOM that Marked + DOMPurify produce (see safeMarkdownParse in app.js). */
+   DOM that Marked + DOMPurify produce (see MeshRender.render in markdown.js, the
+   app's XSS boundary, which app.js calls through renderMarkdownFragment). */
 .md-body { overflow-wrap: anywhere; }
 .md-body > *:first-child { margin-top: 0; }
 .md-body > *:last-child { margin-bottom: 0; }
