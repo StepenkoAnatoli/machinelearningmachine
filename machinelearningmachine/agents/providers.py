@@ -276,6 +276,28 @@ def _wait_does_not_fit(
     )
 
 
+def _shape_error(
+    provider: BaseLLMProvider,
+    reason: str,
+    stats: Optional[Dict[str, float]],
+) -> ProviderError:
+    """
+    A 200 whose body is not an answer, labelled like every other failure.
+
+    These checks belong to each provider (OpenAI reads ``choices[0].message.content``,
+    Anthropic reads ``content[].text``), so they run *after* ``post_for_json`` returns -
+    outside the loop that knows how many requests the exchange took. Without the
+    ``stats`` handoff they defaulted to ``attempts=1`` and told the transcript that a
+    body which only arrived on the second request had cost one, with no mention of the
+    retry or of the seconds spent waiting for it.
+    """
+    attempts = int((stats or {}).get("attempts", 1))
+    waited = float((stats or {}).get("waited", 0.0))
+    return _labelled_with_attempts(
+        ProviderError(provider.label, reason, attempts=attempts), waited=waited
+    )
+
+
 def _labelled_with_attempts(err: ProviderError, *, waited: float = 0.0) -> ProviderError:
     """
     Make ``attempts``, ``reason`` and ``str(exc)`` tell one story, then raise it.
@@ -315,6 +337,7 @@ async def post_for_json(
     url: str,
     headers: Dict[str, str],
     payload: Dict[str, Any],
+    stats: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """
     POST ``payload`` as JSON and hand back the parsed body, retrying transient failures.
@@ -336,7 +359,12 @@ async def post_for_json(
     * the failure that ends the loop is raised as :class:`ProviderError` carrying
       ``attempts`` and ``retry_after``, so the transcript can say how hard it tried;
     * response bodies are truncated before they reach a log line or an error, and an
-      API key is never part of either.
+      API key is never part of either;
+    * a caller that passes a ``stats`` dict learns what a *successful* exchange cost -
+      ``{"attempts": n, "waited": seconds}`` - because the checks a provider runs on the
+      body afterwards happen outside this loop and still have to report the truth. A
+      200 that only arrived on the second request cost two requests, and an error that
+      says otherwise is the D27 disagreement one frame up.
     """
     aiohttp = _aiohttp()
     attempts = provider.max_attempts
@@ -392,6 +420,9 @@ async def post_for_json(
                 raise ProviderError(
                     provider.label, "the API response was not a JSON object", attempts=attempt
                 )
+            if stats is not None:
+                stats["attempts"] = float(attempt)
+                stats["waited"] = waited
             return data
         except ProviderError as exc:
             last_error = exc
@@ -1058,16 +1089,17 @@ class OpenAIProvider(BaseLLMProvider):
         }
 
         # A truncated answer is still an answer, but it must never *look* complete.
-        data = await post_for_json(provider=self, url=url, headers=headers, payload=payload)
+        # ``stats`` carries what the exchange cost, so the shape checks below can
+        # report the real attempt count instead of an assumed one.
+        stats: Dict[str, float] = {}
+        data = await post_for_json(provider=self, url=url, headers=headers, payload=payload, stats=stats)
 
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderError(
-                self.label, "the API response did not contain a message"
-            ) from exc
+            raise _shape_error(self, "the API response did not contain a message", stats) from exc
         if not isinstance(content, str) or not content.strip():
-            raise ProviderError(self.label, "the API returned an empty answer")
+            raise _shape_error(self, "the API returned an empty answer", stats)
         return content
 
 
@@ -1140,11 +1172,12 @@ class AnthropicProvider(BaseLLMProvider):
             "max_tokens": 2048,
         }
 
-        data = await post_for_json(provider=self, url=url, headers=headers, payload=payload)
+        stats: Dict[str, float] = {}
+        data = await post_for_json(provider=self, url=url, headers=headers, payload=payload, stats=stats)
 
         blocks = data.get("content") or [] if isinstance(data, dict) else []
         texts = [b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
         content = "\n".join(t for t in texts if t).strip()
         if not content:
-            raise ProviderError(self.label, "the API response did not contain a text block")
+            raise _shape_error(self, "the API response did not contain a text block", stats)
         return content
