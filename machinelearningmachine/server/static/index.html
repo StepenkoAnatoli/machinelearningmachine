@@ -116,7 +116,7 @@
             <span class="flex items-center space-x-1.5" role="listitem"><span class="w-2.5 h-2.5 rounded-full bg-purple-500" aria-hidden="true"></span><span>Arena AI</span></span>
             <span class="flex items-center space-x-1.5" role="listitem"><span class="w-2.5 h-2.5 rounded-full bg-cyan-500" aria-hidden="true"></span><span>Copilot</span></span>
             <span class="flex items-center space-x-1.5" role="listitem"><span class="w-2.5 h-2.5 rounded-full bg-amber-500" aria-hidden="true"></span><span>Claude</span></span>
-            <span class="flex items-center space-x-1.5" role="listitem"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500" aria-hidden="true"></span><span>GPT-4o</span></span>
+            <span class="flex items-center space-x-1.5" role="listitem"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500" aria-hidden="true"></span><span>GPT-6 Astra</span></span>
           </div>
           <span class="text-slate-500 italic hidden sm:inline">Visual packet routing updates on message dispatch</span>
         </div>
@@ -193,8 +193,8 @@
           <select id="selectAgentA" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
             <option value="arena-ai">Arena AI (Orchestrator)</option>
             <option value="copilot">GitHub Copilot (Coder)</option>
-            <option value="claude">Claude 3.5 (Critic)</option>
-            <option value="gpt">GPT-4o (Tester)</option>
+            <option value="claude">Claude Fable 5.1 (Critic)</option>
+            <option value="gpt">GPT-6 Astra (Tester)</option>
           </select>
         </div>
 
@@ -202,8 +202,8 @@
           <label for="selectAgentB" class="block text-xs font-medium text-slate-400 mb-1">Responding Module (Agent B)</label>
           <select id="selectAgentB" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
             <option value="copilot">GitHub Copilot (Coder)</option>
-            <option value="claude">Claude 3.5 (Critic)</option>
-            <option value="gpt">GPT-4o (Tester)</option>
+            <option value="claude">Claude Fable 5.1 (Critic)</option>
+            <option value="gpt">GPT-6 Astra (Tester)</option>
             <option value="arena-ai">Arena AI (Orchestrator)</option>
           </select>
         </div>
@@ -491,14 +491,26 @@
 
       <form id="formSettings" class="space-y-4">
         <div>
-          <label for="inputOpenAiKey" class="block text-xs font-medium text-slate-400 mb-1">OpenAI API Key (for GPT-4o / Copilot)</label>
+          <label for="inputOpenAiKey" class="block text-xs font-medium text-slate-400 mb-1">OpenAI API Key (for GPT-6 Astra / Copilot)</label>
           <input type="password" id="inputOpenAiKey" placeholder="sk-..." autocomplete="off"
             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
         </div>
         <div>
-          <label for="inputAnthropicKey" class="block text-xs font-medium text-slate-400 mb-1">Anthropic API Key (for Claude 3.5)</label>
+          <label for="inputOpenAiModel" class="block text-xs font-medium text-slate-400 mb-1">OpenAI model ID</label>
+          <input type="text" id="inputOpenAiModel" value="gpt-6-astra" autocomplete="off" spellcheck="false"
+            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+          <p class="text-[11px] text-slate-500 mt-1">Current default: <code>gpt-6-astra</code>. Change this for a local backend's installed model.</p>
+        </div>
+        <div>
+          <label for="inputAnthropicKey" class="block text-xs font-medium text-slate-400 mb-1">Anthropic API Key (for Claude Fable 5.1)</label>
           <input type="password" id="inputAnthropicKey" placeholder="sk-ant-..." autocomplete="off"
             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+        </div>
+        <div>
+          <label for="inputAnthropicModel" class="block text-xs font-medium text-slate-400 mb-1">Anthropic model ID</label>
+          <input type="text" id="inputAnthropicModel" value="claude-fable-5-1" autocomplete="off" spellcheck="false"
+            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+          <p class="text-[11px] text-slate-500 mt-1">Current default: <code>claude-fable-5-1</code>. Use a pinned or compatible model when needed.</p>
         </div>
         <div>
           <label for="inputOpenAiBaseUrl" class="block text-xs font-medium text-slate-400 mb-1">Custom / Local LLM Base URL (Ollama, LMStudio, vLLM)</label>

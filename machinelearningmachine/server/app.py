@@ -42,7 +42,13 @@ from pydantic import BaseModel, Field, field_validator
 from .. import netguard
 from .. import sessions as session_store
 from ..agents.custom import CustomAgent
-from ..agents.providers import AnthropicProvider, OpenAIProvider, ProviderError
+from ..agents.providers import (
+    DEFAULT_ANTHROPIC_MODEL,
+    DEFAULT_OPENAI_MODEL,
+    AnthropicProvider,
+    OpenAIProvider,
+    ProviderError,
+)
 from ..mesh import AgentMesh
 from ..protocol.bus import MessageBus
 from ..protocol.message import Message, MessageType
@@ -69,6 +75,10 @@ MAX_NAME_LENGTH = 100
 MAX_ROLE_LENGTH = 200
 MAX_SYSTEM_PROMPT_LENGTH = 2000
 AGENT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-_]{1,48}[a-z0-9]$|^[a-z0-9]$")
+# Provider model IDs are sent to an upstream request body, never interpolated
+# into a URL or shell command. Reject whitespace/control characters early while
+# allowing common local IDs such as ``llama3.1:8b`` and namespaced IDs.
+MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 RESERVED_AGENT_IDS = {"system", "broadcast", "all", "*", "api", "admin", "root"}
 MAX_AGENTS_PER_SESSION = AgentMesh.MAX_AGENTS  # same limit as the mesh, one source
 MAX_CUSTOM_AGENTS_PER_SESSION = 16
@@ -176,9 +186,24 @@ class ConfigApiKeysRequest(BaseModel):
     openai_api_key: Optional[str] = Field(default=None, max_length=500)
     anthropic_api_key: Optional[str] = Field(default=None, max_length=500)
     openai_base_url: Optional[str] = Field(default=None, max_length=500)
+    #: Optional model overrides keep local backends useful as the hosted defaults move on.
+    openai_model: Optional[str] = Field(default=None, max_length=200)
+    anthropic_model: Optional[str] = Field(default=None, max_length=200)
     #: Ask for a live credentials check instead of trusting the shape of the key.
     verify: bool = False
     clear: bool = False
+
+    @field_validator("openai_model", "anthropic_model")
+    @classmethod
+    def validate_model_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        v = v.strip()
+        if not MODEL_ID_PATTERN.fullmatch(v):
+            raise ValueError(
+                "Model ID must be 1-200 characters with no spaces (letters, numbers, . _ : / - are allowed)"
+            )
+        return v
 
     @field_validator("openai_base_url")
     @classmethod
@@ -732,6 +757,7 @@ def _register_routes(
 
         configured: List[str] = []
         problems: List[str] = []
+        model_ids: Dict[str, str] = {}
         try:
             if req.openai_api_key or req.openai_base_url:
                 if req.openai_api_key and not _looks_like_key(req.openai_api_key):
@@ -745,6 +771,7 @@ def _register_routes(
                 openai_provider = OpenAIProvider(
                     api_key=req.openai_api_key or state.api_keys.get("openai", ""),
                     base_url=req.openai_base_url,
+                    model=req.openai_model or DEFAULT_OPENAI_MODEL,
                     fallback_to_mock=config.fallback_to_mock,
                     # The single most important line in this endpoint: a key that
                     # happens to live in the *server's* environment must never be
@@ -760,6 +787,7 @@ def _register_routes(
                 for agent in (mesh.gpt, mesh.copilot):
                     if agent is not None:
                         agent.provider = openai_provider
+                model_ids["openai"] = openai_provider.model
                 configured.append("OpenAI")
 
             if req.anthropic_api_key:
@@ -770,6 +798,7 @@ def _register_routes(
                     )
                 anthropic_provider = AnthropicProvider(
                     api_key=req.anthropic_api_key,
+                    model=req.anthropic_model or DEFAULT_ANTHROPIC_MODEL,
                     fallback_to_mock=config.fallback_to_mock,
                     allow_env_key=False,
                 )
@@ -777,6 +806,7 @@ def _register_routes(
                 for agent in (mesh.claude, mesh.arena_ai):
                     if agent is not None:
                         agent.provider = anthropic_provider
+                model_ids["anthropic"] = anthropic_provider.model
                 configured.append("Anthropic")
 
             if not configured:
@@ -791,6 +821,7 @@ def _register_routes(
                 "configured": configured,
                 "verified": not problems,
                 "problems": problems,
+                "models": model_ids,
                 # Honest about what we did and did not check.
                 "note": "Keys are shape-checked only, kept in memory, and never sent back to the browser.",
             }
@@ -823,6 +854,8 @@ def _register_routes(
             "verified": state.provider_config.get("verified"),
             "has_openai_key": bool(state.api_keys.get("openai")),
             "has_anthropic_key": bool(state.api_keys.get("anthropic")),
+            "openai_model": state.provider_config.get("models", {}).get("openai", DEFAULT_OPENAI_MODEL),
+            "anthropic_model": state.provider_config.get("models", {}).get("anthropic", DEFAULT_ANTHROPIC_MODEL),
             "note": "Keys are held in memory for this session only and are never returned to the client.",
         }
 

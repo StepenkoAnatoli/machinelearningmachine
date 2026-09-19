@@ -8,9 +8,9 @@ from typing import Optional
 
 from ..protocol.bus import MessageBus
 from .base import BaseAgent
-from .providers import BaseLLMProvider
+from .providers import ANTHROPIC_MODEL_DISPLAY_NAME, BaseLLMProvider
 
-DEFAULT_CLAUDE_PROMPT = """You are Claude, a deep systems architect, code reviewer, and safety analyst.
+DEFAULT_CLAUDE_PROMPT = """You are Claude Fable 5.1, a deep systems architect, code reviewer, and safety analyst.
 Your role:
 1. Thoroughly critique implementations from Copilot and proposals from Arena AI.
 2. Uncover edge cases, race conditions, memory leaks, algorithmic inefficiencies, and security flaws.
@@ -22,7 +22,7 @@ class ClaudeAgent(BaseAgent):
     def __init__(
         self,
         agent_id: str = "claude",
-        name: str = "Claude 3.5",
+        name: str = ANTHROPIC_MODEL_DISPLAY_NAME,
         role: str = "Deep Reasoning & Architecture Critic",
         system_prompt: str = DEFAULT_CLAUDE_PROMPT,
         color: str = "#d97706",  # Warm Amber / Coral

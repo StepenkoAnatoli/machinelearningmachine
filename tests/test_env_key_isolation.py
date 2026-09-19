@@ -66,7 +66,7 @@ class FakeProviderServer:
 
     async def _handle_models(self, request):
         self.requests.append({"path": request.path, "headers": dict(request.headers), "body": ""})
-        return web.json_response({"data": [{"id": "gpt-4o"}]})
+        return web.json_response({"data": [{"id": "gpt-6-astra"}]})
 
     def __enter__(self):
         async def run():
@@ -134,7 +134,10 @@ def test_dashboard_supplied_base_url_never_picks_up_the_environment_key():
     with FakeProviderServer() as fake:
         app = create_app(ServerConfig(host="127.0.0.1"))
         with TestClient(app) as client:
-            configured = client.post("/api/config", json={"openai_base_url": fake.base_url})
+            configured = client.post(
+                "/api/config",
+                json={"openai_base_url": fake.base_url, "openai_model": "gpt-5.6-terra"},
+            )
             assert configured.status_code == 200, configured.text
             run = client.post(
                 "/api/run",
@@ -148,6 +151,11 @@ def test_dashboard_supplied_base_url_never_picks_up_the_environment_key():
             assert ENV_KEY not in (header or ""), "the operator's ambient key left the machine"
         # The run is labelled for what it was: an answer from that endpoint, sent
         # with no credential at all - not a silently substituted simulation.
+        requests = [r for r in fake.requests if r["path"].endswith("/chat/completions")]
+        assert requests
+        request_body = json.loads(requests[0]["body"])
+        assert request_body["model"] == "gpt-5.6-terra"
+        assert request_body["reasoning_effort"] == "medium", "current GPT models use reasoning effort"
         messages = run.json()["messages"]
         assert any("answer from the fake endpoint" in m["content"] for m in messages)
         assert all(not m["metadata"].get("simulated") for m in messages if "fake endpoint" in m["content"])

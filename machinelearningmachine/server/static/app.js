@@ -128,8 +128,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const nodePositions = {
     "arena-ai": { x: 0.18, y: 0.5, color: "#8b5cf6", name: "Arena AI", avatar: "⚡" },
     "copilot": { x: 0.42, y: 0.25, color: "#06b6d4", name: "Copilot", avatar: "🐙" },
-    "claude": { x: 0.42, y: 0.75, color: "#d97706", name: "Claude", avatar: "🔮" },
-    "gpt": { x: 0.82, y: 0.5, color: "#10b981", name: "GPT-4o", avatar: "🌐" },
+    "claude": { x: 0.42, y: 0.75, color: "#d97706", name: "Claude Fable 5.1", avatar: "🔮" },
+    "gpt": { x: 0.82, y: 0.5, color: "#10b981", name: "GPT-6 Astra", avatar: "🌐" },
   };
 
   // ===== User-Centered Utilities =====
@@ -1259,7 +1259,8 @@ document.addEventListener("DOMContentLoaded", () => {
       left.appendChild(chip);
       left.appendChild(names);
 
-      const kind = ag.provider_kind === "live" ? `Live: ${ag.provider || ""}` : "Simulator";
+      const model = ag.model ? ` · ${ag.model}` : "";
+      const kind = ag.provider_kind === "live" ? `Live: ${ag.provider || ""}${model}` : "Simulator";
       const prov = document.createElement("span");
       prov.className = "text-[10px] font-mono px-1.5 py-0.5 rounded border " +
         (ag.provider_kind === "live"
@@ -2064,6 +2065,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const payload = {
       openai_api_key: document.getElementById("inputOpenAiKey").value.trim() || null,
       anthropic_api_key: document.getElementById("inputAnthropicKey").value.trim() || null,
+      openai_model: document.getElementById("inputOpenAiModel").value.trim() || null,
+      anthropic_model: document.getElementById("inputAnthropicModel").value.trim() || null,
       openai_base_url: document.getElementById("inputOpenAiBaseUrl").value.trim() || null,
       verify: !!(verifyBox && verifyBox.checked),
     };
