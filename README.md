@@ -83,7 +83,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 510 tests (476 Python + 34 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 523 tests (477 Python + 46 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -514,7 +514,7 @@ Everything is offline and hermetic - network calls are injected, never performed
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
 pytest -q                                    # 476 tests, all offline
-node --test tests/js/*.test.mjs          # 34 jsdom browser tests (needs: npm ci)
+node --test tests/js/*.test.mjs          # 46 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 ```
@@ -649,7 +649,9 @@ machinelearningmachine/
 │   ├── test_docs_are_accurate.py      # docs claims that fail the build when stale
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
-│       └── client-lifecycle.test.mjs  # 19 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery, stale-record guard
+│       ├── client-lifecycle.test.mjs  # 19 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery, stale-record guard
+│       └── audit_vendor_deps.test.mjs # 12 tests: the npm-audit wrapper's classification
+│                                      #   (CVE vs unreachable endpoint vs vacuous pass)
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,
 │                            #   vendor integrity, jsdom, pip-audit, npm audit, secret scan
 ├── .github/dependabot.yml   # pip + npm + actions
