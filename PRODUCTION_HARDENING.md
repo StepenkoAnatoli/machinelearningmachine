@@ -63,6 +63,12 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D26** | Nothing bounded the *sum* of the retry waits: `--provider-timeout` ceilinged one request and the sleeps between them were charged to nobody | `timeout=2.0`, `retry_backoff=100`, `max_attempts=3` on a persistent 503 slept **454.1 s** in one run (389.9 s, 410.3 s, 424.8 s in three others) - 227× the ceiling the operator set - with no log line and no bound. Once D25 landed the same hole was reachable from the wire: `Retry-After: 600` against a 60 s timeout would have slept ten minutes because a remote server said so | **High** (a remote response decides how long the client hangs, and the flag the operator set meant nothing. On the dashboard `asyncio.wait_for(..., run_timeout)` eventually cancels the run at `--run-timeout`; on `run --live` nothing wraps the call at all, so the 454 s is slept in full) |
 
+| **D30** | Saved session trimming placed `trimmed` flag at document tail instead of header metadata | When an oversized session (>8 MB / 1000+ messages) was trimmed to fit `MAX_SESSION_BYTES`, `trimmed: True` was appended after the messages array and omitted from `save_session`'s return value. The 4 KiB `_head_meta` prefix read missed the flag, causing `list_sessions()` to report `trimmed=False` on the fast path | Medium (a trimmed transcript reads as complete in the session list unless fully parsed) |
+
+| **D31** | Transcript DOM grew unboundedly during streaming and expanded transcripts fully on click | In `static/app.js`, `appendMessageToFeed` appended every WebSocket message directly into `#messagesContainer` without windowing, and clicking "Show earlier messages" dumped all 1000+ messages into the DOM simultaneously, creating an infinite DOM | Medium (browser UI performance degradation and memory bloat on large conversations) |
+
+| **D32** | Session store performance at 1000+ messages lacked automated benchmark validation | Without an active benchmark script covering 1000+ message transcripts, scaling regressions in the saved-session fast path could go unnoticed | Low (performance measurement and regression prevention) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -182,7 +188,7 @@ Every evidence cell is a test that was run and passed, not a plan. All offline.
 | F2 | `server/state.py: run_lock` + `active_run_id` + bounded `run_queue`, `server/app.py` 202-with-position (`409` only when `--max-queued 0`), `run_id` on every run frame | `tests/test_run_serialization.py` (refusal mode pinned via `max_queued=0`) + `test_run_queue.py` - loser queues with its position, transcript untouched, `run_id` consistent across frames, lock freed on error |
 | F3 | `server/feed.py: ClientFeed` (bounded outbox, drop-oldest, `stream_gap`, send timeout), `SessionState.publish`, `finally:` detach in the WS handler | `tests/test_ws_backpressure.py` - a stalled socket cannot delay the producer, 40 publishes → `dropped >= 30` with the newest frames intact, `/api/run` completes on a saturated feed |
 | F4 | `server/app.py` lifespan sweeper → `SessionRegistry.sweep_expired(reason)`, `on_evict` → `close_feeds(final=…, code=4408)`, `session_released` frame | `tests/test_session_lifecycle.py` - a quiet tab with a live socket is reclaimed with no further request, its next request is a *new* session, capacity eviction prefers ephemeral, sweeper stops with the app |
-| F5 | `sessions.py: _write_atomic`, metadata header (`message_count`, `trimmed`), prefix-only listing, stale-`.tmp` prune, `new_session_id` carries sub-second precision | `tests/test_session_storage.py` - a failed `os.replace` leaves the previous file byte-identical with no temp litter, listing reads ≤ 4 KiB per file, oversized transcripts are trimmed *and flagged*, prune order is timestamp-driven |
+| F5 | `sessions.py: _write_atomic`, metadata header (`message_count`, `trimmed`), prefix-only listing, stale-`.tmp` prune, `new_session_id` carries sub-second precision | `tests/test_session_storage.py` (atomic replace, stale temp prune, header-only reads ≤ 4 KiB, trimmed flag preservation in header at 1000+ messages), `scripts/bench_sessions.py` (50 transcripts × 1000 messages [65.7 MB] lists in 1.3 ms vs 271.3 ms full parse [208.9x ratio]) |
 | F6 | `providers.py: post_for_json` retry loop, `max_attempts`/`retry_backoff`/`timeout`, `ProviderError.attempts`, `metadata.provider_attempts` | `tests/test_provider_retry.py` - 429/503 retried up to the budget, 401 not retried, an unparseable 200 costs one request, the wait scales with the attempt, and the transcript records the effort |
 | F7 | `providers.py: allow_env_key`, `server/app.py` builds providers with `allow_env_key=False`, auth headers only when a key exists | `tests/test_env_key_isolation.py` - a real aiohttp capture server asserts the headers it *received*: a keyless session sends none, an operator key is never attached to a session's request, and clearing a key cannot resurrect it from the environment |
 | F8 | `netguard.validate_provider_target`, `server/app.py: _guard_provider_url`, `--allow-insecure-provider-urls`, `ServerConfig.allow_insecure_provider_urls` | `tests/test_provider_url_policy.py` - CGNAT/`192.0.0.1`/IPv6-mapped/decimal-host matrices, loopback bind keeps Ollama on any port, public bind refuses and changes nothing (mode stays `simulated`), operator allowlist honoured |
@@ -408,6 +414,9 @@ exercise was not to add unfounded claims:
 
 | D24 stale no-queue prose | F13, N3 | PRODUCTION_HARDENING.md (F2, §4 F2/F9/F15 rows, §7, §8 N-para), USER_CENTERED_DESIGN.md queue row, README test tree + jsdom count | `test_docs_are_accurate.py` (hardening-agrees, UCD-agrees, listing-counts cases) |
 
+| D32 1000+ message bench | F5 | `scripts/bench_sessions.py` | `scripts/bench_sessions.py` (50 files × 1000 messages: 1.3 ms header vs 271.3 ms parse, 208.9x) |
+| D31 transcript infinite DOM | F12, F14 | `static/app.js` windowed transcript, `btn-show-earlier`, oldest node pruning | `tests/js/client-lifecycle.test.mjs` (windowed load, stream pruning, progressive expansion) |
+| D30 trimmed flag at document tail | F5 | `sessions.py:save_session` header ordering, `_meta(..., trimmed=...)` | `test_session_storage.py::test_large_trimmed_session_stores_trimmed_flag_in_header_and_fast_path_reads_it` |
 | D29 an unpinned count in the copyable block | F13, N3 | README "Running Tests" block (count + sample run) | `test_docs_are_accurate.py::test_readme_running_tests_block_states_todays_count` - every `N tests`/`N passed` in the block must equal what pytest collected |
 | D28 waits were spent in silence | F16 | `agents/providers.py: ProviderError.waited` + the WARNING before `_backoff_sleep` + `_labelled_with_attempts(err, waited=…)`, `agents/base.py: metadata.provider_waited` | `test_provider_retry.py` - two caplog cases on the wait line (delay, `attempt 2/2`, `upstream Retry-After` vs `jittered backoff`), `waited` on the retry-exhausted error and on D26's refusal, no waiting clause after a zero wait or a single attempt, a `save_session`/`get_session` round trip; `tests/js/client-lifecycle.test.mjs` - the degraded badge tooltip carries the wait |
 | D27 the count and the sentence disagreed | F16 | `agents/providers.py: _labelled_with_attempts`, applied on both raise paths of `post_for_json` (the retry-exhausted tail and D26's `_wait_does_not_fit`) | `test_provider_retry.py` - five parametrised status sequences asserting `attempts == len(requests)` and the same number in `reason` and in `str(exc)`, no retry language after one attempt, a transcript where the retried agent says `after 2 attempts` and its peer says nothing, and the wait-budget refusal obeying the same rule |
@@ -505,3 +514,18 @@ reported `ALL E2E CHECKS PASSED` - 33 checks, 0 failures - against
 `serve --port 8799` on its unchanged loopback default. The gate server was
 stopped afterwards and the port was verified closed. No real-provider, load, or
 cross-browser validation was performed; the browser half of D28 is jsdom.
+
+### D30-D32 1000+ message scaling, header index fast path & windowed transcript
+
+Failing tests first, one commit per finding.
+
+Measured on this machine:
+- 50 transcripts × 1000 messages (~1000 chars each, 65.7 MB on disk):
+  `list_sessions` header index: **1.3 ms** (50 rows) vs **271.3 ms** full parse (**208.9x faster**).
+- 50 transcripts × 220 messages (~6000 chars each, 73.9 MB on disk):
+  `list_sessions` header index: **1.3 ms** (50 rows) vs **215.9 ms** full parse (**161.2x faster**).
+- Large trimmed session (>8 MB / 1000 messages) retains `trimmed: True` in header and returns in 1.3 ms without reading the body.
+- Transcript client DOM stays strictly bounded to `RENDER_WINDOW` (200 cards) on load, stream, and progressive expansion without infinite DOM.
+
+D30-D32 local validation: **434 Python tests passed**, **37 jsdom tests passed**, `ruff check machinelearningmachine tests scripts examples` clean over the full scope, `scripts/bench_sessions.py` passed, and `scripts/e2e_server_check.py` reported `ALL E2E CHECKS PASSED` against `serve --port 8799` on its unchanged loopback default. The gate server was stopped afterwards and the port was verified closed.
+

@@ -624,6 +624,187 @@ test("a run cancelled before its 202 arrives releases the tab instead of wedging
     `the tab is told its run was cancelled: ${JSON.stringify(toasts)}`);
 });
 
+test("1000 messages in session load with windowed rendering, no infinite DOM", async () => {
+  const { win, socket } = await loadClient(() => okResponder());
+
+  const thousandMessages = Array.from({ length: 1000 }, (_, i) => ({
+    id: `m${i}`,
+    sender_id: "copilot",
+    sender_name: "GitHub Copilot",
+    recipient_id: "*",
+    topic: "general",
+    message_type: "proposal",
+    content: `Message ${i} content`,
+    artifacts: {},
+    metadata: { simulated: true },
+    timestamp: 1700000000 + i,
+  }));
+
+  socket().emit({
+    type: "session_loaded",
+    name: "Big Session",
+    agents: [],
+    history: thousandMessages,
+  });
+  for (let i = 0; i < 6; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  const cards = win.document.querySelectorAll("#messagesContainer .msg-bubble");
+  assert.equal(cards.length, 200, "DOM must contain exactly RENDER_WINDOW (200) cards, not 1000");
+
+  const moreBtn = win.document.querySelector("#messagesContainer .btn-show-earlier");
+  assert.ok(moreBtn, "a show earlier messages button must be rendered at the top");
+  assert.match(moreBtn.textContent, /Show 200 earlier messages \(800 not in view\)/);
+
+  assert.match(body(win, "msgCountBadge"), /Showing last 200 of 1000 messages/);
+});
+
+test("live incoming messages on a full window prune the oldest DOM card and update earlier button", async () => {
+  const { win, socket } = await loadClient(() => okResponder());
+
+  const twoHundredMessages = Array.from({ length: 200 }, (_, i) => ({
+    id: `m${i}`,
+    sender_id: "copilot",
+    sender_name: "GitHub Copilot",
+    recipient_id: "*",
+    topic: "general",
+    message_type: "proposal",
+    content: `Message ${i} content`,
+    artifacts: {},
+    metadata: { simulated: true },
+    timestamp: 1700000000 + i,
+  }));
+
+  socket().emit({
+    type: "session_loaded",
+    name: "Full Window",
+    agents: [],
+    history: twoHundredMessages,
+  });
+  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  assert.equal(win.document.querySelectorAll("#messagesContainer .msg-bubble").length, 200);
+
+  // New message arrives via WebSocket:
+  socket().emit({
+    type: "new_message",
+    message: {
+      id: "m200",
+      sender_id: "copilot",
+      sender_name: "GitHub Copilot",
+      recipient_id: "*",
+      topic: "general",
+      message_type: "proposal",
+      content: "Message 200 content",
+      artifacts: {},
+      metadata: { simulated: true },
+      timestamp: 1700000200,
+    },
+  });
+  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  const cardsAfter = win.document.querySelectorAll("#messagesContainer .msg-bubble");
+  assert.equal(cardsAfter.length, 200, "DOM must remain bounded at 200 cards when new message arrives");
+
+  // Oldest message m0 was pruned; newest m200 is present:
+  assert.equal(cardsAfter[cardsAfter.length - 1].dataset.msgId, "m200");
+  assert.equal(cardsAfter[0].dataset.msgId, "m1");
+
+  const moreBtn = win.document.querySelector("#messagesContainer .btn-show-earlier");
+  assert.ok(moreBtn, "show earlier button must appear when messages exceed window");
+  assert.match(moreBtn.textContent, /Show 1 earlier message \(1 not in view\)/);
+  assert.match(body(win, "msgCountBadge"), /Showing last 200 of 201 messages/);
+});
+
+test("clicking show earlier messages expands window progressively without dumping the full transcript", async () => {
+  const { win, socket } = await loadClient(() => okResponder());
+
+  const thousandMessages = Array.from({ length: 1000 }, (_, i) => ({
+    id: `m${i}`,
+    sender_id: "copilot",
+    sender_name: "GitHub Copilot",
+    recipient_id: "*",
+    topic: "general",
+    message_type: "proposal",
+    content: `Message ${i} content`,
+    artifacts: {},
+    metadata: { simulated: true },
+    timestamp: 1700000000 + i,
+  }));
+
+  socket().emit({
+    type: "session_loaded",
+    name: "Big Session",
+    agents: [],
+    history: thousandMessages,
+  });
+  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  const moreBtn = win.document.querySelector("#messagesContainer .btn-show-earlier");
+  assert.ok(moreBtn);
+
+  // Click "Show 200 earlier messages":
+  moreBtn.click();
+  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  const cards = win.document.querySelectorAll("#messagesContainer .msg-bubble");
+  assert.equal(cards.length, 400, "Window should expand progressively to 400 cards, not all 1000");
+
+  const nextBtn = win.document.querySelector("#messagesContainer .btn-show-earlier");
+  assert.ok(nextBtn, "button remains for next increment");
+  assert.match(nextBtn.textContent, /Show 200 earlier messages \(600 not in view\)/);
+  assert.match(body(win, "msgCountBadge"), /Showing last 400 of 1000 messages/);
+});
+
+test("an incoming message matching active search filter dismisses empty search notice and renders", async () => {
+  const { win, socket } = await loadClient(() => okResponder());
+
+  socket().emit({
+    type: "new_message",
+    message: {
+      id: "m-first",
+      sender_id: "copilot",
+      sender_name: "GitHub Copilot",
+      recipient_id: "*",
+      topic: "general",
+      message_type: "proposal",
+      content: "Unrelated topic content",
+      artifacts: {},
+      metadata: { simulated: true },
+      timestamp: 1700000000,
+    },
+  });
+  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  const searchInput = win.document.getElementById("searchMessages");
+  searchInput.value = "needle";
+  searchInput.dispatchEvent(new win.Event("input"));
+  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  assert.match(body(win, "messagesContainer"), /No messages match "needle"/);
+
+  socket().emit({
+    type: "new_message",
+    message: {
+      id: "m-match",
+      sender_id: "copilot",
+      sender_name: "GitHub Copilot",
+      recipient_id: "*",
+      topic: "general",
+      message_type: "proposal",
+      content: "Found the needle in the haystack",
+      artifacts: {},
+      metadata: { simulated: true },
+      timestamp: 1700000001,
+    },
+  });
+  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  assert.ok(!body(win, "messagesContainer").includes("No messages match"),
+    "empty search message should be replaced by matching message card");
+  assert.equal(win.document.querySelectorAll("#messagesContainer .msg-bubble").length, 1);
+  assert.match(body(win, "msgCountBadge"), /1 \/ 2 messages/);
+});
+
 /*
  * A guard on the harness itself, not on the client.
  *

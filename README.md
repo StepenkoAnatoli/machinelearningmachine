@@ -75,7 +75,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 466 tests (433 Python + 33 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 471 tests (434 Python + 37 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -497,15 +497,15 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 433 tests, all offline
-node --test tests/js/*.test.mjs          # 33 jsdom browser tests (needs: npm ci)
+pytest -q                                    # 434 tests, all offline
+node --test tests/js/*.test.mjs          # 37 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 ```
 
 ```
 $ pytest -q
-433 passed, 2 warnings in 29.45s   # the count is asserted by CI; the seconds are your machine's
+434 passed, 2 warnings in 29.59s   # the count is asserted by CI; the seconds are your machine's
 ```
 
 Coverage by area: protocol/bus bounds, agents and topologies, provider provenance,
@@ -619,7 +619,7 @@ machinelearningmachine/
 │   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
-│       └── client-lifecycle.test.mjs  # 18 tests: gap refetch, released session, 409/queue lifecycle, badges, retry-wait wording, reconnect recovery
+│       └── client-lifecycle.test.mjs  # 22 tests: gap refetch, released session, 409/queue lifecycle, badges, retry-wait wording, reconnect recovery, windowed transcript
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,
 │                            #   vendor integrity, jsdom, pip-audit, npm audit, secret scan
 ├── .github/dependabot.yml   # pip + npm + actions
