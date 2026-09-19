@@ -135,17 +135,28 @@ def test_transcript_rendering_goes_through_the_sanitizer_module():
     assert "DOMPurify" in markdown_js and "RETURN_DOM_FRAGMENT" in markdown_js
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-def test_js_xss_suite_passes():
-    """Run the jsdom XSS suite in CI too (skipped when node/jsdom are absent)."""
+def test_jsdom_browser_suites_pass():
+    """
+    Run the jsdom suites from the Python side too, so `pytest` alone proves the
+    browser behaviour as well - skipped when node or jsdom is absent.
+
+    The file list is expanded here rather than passed as a glob: naming one file is
+    how a second suite would sit unexecuted forever, and asking node to expand a
+    quoted pattern needs node >= 21, which the CI runner does not have.
+    """
+    if shutil.which("node") is None:
+        pytest.skip("node is not installed")
     root = Path(__file__).resolve().parents[1]
     if not (root / "node_modules" / "jsdom").exists():
-        pytest.skip("jsdom is not installed (run `npm install`)")
-    proc = subprocess.run(
-        ["node", "--test", "tests/js/sanitize.test.mjs"],
+        pytest.skip("jsdom is not installed (run `npm ci`)")
+    suites = sorted(str(path.relative_to(root)) for path in (root / "tests" / "js").glob("*.test.mjs"))
+    assert suites, "no jsdom suites found in tests/js"
+    proc = subprocess.run(  # noqa: S603  - argv is node plus paths globbed from this repo's own tests/js
+        ["node", "--test", *suites],
         cwd=str(root), capture_output=True, text=True, timeout=300,
     )
     assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
+    assert "fail 0" in proc.stdout, proc.stdout[-2000:]
 
 
 def test_static_directory_has_no_source_maps_or_sourcemaps_referenced():

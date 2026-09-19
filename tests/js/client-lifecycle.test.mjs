@@ -16,13 +16,13 @@
  *   truncated_count   - a reply was cut at the message limit; the exported
  *                       transcript is missing its tail and the user should know.
  *
- * Run: npm install && node --test tests/js/
+ * Run: npm install && node --test tests/js/*.test.mjs
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { JSDOM } from "jsdom";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -30,6 +30,22 @@ const repoRoot = resolve(here, "..", "..");
 const staticDir = join(repoRoot, "machinelearningmachine", "server", "static");
 
 const read = (p) => readFileSync(p, "utf8");
+
+/**
+ * Every window this file opens, closed after each test.
+ *
+ * Each window's timers are cancelled before it is closed.
+ *
+ * Two reasons. (1) Speed: app.js schedules a 12-second toast dismissal and a
+ * multi-second WebSocket backoff, and node will not exit while a handle is open -
+ * the suite took 17 s of wall clock for 1.5 s of work. (2) Correctness: a window
+ * left running leaks its timers into the next test. `window.close()` alone did not
+ * stop them under jsdom 24, so the registry below owns them explicitly, and the two
+ * timing-sensitive tests *drive* time instead of waiting for it.
+ */
+const opened = [];
+let windowsOpened = 0;
+let windowsClosed = 0;
 
 /** A fetch/WebSocket double that records every call the client makes. */
 async function loadClient(responder) {
@@ -44,19 +60,25 @@ async function loadClient(responder) {
   const dom = new JSDOM(html, {
     url: "http://127.0.0.1:8000/",
     runScripts: "outside-only",
-    pretendToBeVisual: true,
     // The client is installed before the parse so that the page's *own*
     // DOMContentLoaded runs its init exactly once. Dispatching the event by hand
     // after construction initialised every tab twice (two sockets, two toasts)
     // and made the assertions lie.
     beforeParse(win) {
       installStubs(win, calls, responder);
-      win.eval(read(join(staticDir, "vendor", "marked", "marked.min.js")));
-      win.eval(read(join(staticDir, "vendor", "dompurify", "purify.min.js")));
+      // Deliberately *not* loading marked/DOMPurify here: markdown.js degrades to
+      // escaping when they are missing (asserted in sanitize.test.mjs), and these
+      // tests read textContent, so the vendor libraries would only add ~1.5s per
+      // window of eval. What must be real is index.html and app.js.
       win.eval(read(join(staticDir, "markdown.js")));
       win.eval(read(join(staticDir, "app.js")));
     },
   });
+  // Registration is what makes teardown possible; a window that is never pushed
+  // here stays open with its toasts and backoff timers, and the suite quietly
+  // becomes 13 seconds of waiting for a process that has nothing left to test.
+  opened.push(dom);
+  windowsOpened++;
   const win = dom.window;
 
   for (let i = 0; i < 12; i++) {
@@ -65,8 +87,93 @@ async function loadClient(responder) {
   return { win, dom, calls, socket: () => calls.sockets[calls.sockets.length - 1] };
 }
 
+afterEach(() => {
+  while (opened.length) {
+    const win = opened.pop().window;
+    try {
+      win.__cancelAllTimers();
+    } catch {
+      /* already closed */
+    }
+    try {
+      win.close();
+    } catch {
+      /* already closed */
+    }
+    windowsClosed++;
+  }
+});
+
+/**
+ * jsdom does not give us a way to un-schedule what app.js scheduled, so the
+ * window's timer functions are wrapped: every pending callback is tracked by id,
+ * can be run on demand (`__flushTimers`), and is cancelled on teardown
+ * (`__cancelAllTimers`).
+ */
+function installTimers(win) {
+  const realSetTimeout = win.setTimeout.bind(win);
+  const realClearTimeout = win.clearTimeout.bind(win);
+  const pending = new Map();
+  let nextId = 1;
+
+  win.setTimeout = (fn, ms = 0, ...args) => {
+    const record = { fn, args, ms, kind: "timeout" };
+    const id = nextId++;
+    record.id = id;
+    record.realId = realSetTimeout(() => {
+      if (pending.delete(id) && typeof fn === "function") fn(...args);
+    }, ms);
+    pending.set(id, record);
+    return id;
+  };
+  win.clearTimeout = (id) => {
+    const record = pending.get(Number(id));
+    if (record) {
+      pending.delete(record.id);
+      realClearTimeout(record.realId);
+    }
+  };
+  win.setInterval = (fn, ms = 0, ...args) => {
+    const id = nextId++;
+    pending.set(id, { fn, args, ms, kind: "interval" });
+    return id;
+  };
+  win.clearInterval = (id) => pending.delete(Number(id));
+
+  // jsdom can animate, but only by running a real 16 ms requestAnimationFrame
+  // loop per window - one repeating timer per tab that survives the test and keeps
+  // node alive at exit. The drawing is not under test here, so a rAF callback is
+  // made an ordinary tracked timeout: it runs when the test advances the clock, and
+  // is cancelled with everything else afterwards.
+  // 16 ms, like a real frame: app.js's draw loop re-arms itself, and a 0 ms
+  // requestAnimationFrame would turn that into a hot loop.
+  win.requestAnimationFrame = (fn) => win.setTimeout(() => fn(Date.now()), 16);
+  win.cancelAnimationFrame = (id) => win.clearTimeout(id);
+
+  // Run every callback scheduled no further out than `horizonMs`, as if the clock
+  // had advanced. Returns how many ran, so a test can assert it actually did.
+  win.__flushTimers = (horizonMs = Infinity) => {
+    const due = [...pending.values()].filter((record) => record.ms <= horizonMs);
+    for (const record of due) {
+      if (record.kind === "interval") continue;  // intervals stay armed
+      pending.delete(record.id);
+      realClearTimeout(record.realId);
+      if (typeof record.fn === "function") record.fn(...record.args);
+    }
+    return due.filter((record) => record.kind === "timeout").length;
+  };
+  win.__pendingTimers = () => pending.size;
+  win.__cancelAllTimers = () => {
+    for (const record of pending.values()) {
+      if (record.kind === "timeout") realClearTimeout(record.realId);
+    }
+    pending.clear();
+  };
+}
+
 /** Everything app.js touches that jsdom does not provide. */
 function installStubs(win, calls, responder) {
+  installTimers(win);
   win.fetch = async (url, options) => {
     const record = { url: String(url), options: options || {} };
     calls.fetch.push(record);
@@ -88,7 +195,8 @@ function installStubs(win, calls, responder) {
       calls.sockets.push(this);
       // Deliver asynchronously: the client attaches its handlers right after the
       // constructor returns, exactly as a browser hands over to onopen later.
-      setTimeout(() => this.onopen && this.onopen({}), 0);
+      // Scheduled on the window so teardown can cancel it like everything else.
+      win.setTimeout(() => this.onopen && this.onopen({}), 0);
     }
 
     send(data) {
@@ -207,6 +315,9 @@ test("a released session stops reconnecting and says why", async () => {
   for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
   socket().close();
   for (let i = 0; i < 6; i++) await new Promise((r) => win.setTimeout(r, 0));
+  // Stronger than "no reconnect yet": run every pending timer, including an
+  // hour's worth of backoff, and still nothing may open a new socket.
+  win.__flushTimers(3_600_000);
 
   assert.equal(calls.sockets.length, socketsAtStart,
     "reconnecting would silently hand the tab a different, empty session");
@@ -217,9 +328,13 @@ test("a released session stops reconnecting and says why", async () => {
 });
 
 test("an ordinary disconnect still reconnects - the released case is the exception", async () => {
-  const { calls, socket } = await loadClient(() => ({ status: 200, body: [] }));
+  const { win, calls, socket } = await loadClient(() => ({ status: 200, body: [] }));
   socket().close();
-  for (let i = 0; i < 3; i++) await new Promise((r) => globalThis.setTimeout(r, 1200));
+  // app.js backs off (1.5s, 2.25s, 3.4s…), so waiting would take seconds of real
+  // time per attempt. Advancing the window's clock proves the retry is scheduled
+  // *and* fires, without the suite depending on how fast the machine is.
+  const fired = win.__flushTimers(60_000);
+  assert.ok(fired > 0, "the reconnect was scheduled");
   assert.ok(calls.sockets.length > 1, "a dropped socket must be retried; only a released session stops");
 });
 
@@ -292,4 +407,19 @@ test("a clamped reply is badged where it hangs, not only in the toast", async ()
   assert.equal(badges.length, 1, "the clipped message carries exactly one badge");
   assert.match(badges[0].textContent, /clipped/i);
   assert.match(badges[0].title, /20000 characters/, "and says how much is missing");
+});
+
+/*
+ * A guard on the harness itself, not on the client.
+ *
+ * `loadClient` registers every window it opens so that `afterEach` can cancel its
+ * timers and close it. When that registration was once dropped, all eight tests
+ * still passed - and the file quietly went from 2 seconds to 13, because a live
+ * jsdom window keeps its 12-second toast timers pending and node waits for them at
+ * exit. Failing fast here keeps "the suite is slow" from being the only symptom.
+ */
+test("no window outlives its test", () => {
+  assert.ok(windowsOpened > 1, "this file is supposed to exercise several tabs");
+  assert.equal(windowsClosed, windowsOpened,
+    "an unclosed jsdom window keeps its timers alive after the last assertion");
 });

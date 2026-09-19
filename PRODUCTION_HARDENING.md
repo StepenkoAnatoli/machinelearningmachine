@@ -145,7 +145,7 @@ number of tests in that file (`pytest -q tests/<file>`), all offline.
 | N1/N2 | stdlib-only core, `asyncio.wait_for` on every await that can block | CI matrix (3.10/3.11/3.12) + `test_import_without_optional_deps` |
 | N3 | README + SECURITY.md rewritten in the same change; `serve` knobs readable from the environment | `tests/test_docs_are_accurate.py` (8) + `tests/test_cli_live.py` |
 | N4 | `--run-timeout` (default 180 s) → 504 with a plain-language reason, `run_error` frame first | `tests/test_run_serialization.py` |
-| D16 | `.prov-clipped` badge in `app.js` + `style.css` | `tests/js/client-lifecycle.test.mjs` (8) |
+| D16 | `.prov-clipped` badge in `app.js` + `style.css` | `tests/js/client-lifecycle.test.mjs` (9) |
 
 ---
 
@@ -160,8 +160,8 @@ server-side tests cannot prove a browser does anything with the frames it is sen
 | Result | |
 |---|---|
 | CI (GitHub) | green on `3.10 / 3.11 / 3.12`, vendor integrity, `npm audit`, `pip-audit`, secret scan, and the wheel-served end-to-end pass |
-| `pytest -q` | **365 passed** (was 220 at `9cffbd3`), 0 failures, 2 warnings (both starlette/httpx deprecations) |
-| `node --test tests/js/*.test.mjs` | **23 pass** (15 sanitizer + 8 client lifecycle), on node 20 in CI and node 22 locally |
+| `pytest -q` | **366 passed** (was 220 at `9cffbd3`), 0 failures, 2 warnings (both starlette/httpx deprecations) |
+| `node --test tests/js/*.test.mjs` | **24 pass** (15 sanitizer + 9 client lifecycle), on node 20 in CI and node 22 locally |
 | `ruff check machinelearningmachine tests scripts examples` | clean (examples were broken at baseline and are now in CI's scope) |
 | `scripts/e2e_server_check.py` | **33/33 PASS** against a live server |
 | `python scripts/bench_sessions.py` | 50 transcripts, 73.9 MB: `list_sessions` **1.3 ms** vs **213.4 ms** for read+parse-every-file (167×); the script exits non-zero if the header index ever stops paying for itself |
@@ -236,6 +236,12 @@ exercise was not to add unfounded claims:
 - **The jsdom client tests stub `fetch` and `WebSocket`.** They prove the client reacts
   correctly to frames; the real socket is covered by the e2e script, and browser-specific
   rendering (canvas, Web Speech) is not asserted anywhere.
+- **Every jsdom window must be registered so `afterEach` can close it.** Not for tidiness:
+  jsdom leaves a closed window's pending `setTimeout`s armed, so a single live window holding
+  app.js's 12-second toast dismissal keeps node's event loop open and the *file* reports 13 s
+  for 1 s of work. When that registration was dropped during a refactor, all eight tests still
+  passed - only the wall clock moved - so `client-lifecycle.test.mjs` now asserts
+  `windowsClosed == windowsOpened`, and 24 cases run in under 2 s instead of 23 in 17.
 
 ## 7. What this milestone deliberately did *not* do
 
@@ -285,7 +291,7 @@ pool, or a new dependency.
 
 **Done and verified locally, at the commit this milestone produced:**
 
-- `pytest -q` → 365 passed; `node --test tests/js/*.test.mjs` → 23 passed;
+- `pytest -q` → 366 passed; `node --test tests/js/*.test.mjs` → 24 passed;
   `ruff check machinelearningmachine tests scripts examples` → clean.
 - The packaged wheel installs into a clean venv, serves, and passes the 33-check
   end-to-end script (this is now a CI step, so the claim is re-checked on every push).

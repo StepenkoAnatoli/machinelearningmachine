@@ -72,7 +72,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 388 tests (365 Python + 23 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 390 tests (366 Python + 24 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -490,8 +490,8 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 365 tests, all offline
-node --test tests/js/*.test.mjs      # 23 jsdom browser tests (needs: npm ci)
+pytest -q                                    # 366 tests, all offline
+node --test tests/js/*.test.mjs      # 24 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 python scripts/bench_sessions.py                       # saved-session listing: 1.3 ms vs 213 ms
@@ -505,7 +505,7 @@ $ pytest -q
 ........................................................................ [ 79%]
 ........................................................................ [ 98%]
 .......                                                                    [100%]
-365 passed in 21.9s
+366 passed in 22.4s
 ```
 
 Coverage by area: protocol/bus bounds, agents and topologies, provider provenance,
@@ -617,7 +617,7 @@ machinelearningmachine/
 │   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
-│       └── client-lifecycle.test.mjs  # 8 tests: gap refetch, released session, 409, badges
+│       └── client-lifecycle.test.mjs  # 9 tests: gap refetch, released session, 409, badges
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,
 │                            #   vendor integrity, jsdom, pip-audit, npm audit, secret scan
 ├── .github/dependabot.yml   # pip + npm + actions

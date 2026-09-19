@@ -314,7 +314,8 @@ checksummed in `static/vendor/MANIFEST.json`.
   is served from the app itself, so the page is offline-capable and CSP-clean.
 **User value**: the transcript is the one place arbitrary text from models and
 saved files lands, and it is now rendered through an audited sanitizer whose
-bypass corpus is an executable test (`tests/js/sanitize.test.mjs`).
+bypass corpus is an executable test, as is the tab's reaction to a server that
+admits it lost frames (`tests/js/`).
 
 A note that came out of the vendoring work itself: the DOMPurify release first
 pinned here (3.1.6) turned out to carry 20 open advisories, several of them
@@ -412,7 +413,7 @@ failure is reported as a bare 500.
 
 ```
 $ pytest -q
-365 passed in 21.9s
+366 passed in 22.4s
 $ node --test tests/js/*.test.mjs
 # pass 23
 $ python scripts/e2e_server_check.py --base http://127.0.0.1:8799

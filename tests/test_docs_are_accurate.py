@@ -52,6 +52,28 @@ def test_readme_jsdom_test_count_is_true():
     assert int(claimed.group(1)) == actual, f"README claims {claimed.group(1)} jsdom tests, {counts} sums to {actual}"
 
 
+def test_hardening_doc_breaks_down_the_jsdom_count_per_file():
+    """`15 sanitizer + 9 client lifecycle` has to be each file's real count.
+
+    The aggregate is checked against README above; this checks the split, so neither
+    half of it can quietly stop matching the suite it names.
+    """
+    hardening = (ROOT / "PRODUCTION_HARDENING.md").read_text(encoding="utf-8")
+    claimed = re.search(
+        r"\*\*(\d+) pass\*\* \((\d+) sanitizer \+ (\d+) client lifecycle\)", hardening
+    )
+    assert claimed, "PRODUCTION_HARDENING.md should break the jsdom count down by file"
+
+    counts = _jsdom_counts()
+    assert sum(counts.values()) == int(claimed.group(1)), (
+        f"claims {claimed.group(1)} jsdom tests, counted {sum(counts.values())}"
+    )
+    assert counts.get("sanitize.test.mjs") == int(claimed.group(2)), "sanitizer count drifted"
+    assert counts.get("client-lifecycle.test.mjs") == int(claimed.group(3)), (
+        "client-lifecycle count drifted"
+    )
+
+
 def test_ci_runs_every_jsdom_suite():
     """
     A browser test file CI never executes is a file that rots quietly - which is how

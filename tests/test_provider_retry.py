@@ -258,7 +258,7 @@ async def test_the_wait_between_attempts_actually_happens(monkeypatch, backoffs)
     assert 0.5 <= backoffs[0] < 1.5, "the delay scales with the attempt and stays short"
 
 
-async def test_the_message_and_the_reason_agree_about_the_attempts(monkeypatch):
+async def test_the_message_and_the_reason_agree_about_the_attempts(monkeypatch, backoffs):
     """``str(exc)`` is what reaches the toast; ``reason`` is what reaches the transcript."""
     calls = []
     monkeypatch.setattr(
@@ -277,7 +277,7 @@ async def test_the_message_and_the_reason_agree_about_the_attempts(monkeypatch):
     assert err.reason in str(err), f"{str(err)!r} does not carry {err.reason!r}"
 
 
-async def test_a_non_retryable_refusal_never_claims_retries(monkeypatch):
+async def test_a_non_retryable_refusal_never_claims_retries(monkeypatch, backoffs):
     calls = []
     monkeypatch.setattr(
         "machinelearningmachine.agents.providers._aiohttp",
