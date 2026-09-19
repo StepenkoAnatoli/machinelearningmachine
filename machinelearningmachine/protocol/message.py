@@ -6,7 +6,7 @@ Defines structured message types, payloads, and serialization.
 import time
 import uuid
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -26,8 +26,44 @@ class MessageType(str, Enum):
 MAX_CONTENT_LENGTH = 50_000
 MAX_TOPIC_LENGTH = 100
 
+#: Shown when a message had to be cut to fit the protocol limit. Kept next to the
+#: limit it guards, so every producer sees the same honest wording.
+TRUNCATION_NOTICE = (
+    "\n\n> ✂️ **Truncated:** the full text is {original} characters, which exceeds this "
+    "mesh's {limit}-character message limit. The {how} is shown. Nothing was saved "
+    "elsewhere - re-run with a shorter request if you need the rest."
+)
+
+
+def clamp_content(content: str, limit: int = MAX_CONTENT_LENGTH) -> Tuple[str, int]:
+    """
+    Fit ``content`` into ``limit`` characters, saying so when it did not fit.
+
+    Producers must never build a :class:`Message` whose content exceeds
+    :data:`MAX_CONTENT_LENGTH`: the model would reject it and the whole run would
+    die on an internal bound. A real provider answer routinely runs past that size
+    (a few hundred lines of code is enough), so clamping is the producer's job and
+    it must be visible: the returned text carries the notice and the second return
+    value is the number of characters that were dropped (0 when nothing was cut).
+
+    Returns ``(text, dropped_characters)``.
+    """
+    text = content if isinstance(content, str) else str(content)
+    if len(text) <= limit:
+        return text, 0
+    notice = TRUNCATION_NOTICE.format(original=len(text), limit=limit, how="beginning")
+    keep = max(0, limit - len(notice))
+    # Never keep less than half the budget just to make room for the notice.
+    if keep < limit // 2:
+        keep = max(0, limit - 80)
+        notice = f"\n\n> ✂️ **Truncated:** {len(text) - keep} of {len(text)} characters dropped."
+    return text[:keep].rstrip() + notice, len(text) - keep
+
 class Message(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    # 12 hex characters (~10^14). The browser keys messages by this id, so a
+    # collision inside one transcript would silently drop a message; 8 characters
+    # was already within birthday-paradox reach of a full 1000-message history.
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     sender_id: str = Field(..., min_length=1, max_length=100)
     sender_name: str = Field(..., min_length=1, max_length=200)
     recipient_id: str = Field(default="*", max_length=100)  # Specific agent ID or '*' for broadcast

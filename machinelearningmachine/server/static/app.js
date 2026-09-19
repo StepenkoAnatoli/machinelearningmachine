@@ -5,6 +5,18 @@ document.addEventListener("DOMContentLoaded", () => {
   let agents = [];
   let messages = [];
   let isExecuting = false;
+  /**
+   * Two flags, one picture. `localRun` is this tab's own Execute click;
+   * `remoteRunActive` is "some tab in this session is running", learned from the
+   * feed. The button used to be disabled only when `run_started` arrived over the
+   * WebSocket - so with a dead socket the user could click Execute repeatedly, and
+   * a missed event left the spinner running forever. Now the request that started
+   * the run is what decides, and the feed only decorates.
+   */
+  let localRun = false;
+  let remoteRunActive = false;
+  /** The server released this session's mesh; reconnecting would only re-allocate. */
+  let sessionReleased = false;
   let activePacket = null;
   let ws = null;
   let wsReconnectAttempts = 0;
@@ -737,6 +749,14 @@ document.addEventListener("DOMContentLoaded", () => {
     };
 
     ws.onclose = () => {
+      if (sessionReleased) {
+        // The mesh behind this tab is gone (idle timeout or capacity). Reconnecting
+        // would quietly hand the tab a different, empty session, so say what
+        // happened and stop instead of pretending the conversation is still there.
+        connectionStatus.className = "flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-amber-950/80 border border-amber-800 text-amber-400";
+        connectionStatus.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-400"></span><span>Session released - Reload</span>';
+        return;
+      }
       wsReconnectAttempts++;
       connectionStatus.className = "flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-amber-950/80 border border-amber-800 text-amber-400";
       connectionStatus.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-400"></span><span>Reconnecting...</span>';
@@ -821,24 +841,70 @@ document.addEventListener("DOMContentLoaded", () => {
       renderAllMessages();
       showToast("Session cleared successfully", "success");
     } else if (data.type === "run_started") {
-      isExecuting = true;
-      btnRun.disabled = true;
-      btnRun.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i><span>Modules Communicating...</span>';
-      btnRun.setAttribute("aria-busy", "true");
-      showToast(`Starting ${data.topology} dialogue...`, "info", 2000);
+      remoteRunActive = true;
+      syncRunActivity();
+      showToast(`Starting ${data.topology} dialogue${data.run_id ? " (" + data.run_id + ")" : ""}...`, "info", 2000);
     } else if (data.type === "run_completed" || data.type === "run_error") {
-      isExecuting = false;
-      btnRun.disabled = false;
-      btnRun.innerHTML = '<i class="fa-solid fa-play" aria-hidden="true"></i><span>Execute Dialogue</span>';
-      btnRun.removeAttribute("aria-busy");
-      requestRedraw(true); // one last frame so the graph settles without a live loop
+      remoteRunActive = false;
+      syncRunActivity();
       if (data.type === "run_error") {
         showToast("Dialogue failed: " + (data.error || "Unknown error"), "error", 5000);
+      } else if (data.truncated_count) {
+        // The transcript the user is about to export is missing the tail of an
+        // answer. The message itself carries a "Truncated:" notice and a badge, but
+        // neither is visible while you are reading a wall of code, so say it out loud.
+        showToast(`${data.truncated_count} ${data.truncated_count === 1 ? "reply was" : "replies were"} longer than the 50,000-character message limit, so the transcript is cut short`, "warning", 8000);
       } else if (data.simulated_count) {
         showToast(`${data.simulated_count} simulated answer${data.simulated_count === 1 ? "" : "s"} - nothing was executed or tested`, "warning", 6000);
       } else {
         showToast("Dialogue completed", "success");
       }
+    } else if (data.type === "stream_gap") {
+      // The server could not keep this tab's send queue fed (a throttled tab, a
+      // stalled radio). Rather than let the transcript quietly miss messages,
+      // re-pull what the bus still holds.
+      resyncHistoryFromServer(`Some messages were skipped while this tab was not keeping up (${data.dropped || 0}) - refetched`);
+    } else if (data.type === "session_released") {
+      sessionReleased = true;
+      localRun = false;
+      remoteRunActive = false;
+      syncRunActivity();
+      showToast(data.detail || "This session was released by the server. Reload the page.", "warning", 12000);
+    }
+  }
+
+  /** Enable/disable the run button from the two sources of truth, once. */
+  function syncRunActivity() {
+    const busy = localRun || remoteRunActive;
+    isExecuting = busy;
+    btnRun.disabled = busy;
+    if (busy) {
+      btnRun.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i><span>Modules Communicating...</span>';
+      btnRun.setAttribute("aria-busy", "true");
+    } else {
+      btnRun.innerHTML = '<i class="fa-solid fa-play" aria-hidden="true"></i><span>Execute Dialogue</span>';
+      btnRun.removeAttribute("aria-busy");
+      requestRedraw(true); // one last frame so the graph settles without a live loop
+    }
+  }
+
+  /**
+   * Re-read the transcript after the live feed admitted it dropped frames.
+   * Non-fatal by construction: if the refetch fails the messages already on
+   * screen stay exactly as they are.
+   */
+  async function resyncHistoryFromServer(note) {
+    try {
+      const resp = await apiFetch("/api/history?limit=" + encodeURIComponent(String(maxMessagesClient)));
+      if (!resp.ok) return;
+      const history = await resp.json();
+      if (!Array.isArray(history)) return;
+      messages = history.slice(-maxMessagesClient);
+      renderAllMessages();
+      requestRedraw(true);
+      if (note) showToast(note, "info", 5000);
+    } catch (e) {
+      /* keep what we have; the next message arrives normally */
     }
   }
 
@@ -1271,6 +1337,17 @@ document.addEventListener("DOMContentLoaded", () => {
       headLeft.appendChild(live);
     }
 
+    // A clamped reply says so inside its own text as well, but a badge is what you
+    // scan a transcript with - and the exported Markdown is where the missing tail
+    // would otherwise be silently gone.
+    if (meta.content_truncated) {
+      const clipped = document.createElement("span");
+      clipped.className = "prov-badge prov-clipped";
+      clipped.title = `${meta.content_truncated} characters were over the protocol's message limit and were dropped from the end`;
+      setText(clipped, "clipped");
+      headLeft.appendChild(clipped);
+    }
+
     const headRight = document.createElement("div");
     headRight.className = "flex items-center gap-2";
     const speakBtn = document.createElement("button");
@@ -1488,6 +1565,8 @@ document.addEventListener("DOMContentLoaded", () => {
       SpeechKit.speak(prompt, { label: "Your prompt" });
     }
 
+    localRun = true;
+    syncRunActivity();
     try {
       const resp = await apiFetch("/api/run", {
         method: "POST",
@@ -1495,7 +1574,12 @@ document.addEventListener("DOMContentLoaded", () => {
         body: JSON.stringify(payload),
       });
 
-      if (!resp.ok) {
+      if (resp.status === 409) {
+        // A run is already holding this session's mesh (another tab, or a stale
+        // request). Refusing is the correct answer; say so in those words.
+        const conflict = await resp.json().catch(() => ({}));
+        showToast(conflict.detail || "A run is already in progress in this session", "info", 6000);
+      } else if (!resp.ok) {
         const err = await resp.json().catch(() => ({ detail: "Unknown error" }));
         showToast("Failed: " + (err.detail || "Unknown error"), "error", 5000);
       } else {
@@ -1518,6 +1602,9 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (err) {
       console.error("Run error:", err);
       showToast("Network error - check connection and try again", "error", 5000);
+    } finally {
+      localRun = false;
+      syncRunActivity();
     }
   });
 
@@ -1974,7 +2061,11 @@ document.addEventListener("DOMContentLoaded", () => {
         nameEl.title = nameEl.textContent;
         const metaEl = document.createElement("p");
         metaEl.className = "text-[10px] text-slate-500";
-        metaEl.textContent = `${dateStr} \u00b7 ${Number(s.message_count) || 0} messages`;
+        // "trimmed" is the store's own admission that the oldest messages were
+        // dropped to fit the per-file cap - the row must not imply a full transcript.
+        metaEl.textContent =
+          `${dateStr} \u00b7 ${Number(s.message_count) || 0} messages` +
+          (s.trimmed ? " \u00b7 oldest dropped to fit the size limit" : "");
         info.appendChild(nameEl);
         info.appendChild(metaEl);
 

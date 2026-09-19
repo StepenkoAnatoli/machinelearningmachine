@@ -30,15 +30,29 @@ AUTH_TOKEN_ENV_VAR = "MACHINELEARNINGMACHINE_AUTH_TOKEN"  # noqa: S105  - a vari
 AUTH_TOKEN_SUFFIX = "AUTH_TOKEN"  # noqa: S105  - an env var name suffix, not a value
 URL_READER_SUFFIX = "ENABLE_URL_READER"
 ALLOW_ORIGINS_SUFFIX = "ALLOW_ORIGINS"
+#: The tuning knobs a container or launch script is most likely to want set without
+#: editing a command line. Bound ranges live in cli.py, next to the matching flags.
+RUN_TIMEOUT_SUFFIX = "RUN_TIMEOUT"
+MAX_SESSIONS_SUFFIX = "MAX_SESSIONS"
+SESSION_TTL_SUFFIX = "SESSION_TTL"
+INSECURE_PROVIDER_URLS_SUFFIX = "ALLOW_INSECURE_PROVIDER_URLS"
 MIN_TOKEN_LENGTH = 16
 
 SESSION_COOKIE_NAME = "mmm_session"
 CLIENT_COOKIE_NAME = "mmm_client"
 
 #: Default cap on simultaneously live per-browser meshes, and how long an idle
-#: one is kept before it (and its WebSocket clients) are released.
+#: one is kept before it (and its WebSocket clients) are released. The release is
+#: executed by a reaper task in the app's lifespan - an idle session with a live
+#: WebSocket never makes another request to be checked against, so "check on
+#: access" alone would silently ignore this number.
 DEFAULT_MAX_SESSIONS = 32
 DEFAULT_SESSION_IDLE_TTL = 6 * 60 * 60
+
+#: Longest a single multi-agent run may take before it is reported as failed.
+#: Generous on purpose: four agents x a couple of turns x a real model is minutes,
+#: but "until the process restarts" is not a bound a user can act on.
+DEFAULT_RUN_TIMEOUT = 180.0
 
 
 def is_loopback_host(host: str) -> bool:
@@ -79,6 +93,17 @@ class ServerConfig:
     port: int = 8000
     #: Operator allowlist forwarded to :mod:`machinelearningmachine.netguard`.
     url_allowlist: Tuple[str, ...] = field(default_factory=tuple)
+    #: Upper bound on one /api/run, so a provider that accepts the connection and
+    #: never answers cannot hold a session (and its run lock) forever.
+    run_timeout: float = DEFAULT_RUN_TIMEOUT
+    #: How often the reaper looks for idle sessions. ``None`` = derive it from
+    #: ``session_idle_ttl`` (see :meth:`SessionRegistry.sweep_interval_seconds`);
+    #: tests and embedding apps set it explicitly.
+    session_sweep_interval: Optional[float] = None
+    #: Opt out of the SSRF rule applied to a *browser-supplied* provider base URL.
+    #: Only ever useful on a machine whose own backends (Ollama, vLLM) should be
+    #: reachable from a dashboard that other machines can also open.
+    allow_insecure_provider_urls: bool = False
 
     @property
     def require_auth(self) -> bool:

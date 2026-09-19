@@ -225,3 +225,24 @@ def test_tts_engine_reporting():
     # Whatever OS this runs on, the helper must never raise.
     assert engine is None or isinstance(engine, str)
     assert tts.speak("") is False  # empty text is a no-op, not an error
+
+
+def test_a_failed_save_tells_the_operator_why_without_leaking_the_path(monkeypatch, tmp_path):
+    """
+    Disk-full and "some generic 500" are not the same product. The reason reaches
+    the caller; the server's directory does not.
+    """
+    from machinelearningmachine import sessions as store
+
+    client = TestClient(app)
+    client.post("/api/run", json={"topology": "pipeline", "prompt": "Design a rate limiter"})
+
+    def exploding_replace(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(store.os, "replace", exploding_replace)
+    resp = client.post("/api/sessions", json={"name": "on a full disk"})
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert "No space left on device" in detail, detail
+    assert str(tmp_path) not in detail and "/sessions" not in detail, detail

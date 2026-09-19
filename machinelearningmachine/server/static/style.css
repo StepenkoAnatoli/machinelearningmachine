@@ -406,6 +406,13 @@ input:focus-visible {
   border-color: rgba(248, 113, 113, 0.55);
   color: #fca5a5;
 }
+/* A reply that ran past the protocol's size limit: amber, because the transcript
+   is complete-looking but is not. */
+.prov-clipped {
+  background: rgba(120, 53, 15, 0.4);
+  border-color: rgba(251, 191, 36, 0.55);
+  color: #fcd34d;
+}
 
 /* ===== Mode banner under the header ===== */
 #modeBanner {

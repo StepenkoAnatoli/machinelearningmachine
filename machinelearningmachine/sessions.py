@@ -19,6 +19,7 @@ User-centered design:
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import uuid
@@ -46,6 +47,24 @@ MAX_SESSION_BYTES = 8 * 1024 * 1024
 
 #: Only allow these characters in session IDs (prevents path traversal).
 _SAFE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
+
+#: How much of a stored file the metadata is read from. The writer keeps a fixed
+#: key order with all four metadata fields inside the first ~200 bytes, so a
+#: listing never needs the transcript: 50 sessions used to mean parsing 78 MB of
+#: JSON on every call to ``GET /api/sessions``.
+META_HEAD_BYTES = 4096
+
+#: The leading metadata of a document written by :func:`save_session`
+#: (``json.dumps`` defaults: ``", "`` between fields, ``": "`` after each key).
+#: Anything that does not match this shape - a hand-edited file, an older layout -
+#: falls back to a full parse, so the fast path is an optimisation, never a
+#: correctness assumption.
+_CREATED_AT = re.compile(r'"created_at": (-?\d+(?:\.\d+)?)')
+
+_HEAD_META = re.compile(
+    r'^\{"id": "(?P<id>(?:[^"\\]|\\.)*)", "version": \d+, "name": "(?P<name>(?:[^"\\]|\\.)*)", '
+    r'"created_at": -?\d+(?:\.\d+)?, "message_count": (?P<count>\d+)'
+)
 
 #: Saved sessions can be split into per-client sub-directories ("namespaces"),
 #: so a multi-user server never lists or loads somebody else's transcripts.
@@ -95,9 +114,38 @@ def _path_for(session_id: str, namespace: Optional[str] = None) -> Path:
     return sessions_dir(namespace) / f"{session_id}.json"
 
 
+#: A stored session's name prefix is its creation time, to the second.
+_TIMESTAMPED_ID = re.compile(r"^(\d{8}-\d{6}(?:\.\d{1,6})?)")
+
+
+def _prune_sort_key(stem: str, mtime: float) -> str:
+    """
+    The value pruning is ordered by: a fixed-width, time-sortable string.
+
+    Names this module wrote carry their own timestamp; anything else falls back to
+    the modification time, formatted the same way so the two compare sensibly.
+    """
+    match = _TIMESTAMPED_ID.match(stem)
+    if match:
+        return match.group(1)
+    return time.strftime("%Y%m%d-%H%M%S", time.localtime(mtime))
+
+
 def new_session_id() -> str:
-    """Timestamp + short random suffix, e.g. ``20260918-123456-a1b2c3``."""
-    return f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    """
+    A creation stamp to the microsecond plus a short random suffix, e.g.
+    ``20260918-123456.482913-a1b2c3``.
+
+    The timestamp is part of the name for a reason: pruning keeps the newest N
+    files, and ordering by modification time inherits whatever precision the
+    filesystem happens to have (FAT and some NFS mounts keep whole seconds). With
+    several saves in one second, "newest" then means "whichever random suffix sorts
+    last" - which can delete the session that was just saved.
+    """
+    now = time.time()
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+    micro = int((now % 1) * 1_000_000)
+    return f"{stamp}.{micro:06d}-{uuid.uuid4().hex[:6]}"
 
 
 def _sanitize_name(name: Optional[str]) -> str:
@@ -111,15 +159,6 @@ def _sanitize_name(name: Optional[str]) -> str:
     if len(name) > 120:
         name = name[:117].rstrip() + "..."
     return name
-
-
-def _meta(session_id: str, name: str, message_count: int, saved_at: float) -> Dict[str, Any]:
-    return {
-        "id": session_id,
-        "name": name,
-        "saved_at": saved_at,
-        "message_count": message_count,
-    }
 
 
 def save_session(
@@ -143,32 +182,152 @@ def save_session(
     session_id = new_session_id()
     saved_at = time.time()
 
+    # Key order is part of the format: list_sessions() reads metadata out of the
+    # first kilobytes, so "message_count" has to be in the header, not derived
+    # from the transcript body.
     payload = {
         "id": session_id,
         "version": 1,
         "name": clean_name,
         "created_at": saved_at,
+        "message_count": len(messages),
         "agents": agents,
         "messages": messages,
         "extra": extra or {},
     }
 
-    # If the session is huge, trim oldest messages until it fits the cap.
+    # If the session is huge, trim oldest messages until it fits the cap - and say
+    # in the file itself what was dropped, so a trimmed transcript never reads as
+    # the complete conversation.
+    dropped_on_trim = 0
     data = json.dumps(payload, ensure_ascii=False)
-    while len(data.encode("utf-8")) > MAX_SESSION_BYTES and payload["messages"]:
-        payload["messages"] = payload["messages"][len(payload["messages"]) // 2:]
+    # The guard and the "cut == 0" branch both exist because halving a list of one
+    # makes no progress: a single oversized message used to spin here forever, in
+    # the request thread, with the file still unwritten.
+    for _ in range(64):
+        if len(data.encode("utf-8")) <= MAX_SESSION_BYTES or not payload["messages"]:
+            break
+        cut = len(payload["messages"]) // 2
+        payload["messages"] = payload["messages"][cut:] if cut else []
+        dropped_on_trim += cut or 1
+        payload["message_count"] = len(payload["messages"])
+        data = json.dumps(payload, ensure_ascii=False)
+    else:
+        if len(data.encode("utf-8")) > MAX_SESSION_BYTES:
+            raise ValueError(
+                "This session cannot be trimmed below the per-file size limit, because "
+                "the saved agents and their prompts alone are that large. Remove some "
+                "custom modules or shorten their system prompts, then save again."
+            )
+    if dropped_on_trim:
+        payload["messages_dropped_on_save"] = dropped_on_trim
+        payload["trimmed"] = True
         data = json.dumps(payload, ensure_ascii=False)
 
-    path = _path_for(session_id, namespace)
-    path.write_text(data, encoding="utf-8")
+    _write_atomic(_path_for(session_id, namespace), data)
     _prune_old_sessions(namespace)
     return _meta(session_id, clean_name, len(payload["messages"]), saved_at)
 
 
+def _write_atomic(path: Path, data: str) -> None:
+    """
+    Write a session so a reader sees either the old file or the whole new one.
+
+    ``path.write_text(...)`` truncated the file before filling it in: a crash, an
+    interrupted shutdown or a full disk left a half-written transcript that
+    :func:`list_sessions` then skipped *silently* - which is how "my saved session
+    disappeared" was implemented. Writing a temp file in the same directory and
+    renaming it is the one mechanism that is atomic on every OS Python runs on.
+
+    No fsync: the promise is "a process crash never corrupts a saved session",
+    not "survives the machine losing power" - and a sync on every save would make
+    the common case (a small transcript, a spinning disk) feel slow for nothing.
+    """
+    tmp = path.with_name(f"{path.stem}.json.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+    except OSError as exc:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        reason = getattr(exc, "strerror", "") or str(exc) or exc.__class__.__name__
+        error = OSError(f"The session could not be written to {path.parent}: {reason}")
+        #: The reason on its own, for callers that must tell the user *why* without
+        #: echoing a server filesystem path (the dashboard's save endpoint).
+        error.reason_detail = reason  # type: ignore[attr-defined]
+        raise error from exc
+
+
+def _meta(session_id: str, name: str, message_count: int, saved_at: float, trimmed: bool = False) -> Dict[str, Any]:
+    """The list view's row. Kept tiny on purpose: no transcript reaches a listing."""
+    meta: Dict[str, Any] = {
+        "id": session_id,
+        "name": name,
+        "saved_at": saved_at,
+        "message_count": message_count,
+    }
+    if trimmed:
+        # Honest in the list, not only in the file: this transcript had its oldest
+        # messages dropped to fit the size cap.
+        meta["trimmed"] = True
+    return meta
+
+
+def _head_meta(path: Path) -> Optional[Dict[str, Any]]:
+    """
+    Read a stored session's metadata from the head of the file.
+
+    Returns ``None`` when the prefix does not look like a document this module
+    wrote, so the caller can fall back to the expensive, always-correct path.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(META_HEAD_BYTES)
+    except OSError:
+        return None
+    match = _HEAD_META.match(head)
+    if not match:
+        return None
+    try:
+        session_id = json.loads(f'"{match.group("id")}"')
+        name = json.loads(f'"{match.group("name")}"')
+    except (json.JSONDecodeError, ValueError):
+        return None
+    created = _CREATED_AT.search(head)
+    if created is None:
+        # The prefix ended mid-number (or the file was written by an older build).
+        # Nothing is lost by asking the filesystem instead of the document.
+        try:
+            stamp = path.stat().st_mtime
+        except OSError:
+            return None
+    else:
+        stamp = float(created.group(1))
+    return _meta(
+        session_id,
+        name or path.stem,
+        int(match.group("count")),
+        stamp,
+        trimmed='"trimmed": true' in head,
+    )
+
+
 def list_sessions(namespace: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Return lightweight metadata for all stored sessions, newest first."""
+    """
+    Return lightweight metadata for all stored sessions, newest first.
+
+    Only the header of each file is read (see :func:`_head_meta`); the transcript
+    itself is parsed on demand by :func:`get_session`.
+    """
     results: List[Dict[str, Any]] = []
     for f in sessions_dir(namespace).glob("*.json"):
+        meta = _head_meta(f)
+        if meta is not None:
+            results.append(meta)
+            continue
         try:
             with open(f, "r", encoding="utf-8") as fh:
                 d = json.load(fh)
@@ -178,6 +337,7 @@ def list_sessions(namespace: Optional[str] = None) -> List[Dict[str, Any]]:
                     d.get("name") or f.stem,
                     len(d.get("messages", [])),
                     float(d.get("created_at", f.stat().st_mtime)),
+                    bool(d.get("trimmed")),
                 )
             )
         except Exception:
@@ -221,16 +381,40 @@ def delete_session(session_id: str, namespace: Optional[str] = None) -> bool:
     return False
 
 
-def _prune_old_sessions(namespace: Optional[str] = None) -> None:
-    """Keep at most MAX_SESSIONS files, deleting the oldest first."""
+def _prune_old_sessions(namespace: Optional[str] = None, *, now: Optional[float] = None) -> None:
+    """
+    Keep at most MAX_SESSIONS files, deleting the oldest first.
+
+    Also clears ``*.tmp`` left behind by a process that was killed between the
+    write and the rename: harmless to read (nothing globs them) but they would
+    otherwise accumulate in a directory the user can never be asked to clean.
+    """
+    directory = sessions_dir(namespace)
     try:
-        files = [
-            (f.stat().st_mtime, f.name, f)
-            for f in sessions_dir(namespace).glob("*.json")
-            if _SAFE_ID.match(f.stem)
-        ]
-        # Newest first; filename is a deterministic tie-breaker when
-        # filesystem timestamps share the same second.
+        moment = now if now is not None else time.time()
+        for stale in directory.glob("*.json.*.tmp"):
+            try:
+                if moment - stale.stat().st_mtime > 3600:
+                    stale.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+    try:
+        files = []
+        for f in directory.glob("*.json"):
+            if not (_SAFE_ID.match(f.stem) and f.suffix == ".json"):
+                continue
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            files.append((_prune_sort_key(f.stem, mtime), f.name, f))
+        # Newest first. The *name* leads, because it embeds the creation second
+        # (see new_session_id); mtime only orders hand-written files. Sorting by
+        # mtime alone is what made "the session you just saved" the deletion
+        # candidate: on a filesystem with one-second granularity, two saves in
+        # the same second were ordered by their random suffix.
         files.sort(reverse=True)
         for _, _, stale in files[MAX_SESSIONS:]:
             try:

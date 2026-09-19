@@ -25,6 +25,7 @@ to log in again after every server restart, on purpose.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -34,6 +35,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from ..mesh import AgentMesh
 from .config import ServerConfig
+from .feed import ClientFeed
 
 logger = logging.getLogger("server.state")
 
@@ -65,11 +67,26 @@ class SessionState:
     #: Raw keys live here for the process lifetime only (never logged, never
     #: persisted). Kept out of ``provider_config`` so it cannot leak via /api/*.
     api_keys: Dict[str, str] = field(default_factory=dict)
-    websockets: Set[Any] = field(default_factory=set)
+    #: One :class:`~machinelearningmachine.server.feed.ClientFeed` per live
+    #: WebSocket. Deliberately not the raw sockets: fanning a message out must
+    #: never await a browser, or one stalled tab stalls the whole run.
+    feeds: Set[ClientFeed] = field(default_factory=set)
     last_run_time: float = 0.0
     last_url_read_time: float = 0.0
     #: Messages whose provider failed during the most recent run.
     last_run_warnings: List[str] = field(default_factory=list)
+    #: One run at a time per browser session (see ``server.app``'s 409 path): the
+    #: agents, the transcript and the export are shared, so two concurrent runs
+    #: would produce a transcript that belongs to neither of them.
+    run_lock: "asyncio.Lock" = field(default_factory=asyncio.Lock)
+    #: Monotonic run counter, so ``run_started``/``run_completed`` events can be
+    #: matched to the run that caused them even if the user starts another.
+    run_seq: int = 0
+    active_run_id: Optional[str] = None
+    #: Why this session was released ("idle_timeout", "capacity", "dropped"). Set
+    #: just before disposal so the app can tell its open sockets *why* they are
+    #: being closed instead of dropping them silently.
+    evict_reason: Optional[str] = None
     #: True for a session created on behalf of a caller that keeps no cookies
     #: (see :meth:`SessionRegistry.create`). Such a session expires early.
     ephemeral: bool = False
@@ -80,6 +97,47 @@ class SessionState:
 
     def idle_seconds(self, now: Optional[float] = None) -> float:
         return (now if now is not None else time.time()) - self.last_access
+
+    @property
+    def busy(self) -> bool:
+        """True while a run owns this session's mesh."""
+        return self.run_lock.locked()
+
+    def next_run_id(self) -> str:
+        self.run_seq += 1
+        self.active_run_id = f"run-{self.run_seq}"
+        return self.active_run_id
+
+    def publish(self, payload: Dict[str, Any]) -> int:
+        """
+        Queue ``payload`` on every live socket of this session. Non-blocking.
+
+        Returns how many connections took the frame. A connection whose queue is
+        full drops the oldest frame and is counted by :class:`ClientFeed`, so this
+        never waits on - and never silently corrupts the view of - a slow browser.
+        """
+        sent = 0
+        for feed in tuple(self.feeds):
+            if feed.closed:
+                self.feeds.discard(feed)
+                continue
+            if feed.publish(payload):
+                sent += 1
+        return sent
+
+    async def close_feeds(self, *, final: Optional[Dict[str, Any]] = None, code: int = 1000) -> int:
+        """
+        Close every socket of this session, optionally after one last frame.
+
+        ``final`` goes through the same queue as everything else, so a reason
+        written just before eviction is delivered ahead of the close. Returns how
+        many connections were released.
+        """
+        feeds = tuple(self.feeds)
+        self.feeds.clear()
+        for feed in feeds:
+            await feed.aclose(final=final, code=code)
+        return len(feeds)
 
     def effective_ttl(self, ttl: float) -> float:
         """The idle lifetime that applies to this session."""
@@ -190,7 +248,7 @@ class SessionRegistry:
         if state is None:
             return None
         if state.is_stale(self.idle_ttl):
-            self.drop(session_id)
+            self.drop(session_id, reason="idle_timeout")
             return None
         self.touch(state)
         return state
@@ -201,15 +259,22 @@ class SessionRegistry:
             self._states.move_to_end(state.session_id)
 
     # -- removal -----------------------------------------------------------
-    def drop(self, session_id: str) -> bool:
+    def drop(self, session_id: str, *, reason: str = "dropped") -> bool:
         state = self._states.pop(session_id, None)
         if state is None:
             return False
+        state.evict_reason = reason
         self._dispose(state)
         return True
 
-    def sweep_expired(self) -> List[SessionState]:
-        """Drop every idle-expired state; returns what was removed."""
+    def sweep_expired(self, reason: str = "idle_timeout") -> List[SessionState]:
+        """
+        Drop every idle-expired state; returns what was removed.
+
+        Called by the dashboard's reaper task rather than only from request
+        handlers, because the sessions this is meant to reclaim are the ones that
+        have stopped sending requests.
+        """
         removed: List[SessionState] = []
         now = time.time()
         for sid in list(self._states.keys()):
@@ -218,8 +283,28 @@ class SessionRegistry:
                 continue
             if state.is_stale(self.idle_ttl, now):
                 removed.append(self._states.pop(sid))
+                removed[-1].evict_reason = reason
                 self._dispose(removed[-1])
         return removed
+
+    def sweep_interval_seconds(self) -> float:
+        """
+        How often an idle session must be re-checked, in seconds (0 = never).
+
+        Looking only when a request arrives is not a policy: a browser tab with a
+        live WebSocket and no traffic is exactly the idle session the TTL promises
+        to reclaim, and it would never be looked at again. So the app runs a
+        reaper on this interval.
+        """
+        override = getattr(self.config, "session_sweep_interval", None)
+        if override is not None:
+            return float(override)
+        if self.idle_ttl <= 0:
+            return 0.0
+        # At least four checks per TTL (so a session is not kept alive for twice
+        # its promised lifetime), never more than once a minute (the sweep walks
+        # the registry, so it should not be a hot loop on a small install).
+        return max(5.0, min(60.0, self.idle_ttl / 4.0))
 
     def clear(self) -> None:
         for sid in list(self._states.keys()):
@@ -240,6 +325,7 @@ class SessionRegistry:
             if victim_id is None:
                 victim_id = next(iter(self._states))  # plain LRU order
             state = self._states.pop(victim_id)
+            state.evict_reason = "capacity"
             logger.info(
                 "Evicting mesh session %s (%s, max_sessions=%d)",
                 victim_id[:8], "ephemeral" if state.ephemeral else "idle", self.max_sessions,
@@ -260,6 +346,7 @@ class SessionRegistry:
         now = time.time()
         return {
             "live_sessions": len(self._states),
+            "live_connections": sum(len(s.feeds) for s in self._states.values()),
             "max_sessions": self.max_sessions,
             "idle_ttl_seconds": self.idle_ttl,
             "oldest_idle_seconds": max(

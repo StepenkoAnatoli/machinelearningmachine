@@ -33,8 +33,23 @@ A modular orchestration system that enables AI modules to talk directly to each 
 - 📦 No third-party origins: Tailwind, FontAwesome, Marked, DOMPurify and
   Highlight.js are vendored, version-pinned, checksummed and audited (`npm audit`/`pip-audit` in CI); CSP is `default-src 'self'`
 - ⏱️ Input validation with plain-language errors, run/page-read cooldowns, login lockout
+- 🔒 An `OPENAI_API_KEY` in your shell is never used by the dashboard, and never sent
+  anywhere you did not aim it: providers configured by a browser session are built with
+  `allow_env_key=False`, and the CLI only dials out when you pass `--live` (which prints
+  the endpoint, model and where the key came from before it sends a byte)
+- 🧵 One run at a time per browser session - a second concurrent run is refused with a
+  `409` that names the run in flight, because agents, transcript and provider memory are
+  shared per session. A run that never answers is cut off after `--run-timeout` (504)
+- 🩺 A slow tab cannot stall a run: each connection has its own bounded outbox
+  (128 frames, drop-oldest), and when frames are dropped the client is told and
+  re-pulls the transcript instead of showing you a conversation with holes in it
+- 🧹 Idle sessions are actually reclaimed: a background sweep expires them, closes their
+  sockets with a visible "session released" notice, and the next request from that
+  browser starts clean rather than silently inheriting a mesh nobody owns
 - 🚫 What you still do **not** get: per-user authorisation beyond one shared token,
-  encryption at rest, or multi-worker scaling - see SECURITY.md §1 and §7
+  encryption at rest, or multi-worker scaling - see SECURITY.md §1 and §7. A run cannot
+  be cancelled mid-flight (it is bounded by `--run-timeout`), and a second run is refused
+  rather than queued
 
 **Intuitive & Accessible UX:**
 - 🎨 Toast notifications instead of jarring `alert()`/`confirm()`
@@ -57,7 +72,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 236 tests (221 Python + 15 jsdom XSS cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit` and a vendor-integrity check
+- 🧪 391 tests (367 Python + 24 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -98,8 +113,13 @@ A modular orchestration system that enables AI modules to talk directly to each 
     [Mock output vs. real output](#-mock-output-vs-real-output-read-this)).
   - ⚙️ Settings can point the modules at real **OpenAI (GPT-4o)**, **Anthropic (Claude 3.5)**,
     or **local Ollama / LMStudio / vLLM** backends. Keys are held in memory for your
-    browser session only, are never saved or returned by the API, and are only
-    *shape-checked* unless you tick **Verify the OpenAI key now** (one `GET /models` call).
+    browser session only, are never saved or returned by the API, are only
+    *shape-checked* unless you tick **Verify the OpenAI key now** (one `GET /models` call),
+    and a base URL you type there is checked against the same SSRF policy as the page
+    reader - on a publicly reachable bind, private/loopback addresses are refused
+    (`--allow-insecure-provider-urls` re-enables them for a machine that really does run
+    its own Ollama). In the terminal, `run --live openai` is what reads your environment
+    keys.
   - A live provider that fails raises `ProviderError`: you either get a reply visibly
     marked `provider failed → simulated`, or - with `--strict-provider-errors` - a 502.
 
@@ -190,7 +210,14 @@ place, so a misspelled value never silently enables a feature.
 | `MACHINELEARNINGMACHINE_ALLOW_ORIGINS` | Comma-separated CORS origins to add (avoid unless needed) |
 | `MACHINELEARNINGMACHINE_SESSIONS_DIR` | Where saved transcripts live (default `~/.module_mesh/sessions`) |
 | `MACHINELEARNINGMACHINE_URL_ALLOWLIST` | Hosts the page reader may fetch - *replaces* the private-address blocklist |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Used by `run` mode; the dashboard never reads these |
+| `MACHINELEARNINGMACHINE_RUN_TIMEOUT` | Seconds a single dialogue may run before it is failed with a 504 (5-3600) |
+| `MACHINELEARNINGMACHINE_SESSION_TTL` | Minutes an idle browser session keeps its mesh (swept, not just counted) |
+| `MACHINELEARNINGMACHINE_MAX_SESSIONS` | How many browser sessions keep a live mesh at once (LRU-evicted) |
+| `MACHINELEARNINGMACHINE_ALLOW_INSECURE_PROVIDER_URLS` | Lets a *publicly bound* dashboard dial out to private/loopback provider URLs. Off unless `1`/`true`/`yes`/`on` |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Read **only** by `run --live …` (and by `OpenAIProvider()`/`AnthropicProvider()` if you construct them yourself). `serve` never reads them |
+
+A numeric setting that is not a number stops startup with a message naming the variable
+(`SESSION_TTL=5m` would otherwise leave a server running a limit nobody chose).
 
 <details>
 <summary><strong>Running it on a network (read SECURITY.md first)</strong></summary>
@@ -236,6 +263,22 @@ py -c "import sys; print(sys.executable)"
 ```
 
 Other modules import only what they need: the simulation engine and CLI dialogues work with `pydantic` alone, and `fastapi`/`uvicorn` are only required for the web dashboard.
+(`requirements.txt` installs all of them in one go, which is why the launch scripts need a single command.)
+
+#### Troubleshooting: what the dashboard is telling you
+
+The dashboard's messages quote the server verbatim, so these are the strings that
+actually appear and what to do about each.
+
+| You see | What happened | What to do |
+| --- | --- | --- |
+| *A run is already in progress in this browser session (run-3)* | One run per session is the rule: agents, transcript and export are shared, so a second concurrent run would be written into the first. | Wait for it. A run that never finishes is stopped by `--run-timeout` and reported as `504`. |
+| *Please wait 0.8s between runs* | The per-session run cadence gate (also applied to page reads). | Nothing - the button re-enables itself. |
+| *the run was stopped after 180s: a provider accepted the request and never answered* | A live endpoint that hangs. The run is cut off rather than left running against your session. | Check the base URL/model in Settings; raise `--run-timeout` for a slow local model. |
+| *Some messages were skipped while this tab was not keeping up (N) - refetched* | This tab's send queue (128 frames) overflowed - a backgrounded tab, a stalled connection. The transcript on the bus is intact; only this tab missed frames, so it re-pulled them. | Nothing. If it happens on every run, close other tabs on that session. |
+| *Session released - Reload* | The idle sweep or capacity limit released this tab's mesh, so the socket was closed (code 4408) instead of letting you type into a session nobody owns. | Reload for a fresh session. Saved sessions are untouched - this is in-memory state only. |
+| badge *simulated* / *provider failed → simulated* | No live provider, or the live call failed and the labelled simulator answered. | See [Mock output vs. real output](#-mock-output-vs-real-output-read-this). |
+| *1 reply was longer than the 50,000-character message limit, so the transcript is cut short* | An answer exceeded the protocol's content limit, so it was clamped rather than dropped. The message says so in the transcript too. | Ask for something narrower, or raise `Message.model_config` limits if you really need more. |
 
 ---
 
@@ -337,6 +380,44 @@ python3 -m machinelearningmachine.cli run --topology p2p --prompt "Build a retry
 
 # 5. Hear the dialogue: read it with your computer's built-in voice
 python3 -m machinelearningmachine.cli run --topology debate --prompt "Kafka vs Redis" --speak
+
+# 6. No simulated pauses (all four topologies honour this; it used to be two of them)
+python3 -m machinelearningmachine.cli run --topology hub --prompt "Plan the migration" --no-delay
+```
+
+### Real answers from the terminal
+
+`run` is the simulator unless you say otherwise - deliberately, because the simulator is
+what makes the demo reproducible, and because a key in your shell must never be able to
+turn a demo into a paid API call on its own.
+
+```bash
+# Uses OPENAI_API_KEY (or ANTHROPIC_API_KEY); prints what it is about to send and where.
+python3 -m machinelearningmachine.cli run --topology p2p --prompt "Design a retry decorator" --live openai
+
+# A local OpenAI-compatible backend needs no key at all.
+python3 -m machinelearningmachine.cli run --live openai --base-url http://localhost:11434/v1 --prompt "…"
+
+python3 -m machinelearningmachine.cli run --live both --provider-timeout 30 --prompt "…"   # both vendors
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--live {openai,anthropic,both}` | Which modules get real providers. `--live openai` wires `@gpt` and `@copilot`; `anthropic` wires `@claude` and `@arena-ai`; `both` wires all four |
+| `--base-url URL` | Send the live calls somewhere else (Ollama, vLLM, LM Studio, a proxy). Validated by the same outbound policy as the dashboard |
+| `--provider-timeout SECONDS` | Per-request ceiling for a live call (1-900) |
+| `--strict-provider-errors` | A provider failure fails the run instead of falling back to the labelled simulator |
+
+`--live openai` with no `OPENAI_API_KEY` and no `--base-url` is refused with exit code 1
+and a message that names both fixes; it does not quietly run the simulator instead.
+
+### The dashboard from the terminal
+
+```bash
+python3 -m machinelearningmachine.cli serve                      # 127.0.0.1:8000
+python3 -m machinelearningmachine.cli serve --run-timeout 60     # cut off a stuck provider sooner
+python3 -m machinelearningmachine.cli serve --session-ttl 30 --max-sessions 16
+python3 -m machinelearningmachine.cli serve --help               # every switch, with its default
 ```
 
 ---
@@ -409,27 +490,38 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 221 tests
-node --test tests/js/sanitize.test.mjs       # 15 XSS/sanitizer tests (needs: npm install)
-ruff check machinelearningmachine tests scripts  # lint
+pytest -q                                    # 367 tests, all offline
+node --test tests/js/*.test.mjs          # 24 jsdom browser tests (needs: npm ci)
+ruff check machinelearningmachine tests scripts examples   # lint
+python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
+python scripts/bench_sessions.py                       # saved-session listing: 1.3 ms vs 213 ms
 ```
 
 ```
 $ pytest -q
-........................................................................ [ 42%]
-........................................................................ [ 85%]
+........................................................................ [ 19%]
 ........................................................................ [ 39%]
+........................................................................ [ 58%]
 ........................................................................ [ 78%]
-........................................                                 [100%]
-221 passed in 5.4s
+........................................................................ [ 98%]
+.......                                                                  [100%]
+367 passed in 22.6s
 ```
 
-Coverage by area: protocol/bus bounds, agents and topologies, provider provenance and
-failure handling, the SSRF policy (loopback/private/link-local/metadata/redirect
-matrix), authentication, per-session isolation, saved-session namespacing, the CLI's
-bind policy and the env layer, packaging, and the dashboard's headers/asset
-integrity. `tests/test_docs_are_accurate.py` even fails the build when the test
-count in this README stops matching reality - the claim is checked, not curated.
+Coverage by area: protocol/bus bounds, agents and topologies, provider provenance,
+retry and failure handling, reply/context length limits, the SSRF policy
+(loopback/private/link-local/metadata/redirect matrix) *and* the same policy applied to
+provider base URLs, ambient-key isolation, authentication, per-session isolation,
+one-run-at-a-time, WebSocket backpressure and frame-loss recovery, the session reaper
+and eviction notices, saved-session atomicity and listing, the CLI's bind policy, its
+`--live` opt-in and the env layer, packaging, and the dashboard's headers/asset
+integrity. `tests/test_docs_are_accurate.py` fails the build when the test count in
+this README stops matching reality - the claim is checked, not curated.
+
+`scripts/e2e_server_check.py` is the one check that does not use `TestClient`: it
+drives a real uvicorn process over real HTTP and a real WebSocket, with two browser
+sessions, and CI runs it against the installed wheel. It is opt-in locally because it
+needs a server on `--base`.
 
 > The test count is asserted by CI rather than by a hand-updated badge in this README.
 > CI also rebuilds `static/vendor/` and fails if it drifts from the committed manifest.
@@ -477,18 +569,21 @@ machinelearningmachine/
 │   │   ├── pipeline.py      # Sequential pipeline relay
 │   │   ├── debate.py        # Collaborative multi-agent debate
 │   │   └── hub_spoke.py     # Supervisor orchestrator
-│   ├── netguard.py          # SSRF boundary: URL/IP policy, redirects, byte+type caps
+│   ├── netguard.py          # SSRF boundary: URL/IP policy, redirects, byte+type caps,
+│   │                        #   and the provider base-URL policy (validate_provider_target)
 │   ├── server/
 │   │   ├── app.py           # FastAPI REST + WebSocket hub (session-scoped)
 │   │   ├── config.py        # ServerConfig + the bind/auth policy (validate_bind_policy)
-│   │   ├── state.py         # Bounded per-browser session registry (meshes, keys, sockets)
+│   │   ├── state.py         # Bounded per-browser session registry, sweeper, run lock
+│   │   ├── feed.py          # Per-connection outbox: bounded, drop-oldest, never stalls a run
 │   │   └── static/
 │   │       ├── index.html   # Dashboard markup (no CDN tags, no inline script)
 │   │       ├── app.js       # WebSocket streaming, Read-Aloud Studio, sessions UI
 │   │       ├── markdown.js  # The XSS boundary: marked + DOMPurify allowlist (tested in tests/js)
 │   │       ├── style.css    # Dark-mode styling incl. transcript + provenance badges
 │   │       └── vendor/      # Pinned Tailwind/FontAwesome/marked/DOMPurify/highlight.js + MANIFEST.json
-│   ├── sessions.py          # Session save/load/delete (JSON under ~/.module_mesh/sessions/<client>)
+│   ├── sessions.py          # Session save/load/delete: atomic writes, header index for
+│   │                        #   cheap listings, per-client folder, trim is recorded
 │   ├── tts.py               # OS text-to-speech for the CLI (say / SAPI / espeak-ng)
 │   ├── cli.py               # Command-line interface (--speak, --export, serve)
 │   └── mesh.py              # Central AgentMesh API entry point
@@ -496,9 +591,10 @@ machinelearningmachine/
 │   ├── 01_arena_talks_to_copilot.py
 │   ├── 02_copilot_to_claude_debate.py
 │   └── 03_four_agent_pipeline.py
-│   ├── topologies/ ... (unchanged)
 ├── scripts/
-│   └── build_vendor.py      # Regenerate static/vendor/ from pinned npm deps
+│   ├── build_vendor.py      # Regenerate static/vendor/ from pinned npm deps
+│   ├── bench_sessions.py    # Times the saved-session listing against the old full parse
+│   └── e2e_server_check.py  # End-to-end pass against a running server (HTTP + WS)
 ├── tests/
 │   ├── test_protocol.py     # message + bus bounds
 │   ├── test_agents.py       # agents, memory limits
@@ -506,12 +602,24 @@ machinelearningmachine/
 │   ├── test_server.py       # API basics
 │   ├── test_sessions.py     # saved sessions + per-client namespacing
 │   ├── test_netguard.py     # SSRF policy matrix (48 cases, all offline)
+│   ├── test_provider_url_policy.py   # provider base URLs meet the same policy, per bind
+│   ├── test_env_key_isolation.py     # an ambient OPENAI_API_KEY is never used or sent
+│   ├── test_provider_retry.py        # retry budget, backoff, attempt accounting
+│   ├── test_provider_output_bounds.py# long replies and long prompts stay loadable
+│   ├── test_run_serialization.py     # one run at a time, 409, no interleaved history
+│   ├── test_ws_backpressure.py       # stalled tabs, dropped frames, gap notice, recovery
+│   ├── test_session_lifecycle.py     # the reaper, eviction reasons, close 4408
+│   ├── test_session_storage.py       # atomic saves, header listings, trimming, pruning
+│   ├── test_cli_live.py              # --live opt-in, --no-delay, flag/env precedence
 │   ├── test_server_auth.py  # bind policy, token gate, WS auth, lockout
 │   ├── test_server_isolation.py  # two browsers cannot touch each other's state
 │   ├── test_provider_provenance.py  # simulated vs live vs failed-provider labelling
 │   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
-│   └── js/sanitize.test.mjs # 15 XSS/invariant tests through the real sanitizer (jsdom)
-├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents, vendor integrity, pip-audit
+│   └── js/
+│       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
+│       └── client-lifecycle.test.mjs  # 9 tests: gap refetch, released session, 409, badges
+├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,
+│                            #   vendor integrity, jsdom, pip-audit, npm audit, secret scan
 ├── .github/dependabot.yml   # pip + npm + actions
 ├── constraints.txt           # the pinned reference environment
 ├── package.json              # pinned versions for the vendored browser assets

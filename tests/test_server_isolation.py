@@ -8,6 +8,8 @@ where each browser gets its own mesh, provider config, rate-limit bucket and
 WebSocket set, and where nothing crosses between them.
 """
 
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -188,39 +190,46 @@ def test_meshes_do_not_share_a_message_bus():
 async def test_bus_events_only_reach_the_owning_session():
     """A message dispatched in mesh A must not be sent to mesh B's sockets."""
 
-    sockets = {"a": [], "b": []}
-
-    class FakeSocket:
-        def __init__(self, bucket):
-            self.bucket = bucket
+    class RecordingSocket:
+        def __init__(self):
             self.sent = []
 
         async def send_json(self, payload):
             self.sent.append(payload)
 
-        async def close(self):
-            self.bucket.remove(self)
+        async def close(self, code=1000):
+            self.closed = code
 
     registry = SessionRegistry(max_sessions=4, idle_ttl=3600, config=ServerConfig(),
                                 mesh_factory=lambda cfg: AgentMesh())
     a = registry.create("client-a")
     b = registry.create("client-b")
-    sock_a, sock_b = FakeSocket(sockets["a"]), FakeSocket(sockets["b"])
-    a.websockets.add(sock_a)
-    b.websockets.add(sock_b)
+    sock_a, sock_b = RecordingSocket(), RecordingSocket()
 
-    # What the app wires up per session: a listener bound to *that* state only.
+    # What the app wires up per session: a feed owned by *that* state, plus a
+    # bus listener bound to that state only.
+    from machinelearningmachine.server.feed import ClientFeed
+
+    feed_a = ClientFeed(sock_a).start()
+    feed_b = ClientFeed(sock_b).start()
+    a.feeds.add(feed_a)
+    b.feeds.add(feed_b)
+
     def bind(state):
         async def on_message(msg):
-            for ws in list(state.websockets):
-                await ws.send_json({"type": "new_message", "message": msg.to_dict()})
+            state.publish({"type": "new_message", "message": msg.to_dict()})
         return on_message
 
     a.mesh.bus.add_global_listener(bind(a))
     b.mesh.bus.add_global_listener(bind(b))
 
     await a.mesh.get_agent("copilot").broadcast("only for session a")
+    await asyncio.sleep(0)   # let the pump tasks drain their queues
+    await asyncio.sleep(0)
 
     assert len(sock_a.sent) == 1 and sock_a.sent[0]["message"]["content"] == "only for session a"
     assert sock_b.sent == [], "session B must not see session A's traffic"
     assert b.mesh.get_history() == []
+
+    feed_a.abort()
+    feed_b.abort()

@@ -1,9 +1,13 @@
 name: CI
 
-# What "30 tests passing" is supposed to mean, enforced on every push:
-# the suite runs on three Python versions, the linter runs, the vendored
-# browser assets are verified against their manifest, the XSS suite runs under
-# jsdom, and dependencies are audited for known CVEs.
+# What "the tests pass" is supposed to mean, enforced on every push:
+# the suite runs on three Python versions, the linter runs over everything that
+# is meant to be code (examples included - three of them were lint-broken while
+# their own job reported green), the vendored browser assets are verified against
+# their manifest, the browser suites run under jsdom (XSS payloads and the client's
+# own survival behaviour), dependencies are audited for
+# known CVEs, and the built wheel is *installed and served* before it is called
+# shippable.
 
 on:
   push:
@@ -49,7 +53,9 @@ jobs:
           fi
 
       - name: Lint
-        run: ruff check machinelearningmachine tests scripts
+        # examples/ is in scope on purpose: it is documentation that runs, and a
+        # file the linter never looks at is a file that silently drifts.
+        run: ruff check machinelearningmachine tests scripts examples
 
       - name: Test
         # -p no:cacheprovider keeps the run hermetic; the suite is offline by
@@ -102,6 +108,40 @@ jobs:
           print(f"ok - {wheel} contains the dashboard and its vendored assets")
           PY
 
+      - name: Serve the installed wheel
+        # "It imports" is not "it serves". This is the only job that exercises the
+        # artifact a user actually gets, from a clean venv, over real HTTP.
+        run: |
+          python -m venv .smoke
+          # No extra to name: pyproject's dependency list is dynamic and reads
+          # requirements.txt, which already carries fastapi/uvicorn/aiohttp. (An
+          # earlier draft of this step wrote "$wheel[web]" and pip answered
+          # "does not provide the extra" - a reminder that install advice has to
+          # be tested too.)
+          wheel="$(ls dist/*.whl | head -1)"
+          .smoke/bin/pip install --quiet "$wheel"
+          .smoke/bin/python -m machinelearningmachine --help > /dev/null
+          .smoke/bin/module-mesh serve --port 8765 > server.log 2>&1 &
+          server_pid=$!
+          trap "kill $server_pid 2>/dev/null || true" EXIT
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8765/health > /dev/null 2>&1; then break; fi
+            sleep 0.5
+            if [ "$i" = 40 ]; then echo "the packaged server never came up:"; cat server.log; exit 1; fi
+          done
+          curl -fsS http://127.0.0.1:8765/health | grep -q '"status":"ok"'
+          curl -fsS http://127.0.0.1:8765/api/agents | grep -q 'arena-ai'
+          curl -fsS http://127.0.0.1:8765/static/app.js | grep -q 'handleWsEvent'
+          curl -fsS http://127.0.0.1:8765/ | grep -q 'Inter-Module Agent Mesh'
+          curl -fsS -X POST http://127.0.0.1:8765/api/run \
+            -H 'Content-Type: application/json' \
+            -d '{"topology":"pipeline","prompt":"Design a token bucket rate limiter"}' \
+            | grep -q '"status":"completed"'
+          # The real end-to-end pass: two browser sessions, a WebSocket, a refused
+          # concurrent run, saved-transcript isolation. No TestClient involved.
+          .smoke/bin/python scripts/e2e_server_check.py --base http://127.0.0.1:8765
+          echo "ok - the wheel serves the dashboard, the mesh and a real run"
+
   frontend:
     name: vendor integrity + XSS suite
     runs-on: ubuntu-latest
@@ -134,8 +174,11 @@ jobs:
           python3 scripts/build_vendor.py
           git diff --exit-code machinelearningmachine/server/static/vendor \
             || (echo "vendor/ is out of sync with package.json - run: npm install && python3 scripts/build_vendor.py" && exit 1)
-      - name: XSS / sanitizer tests
-        run: node --test tests/js/sanitize.test.mjs
+      - name: Browser tests (jsdom)
+        # The shell expands the glob; node does not. Quoting it would ask node to
+        # open a file literally named "tests/js/*.test.mjs", which only works on
+        # node >= 21 (glob support in --test) and fails on the node 20 runner.
+        run: node --test tests/js/*.test.mjs
 
   security:
     name: dependency audit

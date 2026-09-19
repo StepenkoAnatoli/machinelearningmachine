@@ -28,6 +28,17 @@ from .topologies.pipeline import PipelineTopology
 logger = logging.getLogger("AgentMesh")
 
 
+def _delay_kwargs(name: str, value: Optional[float]) -> Dict[str, float]:
+    """
+    ``{name: value}`` when the caller named a delay, otherwise nothing at all.
+
+    Passing nothing leaves the default on the topology, which is the only place
+    that knows what "the demo pace" is. Re-declaring it here is how a default
+    drifts into two different values.
+    """
+    return {} if value is None else {name: float(value)}
+
+
 class AgentMesh:
     """
     Main communication mesh managing agents, topologies, message routing, and sessions.
@@ -119,6 +130,7 @@ class AgentMesh:
         to_agent_id: str,
         prompt: str,
         turns: int = 4,
+        inter_turn_delay: Optional[float] = None,
     ) -> List[Message]:
         """
         Direct peer-to-peer dialogue between two modules.
@@ -144,13 +156,20 @@ class AgentMesh:
             available = ", ".join(self.agents.keys())
             raise ValueError(f"Agent '{to_agent_id}' not found. Available: {available}")
 
-        topology = P2PTopology(agent_a=agent_a, agent_b=agent_b, bus=self.bus, max_turns=turns)
+        topology = P2PTopology(
+            agent_a=agent_a,
+            agent_b=agent_b,
+            bus=self.bus,
+            max_turns=turns,
+            **_delay_kwargs("inter_turn_delay", inter_turn_delay),
+        )
         return await topology.execute(prompt)
 
     async def run_pipeline(
         self,
         prompt: str,
         agent_ids: Optional[List[str]] = None,
+        inter_step_delay: Optional[float] = None,
     ) -> List[Message]:
         """
         Run a sequential relay pipeline across an ordered sequence of agents.
@@ -182,7 +201,9 @@ class AgentMesh:
         if not sequence:
             raise ValueError("No valid agents found for pipeline sequence")
 
-        topology = PipelineTopology(agents_sequence=sequence, bus=self.bus)
+        topology = PipelineTopology(
+            agents_sequence=sequence, bus=self.bus, **_delay_kwargs("inter_step_delay", inter_step_delay)
+        )
         return await topology.execute(prompt)
 
     async def run_debate(
@@ -190,6 +211,7 @@ class AgentMesh:
         prompt: str,
         agent_ids: Optional[List[str]] = None,
         rounds: int = 1,
+        inter_turn_delay: Optional[float] = None,
     ) -> List[Message]:
         """
         Run a multi-agent debate session.
@@ -222,7 +244,10 @@ class AgentMesh:
         if not participants:
             raise ValueError("No valid participants for debate")
 
-        topology = DebateTopology(agents=participants, bus=self.bus, rounds=rounds)
+        topology = DebateTopology(
+            agents=participants, bus=self.bus, rounds=rounds,
+            **_delay_kwargs("inter_turn_delay", inter_turn_delay),
+        )
         return await topology.execute(prompt)
 
     async def run_hub_and_spoke(
@@ -230,6 +255,7 @@ class AgentMesh:
         prompt: str,
         hub_id: str = "arena-ai",
         spoke_ids: Optional[List[str]] = None,
+        inter_step_delay: Optional[float] = None,
     ) -> List[Message]:
         """
         Run supervisor orchestration: Hub agent plans, delegates to spokes, and aggregates.
@@ -266,7 +292,10 @@ class AgentMesh:
         if hub_id in [s.agent_id for s in spokes]:
             raise ValueError("Hub agent cannot also be a spoke")
 
-        topology = HubSpokeTopology(hub_agent=hub, spoke_agents=spokes, bus=self.bus)
+        topology = HubSpokeTopology(
+            hub_agent=hub, spoke_agents=spokes, bus=self.bus,
+            **_delay_kwargs("inter_step_delay", inter_step_delay),
+        )
         return await topology.execute(prompt)
 
     #: Agent IDs that exist in every fresh mesh (recreated, never deleted).
