@@ -49,7 +49,7 @@ jobs:
           fi
 
       - name: Lint
-        run: ruff check machinelearningmachine tests
+        run: ruff check machinelearningmachine tests scripts
 
       - name: Test
         # -p no:cacheprovider keeps the run hermetic; the suite is offline by
@@ -92,6 +92,10 @@ jobs:
               "server/static/vendor/dompurify/purify.min.js",
               "server/static/vendor/marked/marked.min.js",
               "server/static/vendor/tailwind.css",
+              # Vendoring without the third-party license texts would be a
+              # compliance bug dressed up as a security fix.
+              "server/static/vendor/licenses/marked.txt",
+              "server/static/vendor/licenses/tailwindcss.txt",
           ]
           missing = [r for r in required if not any(n.endswith(r) for n in names)]
           assert not missing, f"wheel is missing: {missing}"

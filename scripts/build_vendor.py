@@ -42,36 +42,43 @@ STATIC = ROOT / "machinelearningmachine" / "server" / "static"
 VENDOR = STATIC / "vendor"
 NODE_MODULES = ROOT / "node_modules"
 
-#: (source inside node_modules, destination inside static/vendor, license file)
+#: (source inside node_modules, destination inside static/vendor)
 ASSETS = [
-    ("marked/marked.min.js", "marked/marked.min.js", "marked/LICENSE"),
-    ("dompurify/dist/purify.min.js", "dompurify/purify.min.js", "dompurify/LICENSE"),
-    (
-        "@highlightjs/cdn-assets/highlight.min.js",
-        "highlight.js/highlight.min.js",
-        "@highlightjs/cdn-assets/LICENSE",
-    ),
+    ("marked/marked.min.js", "marked/marked.min.js"),
+    ("dompurify/dist/purify.min.js", "dompurify/purify.min.js"),
+    ("@highlightjs/cdn-assets/highlight.min.js", "highlight.js/highlight.min.js"),
     (
         "@highlightjs/cdn-assets/styles/atom-one-dark.min.css",
         "highlight.js/styles/atom-one-dark.min.css",
-        "@highlightjs/cdn-assets/LICENSE",
     ),
-    (
-        "@fortawesome/fontawesome-free/css/all.min.css",
-        "fontawesome/css/all.min.css",
-        "@fortawesome/fontawesome-free/LICENSE.txt",
-    ),
+    ("@fortawesome/fontawesome-free/css/all.min.css", "fontawesome/css/all.min.css"),
     (
         "@fortawesome/fontawesome-free/webfonts/fa-solid-900.woff2",
         "fontawesome/webfonts/fa-solid-900.woff2",
-        "@fortawesome/fontawesome-free/LICENSE.txt",
     ),
     (
         "@fortawesome/fontawesome-free/webfonts/fa-regular-400.woff2",
         "fontawesome/webfonts/fa-regular-400.woff2",
-        "@fortawesome/fontawesome-free/LICENSE.txt",
     ),
 ]
+
+#: License texts shipped beside the assets that came from them, keyed by the
+#: filename they get inside static/vendor/licenses/. Explicit rather than derived
+#: from ASSETS on purpose: the first version of this script guessed the name and
+#: silently skipped marked, whose file is LICENSE.md, not LICENSE - a missing
+#: license is exactly the kind of thing a build must not be quiet about, so a
+#: missing source below is a hard error.
+LICENSES = {
+    "marked.txt": "marked/LICENSE.md",
+    "dompurify.txt": "dompurify/LICENSE",
+    # DOMPurify is dual-licensed; ship both texts and say so in the note.
+    "dompurify-MPL.txt": "dompurify/LICENSE-MPL",
+    "highlightjs.txt": "@highlightjs/cdn-assets/LICENSE",
+    "fontawesome.txt": "@fortawesome/fontawesome-free/LICENSE.txt",
+    # tailwind.css here is *compiled* from this project's markup with the
+    # tailwindcss build tool, whose own license must travel with it.
+    "tailwindcss.txt": "tailwindcss/LICENSE",
+}
 
 
 def pkg_version(name: str) -> str:
@@ -186,7 +193,7 @@ def main() -> int:
         "files": {},
     }
 
-    for src_rel, dst_rel, license_rel in ASSETS:
+    for src_rel, dst_rel in ASSETS:
         src = NODE_MODULES / src_rel
         if not src.exists():
             raise SystemExit(f"missing {src} - run `npm install`.")
@@ -203,11 +210,30 @@ def main() -> int:
             "bytes": len(data),
             "sri": sri(data),
         }
-        license_src = NODE_MODULES / license_rel
-        if license_src.exists():
-            lic_dst = out / "licenses" / (Path(license_rel).name.replace("LICENSE", pkg_name.replace("@", "").replace("/", "-")) + ".txt")
-            shutil.copyfile(license_src, lic_dst)
         print(f"  {dst_rel:<48} {len(data):>8} bytes")
+
+    # Every vendored package must arrive with its license text, and the build
+    # fails rather than quietly omitting one.
+    missing = []
+    for dst_name, src_rel in sorted(LICENSES.items()):
+        src = NODE_MODULES / src_rel
+        if not src.exists():
+            missing.append(f"{src_rel} (for licenses/{dst_name})")
+            continue
+        shutil.copyfile(src, out / "licenses" / dst_name)
+    if missing:
+        raise SystemExit(
+            "vendored licenses missing from node_modules - the assets cannot ship "
+            "without them:\n  " + "\n  ".join(missing)
+        )
+    manifest["licenses"] = {
+        "note": (
+            "One file per vendored package, copied from the package itself. "
+            "DOMPurify is dual-licensed (Apache-2.0 / MPL-2.0), so both texts ship."
+        ),
+        "files": dict(sorted(LICENSES.items())),
+    }
+    print(f"  {'licenses/':<48} {len(LICENSES):>8} files")
 
     build_tailwind(out)
     tailwind_data = (out / "tailwind.css").read_bytes()

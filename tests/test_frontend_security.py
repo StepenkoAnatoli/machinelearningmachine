@@ -21,7 +21,8 @@ from fastapi.testclient import TestClient
 from machinelearningmachine.server.app import create_app
 from machinelearningmachine.server.config import ServerConfig
 
-STATIC = Path(__file__).resolve().parent.parent / "machinelearningmachine" / "server" / "static"
+ROOT = Path(__file__).resolve().parents[1]
+STATIC = ROOT / "machinelearningmachine" / "server" / "static"
 VENDOR = STATIC / "vendor"
 
 EXTERNAL_URL = re.compile(r"""(?:src|href)\s*=\s*["']\s*(?:https?:)?//([^/"']+)""", re.I)
@@ -153,3 +154,46 @@ def test_static_directory_has_no_source_maps_or_sourcemaps_referenced():
     for path in [p for p in VENDOR.rglob("*.js") if p.is_file()]:
         tail = path.read_text(encoding="utf-8", errors="replace")[-400:]
         assert "sourceMappingURL=http" not in tail, f"{path.name} fetches a remote source map"
+
+
+LICENSE_MARKERS = (
+    "mit license", "permission is hereby granted", "apache license",
+    "mozilla public license", "bsd", "creative commons", "sil open font",
+    "license information",
+)
+
+
+def test_every_vendored_package_ships_its_license_text():
+    """
+    Vendoring without the license texts would be a compliance bug dressed up as a
+    security fix, so the presence and shape of each text is checked here.
+    """
+    manifest = json.loads((VENDOR / "MANIFEST.json").read_text(encoding="utf-8"))
+    lic_dir = VENDOR / "licenses"
+    assert lic_dir.is_dir(), "no licenses directory - run scripts/build_vendor.py"
+    files = sorted(p.name for p in lic_dir.glob("*.txt"))
+    packages = {info["package"] for info in manifest["files"].values()}
+    assert len(files) >= len(packages), (
+        f"{len(files)} license files cannot cover {len(packages)} vendored packages: {sorted(packages)}"
+    )
+    for path in lic_dir.glob("*.txt"):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        assert len(text) > 200, f"{path.name} looks like a stub, not a license"
+        assert any(marker in text.lower() for marker in LICENSE_MARKERS), (
+            f"{path.name} does not read like a license text"
+        )
+    # The manifest lists them, so an upstream rename is a loud build failure
+    # rather than a missing file in the shipped wheel.
+    assert set(manifest["licenses"]["files"]) == {p.name for p in lic_dir.glob("*.txt")}
+
+
+def test_vendored_files_do_not_match_the_build_script_by_accident():
+    """ASSETS/LICENSES in scripts/build_vendor.py stay in step with the tree."""
+    script = (ROOT / "scripts" / "build_vendor.py").read_text(encoding="utf-8")
+    manifest = json.loads((VENDOR / "MANIFEST.json").read_text(encoding="utf-8"))
+    for rel in manifest["files"]:
+        if rel == "tailwind.css":
+            continue  # built, not copied
+        assert Path(rel).name in script or rel.split("/")[-1] in script, (
+            f"{rel} is in the manifest but not named by the build script"
+        )

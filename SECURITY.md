@@ -167,7 +167,8 @@ input. Rules the frontend follows (`static/markdown.js`):
   first DOMPurify version vendored here (3.1.6) had 20 open advisories.
 
 The XSS payload corpus that the regex filter used to miss is now an executable
-test: `node --test tests/js/sanitize.test.mjs` (jsdom, 13 tests).
+test: `node --test tests/js/sanitize.test.mjs` (jsdom, 15 tests, including the
+invariant that the app itself never interpolates data into HTML).
 
 `'unsafe-inline'` in `style-src` is deliberate (agent chips set colours via the
 CSSOM); `script-src` has no inline allowance, which is why `index.html` contains

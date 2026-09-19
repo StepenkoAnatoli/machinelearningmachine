@@ -51,5 +51,16 @@
     }
   },
   "generated_by": "scripts/build_vendor.py",
+  "licenses": {
+    "files": {
+      "dompurify-MPL.txt": "dompurify/LICENSE-MPL",
+      "dompurify.txt": "dompurify/LICENSE",
+      "fontawesome.txt": "@fortawesome/fontawesome-free/LICENSE.txt",
+      "highlightjs.txt": "@highlightjs/cdn-assets/LICENSE",
+      "marked.txt": "marked/LICENSE.md",
+      "tailwindcss.txt": "tailwindcss/LICENSE"
+    },
+    "note": "One file per vendored package, copied from the package itself. DOMPurify is dual-licensed (Apache-2.0 / MPL-2.0), so both texts ship."
+  },
   "note": "Browser assets shipped with the app so the dashboard needs no CDN. Do not edit by hand - regenerate with `npm install && python3 scripts/build_vendor.py`."
 }

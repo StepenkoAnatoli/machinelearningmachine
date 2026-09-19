@@ -57,7 +57,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 197 tests (184 Python + 13 jsdom XSS cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit` and a vendor-integrity check
+- 🧪 236 tests (221 Python + 15 jsdom XSS cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit` and a vendor-integrity check
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -409,9 +409,9 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 184 tests
-node --test tests/js/sanitize.test.mjs       # 13 XSS/sanitizer tests (needs: npm install)
-ruff check machinelearningmachine tests      # lint
+pytest -q                                    # 221 tests
+node --test tests/js/sanitize.test.mjs       # 15 XSS/sanitizer tests (needs: npm install)
+ruff check machinelearningmachine tests scripts  # lint
 ```
 
 ```
@@ -421,13 +421,15 @@ $ pytest -q
 ........................................................................ [ 39%]
 ........................................................................ [ 78%]
 ........................................                                 [100%]
-184 passed in 5.3s
+221 passed in 5.4s
 ```
 
 Coverage by area: protocol/bus bounds, agents and topologies, provider provenance and
 failure handling, the SSRF policy (loopback/private/link-local/metadata/redirect
 matrix), authentication, per-session isolation, saved-session namespacing, the CLI's
-bind policy, packaging, and the dashboard's headers/asset integrity.
+bind policy and the env layer, packaging, and the dashboard's headers/asset
+integrity. `tests/test_docs_are_accurate.py` even fails the build when the test
+count in this README stops matching reality - the claim is checked, not curated.
 
 > The test count is asserted by CI rather than by a hand-updated badge in this README.
 > CI also rebuilds `static/vendor/` and fails if it drifts from the committed manifest.
@@ -508,7 +510,7 @@ machinelearningmachine/
 │   ├── test_server_isolation.py  # two browsers cannot touch each other's state
 │   ├── test_provider_provenance.py  # simulated vs live vs failed-provider labelling
 │   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
-│   └── js/sanitize.test.mjs # 13 XSS payloads through the real sanitizer (jsdom)
+│   └── js/sanitize.test.mjs # 15 XSS/invariant tests through the real sanitizer (jsdom)
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents, vendor integrity, pip-audit
 ├── .github/dependabot.yml   # pip + npm + actions
 ├── constraints.txt           # the pinned reference environment
@@ -536,9 +538,20 @@ machinelearningmachine/
 ## 📄 License
 
 MIT - see [LICENSE](LICENSE). Vendored browser assets keep their own licenses under
-`machinelearningmachine/server/static/vendor/licenses/` (MIT for marked/DOMPurify/
-Tailwind/highlight.js, CC BY 4.0 / OFL for FontAwesome's CSS and fonts); the manifest
-in `static/vendor/MANIFEST.json` records each package's exact version and hash.
+`machinelearningmachine/server/static/vendor/licenses/`, one per package, copied
+verbatim by `scripts/build_vendor.py` (which fails the build if one is missing, since
+guessing the filename once silently dropped marked's):
+
+| Vendored | License |
+| --- | --- |
+| marked | MIT |
+| DOMPurify | Apache-2.0 **or** MPL-2.0 (dual-licensed; both texts ship) |
+| highlight.js | BSD-3-Clause |
+| Tailwind (compiled `tailwind.css`) | MIT |
+| FontAwesome icons / fonts / code | CC BY 4.0 / SIL OFL 1.1 / MIT |
+
+`static/vendor/MANIFEST.json` records each package's exact version, byte size and
+sha384 hash.
 
 Designed for collaborative multi-agent engineering. No warranty: as the license says,
 the software is provided "AS IS" - which is also the honest description of the

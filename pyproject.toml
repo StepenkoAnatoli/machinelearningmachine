@@ -111,6 +111,9 @@ ignore = [
 "machinelearningmachine/tts.py" = ["S603", "S607"]
 # Tests deliberately use fake tokens, bind-all hosts and `node` by name: they
 # exist to prove those cases are handled, so the warnings are noise there.
+# The vendor build shells out to `npx --no-install tailwindcss ...` with a fixed
+# argv list and no user input, so S603 is noise there.
+"scripts/build_vendor.py" = ["S603"]
 "tests/*" = ["S101", "S104", "S105", "S106", "S607", "B011", "B017"]
 
 [tool.ruff.lint.isort]
