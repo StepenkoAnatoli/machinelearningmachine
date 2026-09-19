@@ -373,13 +373,20 @@ def _register_routes(
         supplied = token_from_request(request)
         token_ok = bool(supplied) and config.check_token(supplied)
 
-        state = registry.get(request.cookies.get(SESSION_COOKIE_NAME))
+        presented_session = request.cookies.get(SESSION_COOKIE_NAME)
+        state = registry.get(presented_session)
+        if state is not None and state.ephemeral:
+            # The client is echoing the cookie back, so this session now *is*
+            # pinned to that browser: give it the normal idle lifetime.
+            state.ephemeral = False
         if state is None and (not config.require_auth or token_ok):
             # A token-protected server never allocates a session for a caller who
             # has not proven the token yet: otherwise anyone could fill the
             # bounded registry (each entry owns a mesh, a transcript and
             # listeners) and evict real users without authenticating at all.
-            state = _state_for(client_id)
+            # A caller that proves the token by header but keeps no cookies is
+            # marked ephemeral: short idle lifetime, and evicted first.
+            state = _state_for(client_id, ephemeral=config.require_auth and not presented_session)
         if state is not None and token_ok:
             # Header-based access (API clients) also unlocks this browser session.
             state.authenticated = True
@@ -443,9 +450,16 @@ def _register_routes(
                 )
         return response
 
-    def _state_for(client_id: str) -> SessionState:
-        """Create a session state and wire its private broadcast listener."""
-        state = registry.create(client_id)
+    def _state_for(client_id: str, *, ephemeral: bool = False) -> SessionState:
+        """
+        Create a session state and wire its private broadcast listener.
+
+        ``ephemeral`` marks a session that was created for a caller we could not
+        bind to a persistent cookie (a bearer-token client that keeps no cookies).
+        Those get a much shorter idle lifetime and are evicted first, so a
+        script cannot crowd real browsers out of the bounded registry.
+        """
+        state = registry.create(client_id, ephemeral=ephemeral)
         _attach_listener(state)
         return state
 
@@ -492,6 +506,17 @@ def _register_routes(
 
     @app.post("/api/auth/login", status_code=200)
     async def auth_login(req: LoginRequest, request: Request):
+        if not config.require_auth:
+            # Loopback mode needs no token. Accepting (and remembering) one here
+            # would imply a protection that is not switched on, so refuse instead
+            # of pretending the sign-in did something.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This server does not require an access token (it is bound to "
+                    "localhost), so there is nothing to sign in to."
+                ),
+            )
         # Keyed by the client cookie the browser *presented*, falling back to the
         # peer address - never by a freshly generated id, or discarding cookies
         # would reset the counter. (The session itself is not yet created here.)

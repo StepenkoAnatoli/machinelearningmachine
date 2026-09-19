@@ -242,3 +242,85 @@ def test_login_throttle_is_bounded():
     throttle.record_failure("noisy", now=now)
     assert throttle.locked_for("noisy", now=now + 1) > 0
     assert throttle.locked_for("noisy", now=now + 120) == 0.0
+
+
+# ------------------------------------------------- sign-in when none is needed
+
+def test_login_is_refused_when_the_server_needs_no_token(local_client):
+    """
+    On loopback there is no token to check, so "logging in" with any string must
+    not pretend to have unlocked anything - it is answered honestly instead.
+    """
+    resp = local_client.post("/api/auth/login", json={"token": "whatever"})
+    assert resp.status_code == 400
+    assert "does not require" in resp.json()["detail"]
+    # ...and the API is still usable, because it never required a token.
+    assert local_client.get("/api/status").status_code == 200
+
+
+# ------------------------------------------- cookie-less API clients stay cheap
+
+def test_bearer_only_sessions_expire_early_and_first():
+    """
+    A client that authenticates with a header but keeps no cookies cannot be
+    pinned to a browser, so its session must not squat in the bounded registry
+    for the full idle TTL, and must be the one given up under pressure.
+    """
+    from machinelearningmachine.server.state import EPHEMERAL_SESSION_TTL, SessionRegistry
+
+    cfg = ServerConfig(auth_token=TOKEN, host="0.0.0.0", allow_public=True, max_sessions=2)
+    registry = SessionRegistry(max_sessions=2, idle_ttl=3600, config=cfg)
+
+    browser = registry.create("browser-1")
+    script = registry.create("script-1", ephemeral=True)
+    assert browser.ephemeral is False and script.ephemeral is True
+
+    # The ephemeral session expires after its own short TTL, not the hour-long one.
+    assert script.effective_ttl(3600) == EPHEMERAL_SESSION_TTL
+    assert browser.effective_ttl(3600) == 3600
+    assert browser.is_stale(3600) is False
+
+    # Under capacity pressure the ephemeral one is evicted, the browser survives.
+    third = registry.create("script-2", ephemeral=True)
+    assert registry.get(script.session_id) is None, "an ephemeral session should be evicted first"
+    assert registry.get(browser.session_id) is not None
+    assert registry.get(third.session_id) is not None
+
+
+def test_http_sessions_are_persistent_but_bearer_only_ones_are_not():
+    """A signed-in browser keeps its transcript; a cookie-less script does not squat."""
+    app = create_app(ServerConfig(auth_token=TOKEN, host="0.0.0.0", allow_public=True))
+    registry = app.state.registry
+
+    cookie_client = TestClient(app)
+    assert cookie_client.post("/api/auth/login", json={"token": TOKEN}).status_code == 200
+    header_only = TestClient(app)
+    header_only.headers["Authorization"] = f"Bearer {TOKEN}"
+    assert header_only.get("/api/status").status_code == 200
+
+    states = list(registry._states.values())
+    persistent = [st for st in states if not st.ephemeral]
+    ephemeral = [st for st in states if st.ephemeral]
+    assert persistent, "the signed-in browser must own a persistent session"
+    assert ephemeral, "a cookie-less bearer request must be marked ephemeral"
+
+
+def test_bearer_session_becomes_persistent_once_the_client_keeps_cookies():
+    """
+    Marking a session ephemeral is about *un*-pin-able callers. As soon as a
+    client sends the session cookie back, the session belongs to it and gets the
+    normal idle lifetime - otherwise a script that does keep cookies would lose
+    its transcript early.
+    """
+    app = create_app(ServerConfig(auth_token=TOKEN, host="0.0.0.0", allow_public=True))
+    registry = app.state.registry
+    client = TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
+
+    assert client.get("/api/status").status_code == 200
+    assert [st.ephemeral for st in registry._states.values()] == [True]
+
+    assert "mmm_session" in client.cookies  # the server pinned the session
+    assert client.get("/api/status").status_code == 200
+    assert [st.ephemeral for st in registry._states.values()] == [False], (
+        "a session the client keeps returning to should be promoted"
+    )

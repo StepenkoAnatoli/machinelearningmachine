@@ -42,6 +42,12 @@ def new_id() -> str:
     return uuid.uuid4().hex
 
 
+#: Idle lifetime granted to a session that no cookie pins it to a browser: long
+#: enough for a short scripted conversation, short enough that a cookie-less
+#: flood cannot hold the registry hostage for hours.
+EPHEMERAL_SESSION_TTL = 120.0
+
+
 @dataclass
 class SessionState:
     """Everything that belongs to exactly one browser session."""
@@ -64,6 +70,9 @@ class SessionState:
     last_url_read_time: float = 0.0
     #: Messages whose provider failed during the most recent run.
     last_run_warnings: List[str] = field(default_factory=list)
+    #: True for a session created on behalf of a caller that keeps no cookies
+    #: (see :meth:`SessionRegistry.create`). Such a session expires early.
+    ephemeral: bool = False
 
     @property
     def max_prompt_length(self) -> int:
@@ -72,10 +81,17 @@ class SessionState:
     def idle_seconds(self, now: Optional[float] = None) -> float:
         return (now if now is not None else time.time()) - self.last_access
 
-    def is_stale(self, ttl: float, now: Optional[float] = None) -> bool:
+    def effective_ttl(self, ttl: float) -> float:
+        """The idle lifetime that applies to this session."""
         if ttl <= 0:
+            return ttl
+        return min(ttl, EPHEMERAL_SESSION_TTL) if self.ephemeral else ttl
+
+    def is_stale(self, ttl: float, now: Optional[float] = None) -> bool:
+        effective = self.effective_ttl(ttl)
+        if effective <= 0:
             return False
-        return self.idle_seconds(now) > ttl
+        return self.idle_seconds(now) > effective
 
 
 class LoginThrottle:
@@ -152,13 +168,14 @@ class SessionRegistry:
         self.on_evict: Optional[Callable[[SessionState], Any]] = None
 
     # -- lookup / creation -------------------------------------------------
-    def create(self, client_id: Optional[str] = None) -> SessionState:
+    def create(self, client_id: Optional[str] = None, *, ephemeral: bool = False) -> SessionState:
         """Create a state, evicting the least recently used one when full."""
         state = SessionState(
             session_id=new_id(),
             client_id=client_id or new_id(),
             mesh=self._mesh_factory(self.config),
             config=self.config,
+            ephemeral=ephemeral,
         )
         self._states[state.session_id] = state
         self._states.move_to_end(state.session_id)
@@ -211,11 +228,23 @@ class SessionRegistry:
                 self._dispose(state)
 
     def _evict_over_capacity(self) -> None:
+        """
+        Drop entries until the cap holds, preferring the ephemeral ones.
+
+        A session no cookie pins to a browser is the cheapest thing to lose: its
+        owner can simply make another request, whereas evicting a browser's mesh
+        silently discards that user's agents, transcript and keys.
+        """
         while len(self._states) > self.max_sessions:
-            oldest_id, oldest = next(iter(self._states.items()))
-            del self._states[oldest_id]
-            logger.info("Evicting idle mesh session %s (max_sessions=%d)", oldest_id[:8], self.max_sessions)
-            self._dispose(oldest)
+            victim_id = next((sid for sid, st in self._states.items() if st.ephemeral), None)
+            if victim_id is None:
+                victim_id = next(iter(self._states))  # plain LRU order
+            state = self._states.pop(victim_id)
+            logger.info(
+                "Evicting mesh session %s (%s, max_sessions=%d)",
+                victim_id[:8], "ephemeral" if state.ephemeral else "idle", self.max_sessions,
+            )
+            self._dispose(state)
 
     def _dispose(self, state: SessionState) -> None:
         state.provider_config = {"discarded": True}
