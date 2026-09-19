@@ -55,19 +55,27 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D25** | Retry is rate-limit blind: `post_for_json` never read a response header, so an upstream `Retry-After` was discarded | A 429 carrying `Retry-After: 3` was retried after the jittered `backoff × attempt` - measured 0.54 s, 0.79 s, 0.85 s and 0.96 s over four runs, never 3 s - so the retry landed *inside* the window the server had just named, was answered with a second 429, and the turn was lost with `attempts=2` | Medium (the client argues with the one party that knows when the limit resets) |
 
-| **D29** | The README's copyable test block stated a count nothing enforced | `pytest -q  # 357 tests, all offline` and a sample run ending `357 passed in 21.3s`, four hundred lines below a headline that said 433 Python tests and *was* enforced by `test_readme_python_test_count_is_true`. Reproduced by matching the block against a full-suite run: the pinned claim said 433, the copyable one said 357, and the `21.3s` had not been measured by anyone in the record | Low (documentation-in-record; the code was already correct) |
-
-| **D28** | Every retry wait was spent in silence: no log line, no field, nothing in the transcript | The loop awaited its delay with no record of any kind. D26's 454.1 s of sleeping produced three `error <label>: <status>` lines about the *status* and nothing about the time, so a turn that burned four seconds on rate limits was indistinguishable from a slow model - in the log, in `metadata`, and in the exported Markdown. `metadata.provider_attempts` said how many tries; nothing anywhere said what they cost | Medium (an unexplained hang cannot be told apart from a broken one) |
+| **D26** | Nothing bounded the *sum* of the retry waits: `--provider-timeout` ceilinged one request and the sleeps between them were charged to nobody | `timeout=2.0`, `retry_backoff=100`, `max_attempts=3` on a persistent 503 slept **454.1 s** in one run (389.9 s, 410.3 s, 424.8 s in three others) - 227× the ceiling the operator set - with no log line and no bound. Once D25 landed the same hole was reachable from the wire: `Retry-After: 600` against a 60 s timeout would have slept ten minutes because a remote server said so | **High** (a remote response decides how long the client hangs, and the flag the operator set meant nothing. On the dashboard `asyncio.wait_for(..., run_timeout)` eventually cancels the run at `--run-timeout`; on `run --live` nothing wraps the call at all, so the 454 s is slept in full) |
 
 | **D27** | `ProviderError.attempts` counted requests the error text never mentioned | The "(after N attempts)" suffix was gated on `retryable` as well as `attempts > 1`. With `[429, 401]` and `max_attempts=3`: two requests were really sent and `err.attempts` said 2, but `err.reason` was `"the API answered HTTP 401"` and `str(err)` was `"OpenAI: the API answered HTTP 401 [upstream said: too many requests]"` - no mention of 2 in either. The transcript therefore carried `metadata.provider_attempts = 2` beside a sentence describing one request, and the two were read together in the UI and in an exported Markdown file | Medium (a record that contradicts itself is worse than one that says less) |
 
-| **D26** | Nothing bounded the *sum* of the retry waits: `--provider-timeout` ceilinged one request and the sleeps between them were charged to nobody | `timeout=2.0`, `retry_backoff=100`, `max_attempts=3` on a persistent 503 slept **454.1 s** in one run (389.9 s, 410.3 s, 424.8 s in three others) - 227× the ceiling the operator set - with no log line and no bound. Once D25 landed the same hole was reachable from the wire: `Retry-After: 600` against a 60 s timeout would have slept ten minutes because a remote server said so | **High** (a remote response decides how long the client hangs, and the flag the operator set meant nothing. On the dashboard `asyncio.wait_for(..., run_timeout)` eventually cancels the run at `--run-timeout`; on `run --live` nothing wraps the call at all, so the 454 s is slept in full) |
+| **D28** | Every retry wait was spent in silence: no log line, no field, nothing in the transcript | The loop awaited its delay with no record of any kind. D26's 454.1 s of sleeping produced three `error <label>: <status>` lines about the *status* and nothing about the time, so a turn that burned four seconds on rate limits was indistinguishable from a slow model - in the log, in `metadata`, and in the exported Markdown. `metadata.provider_attempts` said how many tries; nothing anywhere said what they cost | Medium (an unexplained hang cannot be told apart from a broken one) |
+
+| **D29** | The README's copyable test block stated a count nothing enforced | `pytest -q  # 357 tests, all offline` and a sample run ending `357 passed in 21.3s`, four hundred lines below a headline that said 433 Python tests and *was* enforced by `test_readme_python_test_count_is_true`. Reproduced by matching the block against a full-suite run: the pinned claim said 433, the copyable one said 357, and the `21.3s` had not been measured by anyone in the record | Low (documentation-in-record; the code was already correct) |
 
 | **D30** | Saved session trimming placed `trimmed` flag at document tail instead of header metadata | When an oversized session (>8 MB / 1000+ messages) was trimmed to fit `MAX_SESSION_BYTES`, `trimmed: True` was appended after the messages array and omitted from `save_session`'s return value. The 4 KiB `_head_meta` prefix read missed the flag, causing `list_sessions()` to report `trimmed=False` on the fast path | Medium (a trimmed transcript reads as complete in the session list unless fully parsed) |
 
 | **D31** | Transcript DOM grew unboundedly during streaming and expanded transcripts fully on click | In `static/app.js`, `appendMessageToFeed` appended every WebSocket message directly into `#messagesContainer` without windowing, and clicking "Show earlier messages" dumped all 1000+ messages into the DOM simultaneously, creating an infinite DOM | Medium (browser UI performance degradation and memory bloat on large conversations) |
 
 | **D32** | Session store performance at 1000+ messages lacked automated benchmark validation | Without an active benchmark script covering 1000+ message transcripts, scaling regressions in the saved-session fast path could go unnoticed | Low (performance measurement and regression prevention) |
+
+| **D33** | `parse_retry_after` could raise, and the retry loop's catch-all then reported *its* failure instead of the provider's | A 429 carrying a 400-digit `Retry-After` gave `float(int(...))` an `OverflowError`, which escaped the parser and was swallowed by `except Exception` in the loop: measured `reason="the request failed (OverflowError)"`, `retryable=False`, `status_code=None`, **one** request sent. A transient rate limit was relabelled as a permanent, unattributed failure because of one header nobody could read | Medium (a vendor- or attacker-controlled header decides whether the failure looks retryable) |
+
+| **D34** | A 200 whose body was the wrong shape reported `attempts=1` for what the retries really cost | The shape checks live in `OpenAIProvider.generate` / `AnthropicProvider.generate`, *outside* the loop that knows the count. Measured with `[429, 200]` and `body={"choices": []}`: two requests really sent, `err.attempts == 1`, `reason == "the API response did not contain a message"` with no mention of the retry, and no `waited` - the D27 disagreement one frame up, with D28's record lost alongside it. Same for Anthropic's text-block check and for "the API returned an empty answer" | Medium (the transcript understates the turn on the path where the model *did* answer) |
+
+| **D35** | The findings register was out of numeric order and nothing pinned it | Measured: section 1 read `1..25, 29, 28, 27, 26, 30, 31, 32, 33, 34` and section 8 read `1..24, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25`. Both covered the same 34 ids with no gaps and no duplicates, so nothing was missing - the rows were inverted, because each new finding had been inserted *above* the previous one instead of after it. A reader scanning for D27 finds it between D29 and D26, and a reviewer checking that every finding has a named test has to sort the table in their head first | Low (documentation-in-record; no claim inside any row was wrong, only their order) |
+
+| **D36** | A text block that was not text became a bare `TypeError` out of `AnthropicProvider.generate`, after the retry loop had already finished | Measured on the merged D33-D35 tree: `{"content": [{"type": "text", "text": 123}]}` - and a `text` that is an object or a list, or a `content` that is not iterable at all - reached `"\n".join(...)` and raised `TypeError: sequence item 0: expected str instance, int found`. That is not a `ProviderError`, so the turn lost its provider: a two-agent transcript recorded `provider_error = "TypeError: ..."` with **no** `provider_attempts` and **no** `provider_waited`, while 3 requests and a logged 1 s `Retry-After` wait had really happened, and with `fallback_to_mock=False` the run ended on the join itself. `OpenAIProvider.generate` already guards `isinstance(content, str)`; this was the one body shape D34's pass did not make total | Medium (a body the provider cannot read becomes an unattributed internal error, and the retries it cost vanish from the record) |
 
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
@@ -116,8 +124,13 @@ Functional
   `str(exc)` must describe the same number of requests, whatever status ended the
   turn. No wait is spent in silence: each one is logged before it happens, named
   as the upstream's or the client's own, and totalled on the error and in the
-  transcript. No new dependency, and no wait that a test has to spend.
-  (D25, D26, D27, D28)
+  transcript. Reading the header cannot itself become the failure: the parser never
+  raises, so an unreadable ask leaves the 429 intact. A body the provider cannot use is
+  still a failure that cost what it cost: it reports the same attempt count and the same
+  seconds as any other, and a part of the body the provider cannot read - a `text` that
+  is not a string, a `content` that is not a list - is that failure rather than a crash
+  from a join. No new dependency, and no wait that a test has to spend.
+  (D25, D26, D27, D28, D33, D34, D36)
 
 Non-functional
 - **N1** No new runtime dependency (retry/backoff, queueing, atomic writes are stdlib).
@@ -197,7 +210,7 @@ Every evidence cell is a test that was run and passed, not a plan. All offline.
 | F11 | validation before the cooldown stamp, `Retry-After` on 409/429 | `tests/test_run_serialization.py` - `state.last_run_time` unchanged by a 400 |
 | F12 | `server/app.py: _safe_reason` for every failure string that reaches a client | `tests/test_provider_output_bounds.py` (unit cases) |
 | F15 | `server/config.py:MAX_QUEUED_SUFFIX`, `server/state.py:run_queue` + positions, `cli.py:--max-queued`, `server/app.py` queue branch + lock-handoff pump + queued-aware cancel, `static/app.js` queued lifecycle | `test_run_queue.py` (202+position, 429+Retry-After, 0→409, FIFO order, queued cancel, per-session isolation), `test_cli_live.py` max_queued resolution, jsdom queued-position + queue-full + adoption + race cases, e2e "concurrency in the same tab queues instead of refusing" |
-| F16 | `providers.py: parse_retry_after` + `RETRY_AFTER_HEADER`, `_backoff_sleep` seam, `ProviderError.retry_after`, retry branch in `post_for_json` | `tests/test_provider_retry.py` - 11 header forms parsed (including `-5`, `3.5`, `soon`, an impossible date), an HTTP-date counted down against a fixed instant, `Retry-After: 3` producing exactly a 3 s wait, a malformed header falling back to the exponential budget, a 401's header never honoured, both providers sharing it, one case against a real loopback aiohttp server sending `retry-after` lower-cased, and a source-level pin that `post_for_json` waits through the seam only. The bound (D26): `Retry-After: 600` against `timeout=60` sleeps nothing and raises with both numbers, a `retry_backoff=100`/`timeout=2` exponential budget is refused the same way, two 4 s waits fit a 10 s budget and a third does not, the same `Retry-After: 30` is slept at `timeout=60` and refused at `timeout=10` (parametrised), and Anthropic shares the bound. Agreement (D27): `agents/providers.py: _labelled_with_attempts`, applied on *every* raise path, pinned by five parametrised status sequences (`[503,503]`, `[429,401]`, `[ConnectionError,401]`, `[503,429,401]`, `[401]`) asserting `attempts == len(requests)`, the number parsed out of `reason` and out of `str(exc)`, and the *absence* of retry language after a single attempt, plus a transcript case where one agent reports `after 2 attempts` and its peer, asked once, reports none. No silent waiting (D28): `ProviderError.waited`, the WARNING line in `post_for_json`, `metadata.provider_waited` in `agents/base.py` - pinned by two caplog cases (the wait line names the delay, the attempt it precedes, and whether it came from `upstream Retry-After` or from `jittered backoff`), `waited` on the exhausted and on the D26-refused error, no waiting clause when nothing was waited, a saved-session round trip, and a jsdom case that the degraded badge's tooltip carries `after 3 attempts, 4s spent waiting` |
+| F16 | `providers.py: parse_retry_after` + `RETRY_AFTER_HEADER`, `_backoff_sleep` seam, `ProviderError.retry_after`, retry branch in `post_for_json` | `tests/test_provider_retry.py` - 11 header forms parsed (including `-5`, `3.5`, `soon`, an impossible date), an HTTP-date counted down against a fixed instant, `Retry-After: 3` producing exactly a 3 s wait, a malformed header falling back to the exponential budget, a 401's header never honoured, both providers sharing it, one case against a real loopback aiohttp server sending `retry-after` lower-cased, and a source-level pin that `post_for_json` waits through the seam only. The bound (D26): `Retry-After: 600` against `timeout=60` sleeps nothing and raises with both numbers, a `retry_backoff=100`/`timeout=2` exponential budget is refused the same way, two 4 s waits fit a 10 s budget and a third does not, the same `Retry-After: 30` is slept at `timeout=60` and refused at `timeout=10` (parametrised), and Anthropic shares the bound. Agreement (D27): `agents/providers.py: _labelled_with_attempts`, applied on *every* raise path, pinned by five parametrised status sequences (`[503,503]`, `[429,401]`, `[ConnectionError,401]`, `[503,429,401]`, `[401]`) asserting `attempts == len(requests)`, the number parsed out of `reason` and out of `str(exc)`, and the *absence* of retry language after a single attempt, plus a transcript case where one agent reports `after 2 attempts` and its peer, asked once, reports none. No silent waiting (D28): `ProviderError.waited`, the WARNING line in `post_for_json`, `metadata.provider_waited` in `agents/base.py` - pinned by two caplog cases (the wait line names the delay, the attempt it precedes, and whether it came from `upstream Retry-After` or from `jittered backoff`), `waited` on the exhausted and on the D26-refused error, no waiting clause when nothing was waited, a saved-session round trip, and a jsdom case that the degraded badge's tooltip carries `after 3 attempts, 4s spent waiting`. The parser cannot raise (D33): `agents/providers.py: parse_retry_after` catches `OverflowError`, pinned by three unrepresentable digit strings plus the two cases that matter together - a 400-digit `Retry-After` on a 429 still retries and still reports `status_code=429`, while an enormous-but-representable `1e20` is a real ask and is refused by the budget with both numbers named. The count above the loop (D34): `post_for_json(…, stats=…)` hands back `{"attempts", "waited"}` on success and `agents/providers.py: _shape_error` labels every body-shape failure with it - pinned by four OpenAI body shapes and Anthropic's empty `content` at `attempts == len(requests) == 2`, a first-request shape failure that still claims no retry, `after 3 attempts, 4s spent waiting` on a body that only arrived on the third request, and a transcript carrying `provider_attempts`/`provider_waited` for a shape failure. Text that is not text (D36): `AnthropicProvider.generate` accepts a block only when its `text` is a `str` and iterates `content` only when it is a list, so four unusable bodies raise the same labelled shape error as an empty reply (`attempts == len(calls) == 1`, no `TypeError` in `str(exc)`), an exchange retried behind one reports `after 2 attempts, 1s spent waiting`, a two-agent transcript keeps 2 attempts/1 s for the retried agent and 1/0 with no retry language for its first-try peer, a malformed block beside a usable one still answers `real answer`, and `fallback_to_mock=False` raises `ProviderError` |
 | N1/N2 | stdlib-only core, `asyncio.wait_for` on every await that can block | CI matrix (3.10/3.11/3.12) + `test_import_without_optional_deps` |
 | N3 | README + SECURITY.md rewritten in the same change; `serve` knobs readable from the environment | `tests/test_docs_are_accurate.py` + `tests/test_cli_live.py` |
 | N4 | `--run-timeout` (default 180 s) → 504 with a plain-language reason, `run_error` frame first | `tests/test_run_serialization.py` |
@@ -326,6 +339,46 @@ exercise was not to add unfounded claims:
   retried twice reports `provider_attempts = 2` four times and `8` nowhere; there is
   no per-run total, and `--strict-provider-errors` still judges each turn on its own.
 
+- **An unreadable `Retry-After` is indistinguishable from no header (D33).** The
+  parser never raises - a digit string too long to become a float returns `None`
+  instead of handing the loop an `OverflowError` to misreport - but `None` means the
+  exponential budget decides, so a client that could not read "wait 300" may retry
+  after 0.8 s and earn a harder limit. That is the lesser failure: the alternative
+  was a transient 429 arriving as a permanent, status-less `the request failed
+  (OverflowError)`. There is no third option, since a header that cannot be parsed
+  carries no information to act on.
+
+- **The attempt handoff is opt-in, so a third provider can lose it again (D34).**
+  `post_for_json` reports what a successful exchange cost through a `stats` dict the
+  *caller* passes, because the body-shape checks are each provider's own and run after
+  the loop returns. Both live providers do this and are tested; a provider added later
+  that calls `post_for_json` without `stats` gets `attempts=1` on its shape errors
+  again, and nothing structural would object. The alternative - returning a
+  `(body, attempts)` tuple - would have changed the signature of a public function, and
+  per-instance state is wrong because one provider object is shared by two agents that
+  a topology may run concurrently.
+
+- **A malformed text block is skipped, not reported (D36).** A block whose `text` is not
+  a string is dropped exactly as a block that is not `type: "text"` already was, so a
+  reply whose only text arrived in such a block fails as "did not contain a text block"
+  rather than naming the block or the type it carried, and a reply with one usable block
+  and one malformed block answers with the usable text and no sign that anything was
+  dropped. Nothing is logged at the moment of the skip. The alternative - failing the
+  turn on any block this client cannot read - would discard text the provider did send,
+  which is the worse error for a reader who only wants the answer. What is *not* a limit
+  any more is the failure mode: a body with nothing usable is a labelled `ProviderError`
+  carrying its attempt count and its waited seconds, from inside the same
+  `_labelled_with_attempts` path as every other failure.
+
+- **The register's order is pinned; its contents are not (D35).** Two tests hold
+  sections 1 and 8 to ascending, gap-free, duplicate-free ids that agree with each
+  other, and section 9's addenda to chronological order. What no test can check is
+  whether a row's *symptom* was really measured, or whether the code and test a row
+  names still exist - `test_docs_are_accurate.py` pins counts and a handful of named
+  claims, not 35 rows of prose. The re-sort itself was applied as a permutation of
+  whole lines with the line multiset asserted unchanged, so no row's text could have
+  migrated onto another finding.
+
 - **The recorded wait is the wait, not the turn (D28).** `provider_waited` sums the
   delays spent *between* attempts of one `post_for_json` call and nothing else: it
   excludes request time, the simulator fallback that follows a failure, and the
@@ -414,14 +467,18 @@ exercise was not to add unfounded claims:
 
 | D24 stale no-queue prose | F13, N3 | PRODUCTION_HARDENING.md (F2, §4 F2/F9/F15 rows, §7, §8 N-para), USER_CENTERED_DESIGN.md queue row, README test tree + jsdom count | `test_docs_are_accurate.py` (hardening-agrees, UCD-agrees, listing-counts cases) |
 
-| D32 1000+ message bench | F5 | `scripts/bench_sessions.py` | `scripts/bench_sessions.py` (50 files × 1000 messages: 1.3 ms header vs 271.3 ms parse, 208.9x) |
-| D31 transcript infinite DOM | F12, F14 | `static/app.js` windowed transcript, `btn-show-earlier`, oldest node pruning | `tests/js/client-lifecycle.test.mjs` (windowed load, stream pruning, progressive expansion) |
-| D30 trimmed flag at document tail | F5 | `sessions.py:save_session` header ordering, `_meta(..., trimmed=...)` | `test_session_storage.py::test_large_trimmed_session_stores_trimmed_flag_in_header_and_fast_path_reads_it` |
-| D29 an unpinned count in the copyable block | F13, N3 | README "Running Tests" block (count + sample run) | `test_docs_are_accurate.py::test_readme_running_tests_block_states_todays_count` - every `N tests`/`N passed` in the block must equal what pytest collected |
-| D28 waits were spent in silence | F16 | `agents/providers.py: ProviderError.waited` + the WARNING before `_backoff_sleep` + `_labelled_with_attempts(err, waited=…)`, `agents/base.py: metadata.provider_waited` | `test_provider_retry.py` - two caplog cases on the wait line (delay, `attempt 2/2`, `upstream Retry-After` vs `jittered backoff`), `waited` on the retry-exhausted error and on D26's refusal, no waiting clause after a zero wait or a single attempt, a `save_session`/`get_session` round trip; `tests/js/client-lifecycle.test.mjs` - the degraded badge tooltip carries the wait |
-| D27 the count and the sentence disagreed | F16 | `agents/providers.py: _labelled_with_attempts`, applied on both raise paths of `post_for_json` (the retry-exhausted tail and D26's `_wait_does_not_fit`) | `test_provider_retry.py` - five parametrised status sequences asserting `attempts == len(requests)` and the same number in `reason` and in `str(exc)`, no retry language after one attempt, a transcript where the retried agent says `after 2 attempts` and its peer says nothing, and the wait-budget refusal obeying the same rule |
-| D26 waiting was charged to nobody | F16 | `agents/providers.py: _wait_does_not_fit`, the `wait_budget`/`waited` accounting in `post_for_json` | `test_provider_retry.py` - `Retry-After: 600` vs `timeout=60` sleeps nothing and names both numbers, the exponential path refused the same way, repeated waits charged against one budget (`[4, 4]` then stop, `attempts=3`), a wait that fits is still slept and still recovers, the bound scales with the timeout (parametrised 60 s → slept / 10 s → refused), Anthropic parity |
 | D25 retry is rate-limit blind | F16 | `agents/providers.py: parse_retry_after` + `RETRY_AFTER_HEADER` + `_backoff_sleep` + `ProviderError.retry_after`, retry branch of `post_for_json`; `tests/conftest.py: backoffs` (autouse, records every wait) | `test_provider_retry.py` - header-parsing matrix, `Retry-After: 3` → exactly a 3 s wait, HTTP-date counted down against a fixed instant, malformed → exponential budget, a 401's header never honoured, Anthropic parity, one case against a real loopback aiohttp server sending `retry-after` lower-cased, and a source pin that `post_for_json` waits through the seam only |
+| D26 waiting was charged to nobody | F16 | `agents/providers.py: _wait_does_not_fit`, the `wait_budget`/`waited` accounting in `post_for_json` | `test_provider_retry.py` - `Retry-After: 600` vs `timeout=60` sleeps nothing and names both numbers, the exponential path refused the same way, repeated waits charged against one budget (`[4, 4]` then stop, `attempts=3`), a wait that fits is still slept and still recovers, the bound scales with the timeout (parametrised 60 s → slept / 10 s → refused), Anthropic parity |
+| D27 the count and the sentence disagreed | F16 | `agents/providers.py: _labelled_with_attempts`, applied on both raise paths of `post_for_json` (the retry-exhausted tail and D26's `_wait_does_not_fit`) | `test_provider_retry.py` - five parametrised status sequences asserting `attempts == len(requests)` and the same number in `reason` and in `str(exc)`, no retry language after one attempt, a transcript where the retried agent says `after 2 attempts` and its peer says nothing, and the wait-budget refusal obeying the same rule |
+| D28 waits were spent in silence | F16 | `agents/providers.py: ProviderError.waited` + the WARNING before `_backoff_sleep` + `_labelled_with_attempts(err, waited=…)`, `agents/base.py: metadata.provider_waited` | `test_provider_retry.py` - two caplog cases on the wait line (delay, `attempt 2/2`, `upstream Retry-After` vs `jittered backoff`), `waited` on the retry-exhausted error and on D26's refusal, no waiting clause after a zero wait or a single attempt, a `save_session`/`get_session` round trip; `tests/js/client-lifecycle.test.mjs` - the degraded badge tooltip carries the wait |
+| D29 an unpinned count in the copyable block | F13, N3 | README "Running Tests" block (count + sample run) | `test_docs_are_accurate.py::test_readme_running_tests_block_states_todays_count` - every `N tests`/`N passed` in the block must equal what pytest collected |
+| D30 trimmed flag at document tail | F5 | `sessions.py:save_session` header ordering, `_meta(..., trimmed=...)` | `test_session_storage.py::test_large_trimmed_session_stores_trimmed_flag_in_header_and_fast_path_reads_it` |
+| D31 transcript infinite DOM | F12, F14 | `static/app.js` windowed transcript, `btn-show-earlier`, oldest node pruning | `tests/js/client-lifecycle.test.mjs` (windowed load, stream pruning, progressive expansion) |
+| D32 1000+ message bench | F5 | `scripts/bench_sessions.py` | `scripts/bench_sessions.py` (50 files × 1000 messages: 1.3 ms header vs 271.3 ms parse, 208.9x) |
+| D33 the parser could raise and steal the failure | F16 | `agents/providers.py: parse_retry_after` (`OverflowError` -> `None`) | `test_provider_retry.py` - three unrepresentable digit strings, a 400-digit `Retry-After` on a 429 that still retries and still reports `status_code=429` / `retryable=True` / `attempts=2`, and the contrast case: `1e20` is representable, so it is a real ask and the budget refuses it with `1e+20` and `60` both in the reason |
+| D34 shape failures undercounted the turn | F16 | `agents/providers.py: post_for_json(…, stats=…)` + `_shape_error`, used by `OpenAIProvider.generate` and `AnthropicProvider.generate` | `test_provider_retry.py` - four OpenAI body shapes and Anthropic's empty `content` asserting `attempts == len(requests) == 2` with `after 2 attempts` in `reason` and in `str(exc)`, a first-request shape failure that claims no retry and no wait, `after 3 attempts, 4s spent waiting` when the body arrived on the third request, and the transcript's `provider_attempts`/`provider_waited` for a shape failure |
+| D35 register out of numeric order | F13, N3 | PRODUCTION_HARDENING.md sections 1 and 8 re-sorted as a permutation of whole rows, the line multiset asserted unchanged | `test_docs_are_accurate.py::test_the_findings_register_is_in_numeric_order` (ascending, contiguous, both tables agreeing) and `test_the_validation_subsections_are_in_numeric_order` |
+| D36 a non-text text block crashed the provider | F16 | `agents/providers.py: AnthropicProvider.generate` (a block counts only when `text` is a `str`, `content` is iterated only when it is a list, failures routed through `_shape_error`) | `test_provider_retry.py` - four unusable bodies at `attempts == len(calls) == 1` with no `TypeError` in the reason, the same body behind a 429 reporting `after 2 attempts, 1s spent waiting`, a two-agent transcript (retried: 2 attempts/1 s; first try: 1/0, no retry language), a malformed block beside a usable one still answering `real answer`, and `fallback_to_mock=False` raising `ProviderError`; `test_provider_retry.py::test_the_transcript_records_a_shape_failure_with_its_real_effort` tightened to assert both agents' real counts instead of `len(calls) // 2` |
 
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
 `--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented
@@ -529,3 +586,94 @@ Measured on this machine:
 
 D30-D32 local validation: **434 Python tests passed**, **37 jsdom tests passed**, `ruff check machinelearningmachine tests scripts examples` clean over the full scope, `scripts/bench_sessions.py` passed, and `scripts/e2e_server_check.py` reported `ALL E2E CHECKS PASSED` against `serve --port 8799` on its unchanged loopback default. The gate server was stopped afterwards and the port was verified closed.
 
+### D33-D35 audit of the merged retry diff, and of the register it is written into
+
+D33 and D34 were found by auditing the D25-D29 diff after it merged, not by a user
+report. Two other suspicions from the same audit were *cleared by measurement* and are
+recorded here so they are not re-litigated: against a real loopback aiohttp server a
+read timeout is labelled `timed out after 0.25s (after 2 attempts)` with
+`retryable=True` and `attempts=2` (the `except asyncio.TimeoutError` branch does win
+over `except aiohttp.ClientError`, because aiohttp raises a plain timeout for a total
+deadline, not a `ServerTimeoutError`); and `server/app.py` never passes a
+browser-supplied timeout into a provider, so a session cannot widen the wait budget
+D26 charges against.
+
+One coverage limit the audit found and did **not** close: the retry suite's
+transport-error cases use a stub whose `ClientError` is the builtin `ConnectionError`,
+so aiohttp's real exception hierarchy is exercised only by the two real-loopback cases
+(lower-cased `retry-after`, and a stalled server).
+
+D33 local validation: **440 Python tests passed** (434 on the rebased base), **37
+jsdom passed**, full-scope Ruff clean, and `scripts/e2e_server_check.py` reported
+`ALL E2E CHECKS PASSED` against `serve --port 8799` on its unchanged loopback
+default, with the server stopped and the port verified closed afterwards.
+
+D34 local validation: **448 Python tests passed** (440 before it), **37 jsdom
+passed**, full-scope Ruff clean, the retry suite run 25 times consecutively with 0
+failing runs to check the timing-sensitive cases for flakiness, and
+`scripts/e2e_server_check.py` reporting `ALL E2E CHECKS PASSED` (33 checks, 0
+failures) against `serve --port 8799` on its loopback default, the server stopped
+and the port verified closed afterwards.
+
+D35 came from the same audit, one level up: inserting each new row *above* the
+previous one had left section 1 reading `25, 29, 28, 27, 26, 30...` and section 8
+reading `34, 33, ... 25` in the merged document. Both tables were re-sorted as a
+permutation of whole lines, verified by asserting the line multiset and the total
+length unchanged, and two tests now hold the order.
+
+D33-D35 local validation: **450 Python tests passed**, **37 jsdom passed**,
+full-scope Ruff clean, `scripts/e2e_server_check.py` reporting `ALL E2E CHECKS
+PASSED` against `serve --port 8799` on its unchanged loopback default with the
+server stopped and the port verified closed afterwards. No real provider was
+called at any point in this audit: every case ran against a scripted HTTP double
+or a loopback server started by the test itself.
+
+### D36 a text block that is not text, found by re-reading the function D34 changed
+
+D36 came out of the same audit as D33-D35, one body shape further along. D34 made every
+*shape check* report what the exchange really cost; this path was never a shape check - it
+was an unguarded `"\n".join(...)` over whatever the body contained, one frame above the
+loop, in the same function.
+
+Reproduced on the merged tree before any change, with the suite's scripted double:
+
+    {"content": [{"type": "text", "text": 123}]}             -> TypeError: sequence item 0: expected str instance, int found
+    {"content": [{"type": "text", "text": {"nested": 1}}]}   -> TypeError: sequence item 0: expected str instance, dict found
+    {"content": [{"type": "text", "text": ["not", "text"]}]} -> TypeError: sequence item 0: expected str instance, list found
+    {"content": 5}                                           -> TypeError: 'int' object is not iterable
+
+The exception was raised after `post_for_json` had returned, so it was not a
+`ProviderError` and nothing downstream could label it. At the agent level `metadata` read
+`provider_error = "TypeError: sequence item 0: expected str instance, int found"` and
+carried **no** `provider_attempts` and **no** `provider_waited`, while the exchange really
+cost 2 requests and a logged 1 s `Retry-After` wait (3 requests across the two-agent
+transcript) - the D28/D34 loss of record, on a path where the failure did not even name a
+provider. With `fallback_to_mock=False` the run ended on the join itself.
+
+The fix is the guard `OpenAIProvider.generate` already had, made total: a block counts as
+text only when its `text` is a `str`, `content` is iterated only when it is a list, and a
+body with nothing usable raises the same `_shape_error` as an empty reply - so it is
+labelled with the attempt count and the waited seconds by `_labelled_with_attempts` like
+every other failure. A malformed block beside a usable one is skipped, so the fix cannot
+fail a turn that has real text; that contrast case is pinned beside the four unusable
+bodies, in the same style as D33's representable `1e20`.
+
+The same read-through tightened a D34 case. Its transcript assertion read
+`meta["provider_attempts"] == len(calls) // 2 or meta["provider_attempts"] == 2`; with
+`len(calls) == 3` (the retried agent sends two requests, its peer one) the first term
+computed `1` - exactly the value the defect produced - so the assertion passed on the
+reason clause alone. It now asserts both agents' real counts: 2 attempts and 1 s for the
+retried one, 1 and 0 for its peer, with no retry language in the peer's reason.
+
+The README's sample run also lost its `2 warnings`, which the pinned environment here
+(`pytest==9.1.1` with `-W error` and the two documented ignores) does not print: a count
+that depends on which interpreter's deprecations fire is not a claim to keep in a
+copyable block. The counts are unchanged and still asserted by D29's test.
+
+D36 local validation: **458 Python tests passed** (450 before it), **37 jsdom passed**,
+`ruff check machinelearningmachine tests scripts examples` clean, the retry suite run 25
+times consecutively with 0 failing runs, and `scripts/e2e_server_check.py` reporting
+`ALL E2E CHECKS PASSED` (33 checks, 0 failures) against `serve --port 8799` on its
+unchanged loopback default, with the server stopped afterwards and the port verified
+closed. No real provider was called at any point: every case ran against a scripted HTTP
+double or a loopback server started by the test itself.

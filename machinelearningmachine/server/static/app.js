@@ -112,6 +112,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnCancelSettings = document.getElementById("btnCancelSettings");
   const formSettings = document.getElementById("formSettings");
 
+  const helpModal = document.getElementById("helpModal");
+  const btnHelp = document.getElementById("btnHelp");
+  const btnCloseHelpModal = document.getElementById("btnCloseHelpModal");
+  const btnDoneHelp = document.getElementById("btnDoneHelp");
+
   const clearConfirmModal = document.getElementById("clearConfirmModal");
   const btnConfirmClear = document.getElementById("btnConfirmClear");
   const btnCancelClear = document.getElementById("btnCancelClear");
@@ -1961,6 +1966,10 @@ document.addEventListener("DOMContentLoaded", () => {
   setupModal(agentModal, btnNewAgent, btnCloseAgentModal, btnCancelAddAgent);
   setupModal(settingsModal, btnSettings, btnCloseSettingsModal, btnCancelSettings);
   setupModal(clearConfirmModal, null, btnCloseClearModal, btnCancelClear);
+  // Guarded: the how-to-use button is hidden on phone widths (the empty
+  // transcript carries the same three steps there), but the modal itself is
+  // always present, so the "Got it" button still closes it.
+  if (helpModal) setupModal(helpModal, btnHelp, btnCloseHelpModal, btnDoneHelp);
 
   // Global ESC handler for modals
   document.addEventListener("keydown", (e) => {

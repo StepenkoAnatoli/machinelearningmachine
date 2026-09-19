@@ -973,3 +973,356 @@ async def test_the_transcript_records_the_wait_next_to_the_attempt_count(monkeyp
     assert reloaded["provider_waited"] == pytest.approx(4.0), reloaded
     assert reloaded["provider_attempts"] == 3, reloaded
     assert "4s spent waiting" in reloaded["provider_error"], reloaded
+
+
+# --------------------- D33: an unusable Retry-After must not change the failure
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["9" * 400, "1" * 320, f"{'9' * 309}9"],   # ints too large to become a float
+)
+def test_parse_retry_after_never_raises_on_a_number_it_cannot_represent(value):
+    """
+    ``float(int(text))`` overflows: ``int too large to convert to float``.
+
+    A header is attacker- and vendor-controlled text, and "we could not read it"
+    is exactly the case that must return ``None``. Raising instead lets one odd
+    header rewrite what the failure *was* - see the next two tests.
+    """
+    assert parse_retry_after(value) is None
+
+
+async def test_an_unrepresentable_retry_after_does_not_steal_the_429(monkeypatch, backoffs):
+    """
+    Reproduced before the fix: a 429 carrying a 400-digit ``Retry-After``
+    produced ``ProviderError("the request failed (OverflowError)")`` with
+    ``retryable=False``, ``status_code=None`` and **one** request sent - the
+    overflow escaped the parser, was swallowed by the loop's catch-all, and a
+    transient rate limit was relabelled as a permanent, unattributed failure.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, headers={429: {"Retry-After": "9" * 400}}),
+    )
+    provider = _provider(max_attempts=2, retry_backoff=0.5, timeout=60.0)
+    out = await provider.generate(
+        system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+        agent_role="r", agent_name="GPT",
+    )
+    assert out == "recovered answer"
+    assert len(calls) == 2, "the 429 is still transient, so it is still retried"
+    # No usable header, so the exponential budget decides - it is not skipped.
+    assert len(backoffs) == 1 and 0.5 <= backoffs[0] < 1.5, backoffs
+
+
+async def test_an_unrepresentable_retry_after_keeps_the_status_on_the_error(monkeypatch, backoffs):
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 429], calls, headers={429: {"Retry-After": "9" * 400}}),
+    )
+    provider = _provider(max_attempts=2, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    err = exc.value
+    assert err.status_code == 429, f"the real failure was a 429, not {err.reason!r}"
+    assert err.retryable is True
+    assert err.attempts == 2 and len(calls) == 2
+    assert "HTTP 429" in err.reason, err.reason
+    assert err.retry_after is None, "an unreadable header is no opinion, not an honoured ask"
+
+
+async def test_an_enormous_but_readable_retry_after_is_refused_not_ignored(monkeypatch, backoffs):
+    """
+    The distinction that matters: *unrepresentable* means "no opinion" and falls
+    back to the exponential budget, while *enormous* is a real ask and is refused
+    by D26's budget with both numbers named. Collapsing the two would either
+    invent a wait the server never asked for or hide one it did.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, headers={429: {"Retry-After": "1" + "0" * 20}}),
+    )
+    provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    err = exc.value
+    assert backoffs == [], backoffs
+    assert len(calls) == 1
+    assert err.retry_after == 1e20
+    assert err.status_code == 429 and err.retryable is True
+    assert "1e+20" in err.reason and "60" in err.reason, err.reason
+
+
+# ------------- D34: a 200 with the wrong shape still cost the retries it took
+
+
+@pytest.mark.parametrize(
+    "body,expected_reason",
+    [
+        ({"choices": []}, "did not contain a message"),
+        ({"nope": 1}, "did not contain a message"),
+        ({"choices": [{"message": {"content": ""}}]}, "returned an empty answer"),
+        ({"choices": [{"message": {"content": "   "}}]}, "returned an empty answer"),
+    ],
+)
+async def test_a_shape_failure_after_a_retry_counts_the_requests_really_sent(
+    monkeypatch, backoffs, body, expected_reason
+):
+    """
+    Reproduced before the fix: ``[429, 200]`` with a body whose ``choices`` list
+    is empty sent **two** requests and raised
+    ``ProviderError("the API response did not contain a message")`` with
+    ``attempts=1`` and no mention of the retry anywhere - the same disagreement
+    D27 fixed inside the loop, one frame above it. The shape checks live in
+    ``OpenAIProvider.generate`` / ``AnthropicProvider.generate``, outside
+    ``post_for_json``, so nothing told them what the exchange had cost.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, body=body, headers={429: {"Retry-After": "1"}}),
+    )
+    provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    err = exc.value
+    assert expected_reason in err.reason, err.reason
+    assert len(calls) == 2, calls
+    assert err.attempts == len(calls), f"{err.attempts} != {len(calls)} requests really sent"
+    assert f"after {err.attempts} attempts" in err.reason, err.reason
+    assert err.reason in str(err)
+
+
+async def test_anthropic_shape_failure_counts_its_attempts_too(monkeypatch, backoffs):
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([503, 200], calls, body={"content": []}),
+    )
+    provider = _provider(AnthropicProvider, max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="Claude",
+        )
+    err = exc.value
+    assert "did not contain a text block" in err.reason
+    assert len(calls) == 2 and err.attempts == 2, (len(calls), err.attempts)
+    assert "after 2 attempts" in err.reason, err.reason
+
+
+async def test_a_shape_failure_on_the_first_request_claims_no_retry(monkeypatch, backoffs):
+    """The count must not become decoration: one request means no retry language."""
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([200], calls, body={"choices": []}),
+    )
+    provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    err = exc.value
+    assert len(calls) == 1 and err.attempts == 1
+    assert "attempts" not in err.reason, err.reason
+    assert "waiting" not in err.reason, err.reason
+    assert err.waited == 0.0
+
+
+async def test_a_shape_failure_reports_the_time_the_retries_spent(monkeypatch, backoffs):
+    """D28's record has to survive the shape check too, or the wait goes missing again."""
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 429, 200], calls, body={"choices": []},
+                             headers={429: {"Retry-After": "2"}}),
+    )
+    provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    err = exc.value
+    assert backoffs == [2.0, 2.0], backoffs
+    assert len(calls) == 3 and err.attempts == 3
+    assert err.waited == pytest.approx(4.0), err.waited
+    assert "after 3 attempts, 4s spent waiting" in err.reason, err.reason
+    assert err.reason in str(err)
+
+
+async def test_the_transcript_records_a_shape_failure_with_its_real_effort(monkeypatch, backoffs):
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, body={"choices": []},
+                             headers={429: {"Retry-After": "1"}}),
+    )
+    mesh = AgentMesh()
+    for agent in mesh.agents.values():
+        agent.provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    transcript = await mesh.talk_p2p("arena-ai", "copilot", "build a rate limiter", turns=1)
+    # Two agents share the scripted double: the first one's 429 was retried, its
+    # peer was answered on its first request. ``len(calls) // 2`` used to stand in
+    # for "this agent's share" - it is ``3 // 2 == 1`` here, so that term admitted
+    # the very value D34 fixed and the assertion passed on the reason clause alone.
+    retried, first_try = transcript[0].metadata, transcript[1].metadata
+    assert retried["simulated"] is True and "did not contain a message" in retried["provider_error"]
+    assert retried["provider_attempts"] == 2, retried
+    assert retried["provider_waited"] == pytest.approx(1.0), retried
+    assert "after 2 attempts" in retried["provider_error"], retried["provider_error"]
+    # The peer was asked once: borrowing the retried agent's 2 would be D34 read backwards.
+    assert first_try["provider_attempts"] == 1 and first_try["provider_waited"] == 0.0, first_try
+    assert "attempts" not in first_try["provider_error"], first_try["provider_error"]
+
+
+# ------- D36: text that is not text must fail the turn, not the process
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"content": [{"type": "text", "text": 123}]},
+        {"content": [{"type": "text", "text": {"nested": 1}}]},
+        {"content": [{"type": "text", "text": ["not", "text"]}]},
+        {"content": 5},
+    ],
+)
+async def test_a_text_block_that_is_not_text_is_a_provider_error(monkeypatch, backoffs, body):
+    """
+    Reproduced before the fix: ``"\\n".join(t for t in texts if t)`` raised a raw
+    ``TypeError`` out of ``AnthropicProvider.generate`` for a block whose ``text``
+    was a number, an object or a list - and for a ``content`` that was not
+    iterable at all. That is not a ``ProviderError``, so nothing downstream could
+    label it: the caller saw ``TypeError: sequence item 0: expected str instance,
+    int found`` with no provider, no attempt count and no ``waited``.
+
+    The body is one the provider cannot use, which is exactly the case D34
+    taught to report as a failure that cost what it cost.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([200], calls, body=body),
+    )
+    provider = _provider(AnthropicProvider, max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="Claude",
+        )
+    err = exc.value
+    assert err.provider == "Anthropic", err.provider
+    assert "did not contain a text block" in err.reason, err.reason
+    assert err.attempts == len(calls) == 1
+    assert err.waited == 0.0
+    assert "TypeError" not in str(err), str(err)
+
+
+async def test_a_non_text_block_after_a_retry_counts_the_requests_and_the_wait(
+    monkeypatch, backoffs
+):
+    """
+    The same body after a real 429: the exchange cost two requests and one
+    ``Retry-After: 1`` wait, and the failure has to say so - the raw
+    ``TypeError`` this used to be carried neither number.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, body={"content": [{"type": "text", "text": 123}]},
+                             headers={429: {"Retry-After": "1"}}),
+    )
+    provider = _provider(AnthropicProvider, max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="Claude",
+        )
+    err = exc.value
+    assert backoffs == [1.0], backoffs
+    assert len(calls) == 2 and err.attempts == 2, (len(calls), err.attempts)
+    assert err.waited == pytest.approx(1.0), err.waited
+    assert "after 2 attempts, 1s spent waiting" in err.reason, err.reason
+    assert err.reason in str(err)
+
+
+async def test_the_transcript_of_a_non_text_block_keeps_the_attempt_record(monkeypatch, backoffs):
+    """What the reader of a degraded turn sees, for the D36 shape."""
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, body={"content": [{"type": "text", "text": 123}]},
+                             headers={429: {"Retry-After": "1"}}),
+    )
+    mesh = AgentMesh()
+    for agent in mesh.agents.values():
+        agent.provider = _provider(AnthropicProvider, max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    transcript = await mesh.talk_p2p("arena-ai", "copilot", "build a rate limiter", turns=1)
+    # The first agent's exchange was retried; its peer was answered by the same
+    # scripted double on its first request, so its record must not borrow the 2.
+    retried, first_try = transcript[0].metadata, transcript[1].metadata
+    assert "did not contain a text block" in retried["provider_error"], retried
+    assert "TypeError" not in retried["provider_error"], retried["provider_error"]
+    assert retried["provider_attempts"] == 2 and retried["provider_waited"] == pytest.approx(1.0), retried
+    assert "after 2 attempts, 1s spent waiting" in retried["provider_error"], retried["provider_error"]
+    assert retried["simulated"] is True
+    assert first_try["provider_attempts"] == 1 and first_try["provider_waited"] == 0.0, first_try
+    assert "attempts" not in first_try["provider_error"], first_try["provider_error"]
+
+
+async def test_a_malformed_block_beside_a_usable_one_is_still_an_answer(monkeypatch, backoffs):
+    """
+    The fix must not over-reach: a block this provider cannot read is skipped,
+    exactly as a non-text block already was, and the turn still answers.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([200], calls,
+                             body={"content": [{"type": "text", "text": 123},
+                                               {"type": "text", "text": "real answer"}]}),
+    )
+    provider = _provider(AnthropicProvider, max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    out = await provider.generate(
+        system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+        agent_role="r", agent_name="Claude",
+    )
+    assert out == "real answer"
+    assert len(calls) == 1
+
+
+async def test_strict_mode_reports_a_non_text_block_as_a_provider_failure(monkeypatch, backoffs):
+    """
+    With fallback off there is nobody to relabel the crash: the run used to die
+    with a bare ``TypeError`` from a join, which is not the provider's answer.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([200], calls, body={"content": [{"type": "text", "text": 123}]}),
+    )
+    mesh = AgentMesh()
+    mesh.arena_ai.provider = _provider(
+        AnthropicProvider, fallback_to_mock=False, max_attempts=3, retry_backoff=0.5, timeout=60.0
+    )
+    with pytest.raises(ProviderError) as exc:
+        await mesh.arena_ai.generate_response("build a rate limiter")
+    err = exc.value
+    assert "did not contain a text block" in err.reason, err.reason
+    assert err.attempts == len(calls) == 1
