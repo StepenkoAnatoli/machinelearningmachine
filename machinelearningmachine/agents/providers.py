@@ -1,22 +1,70 @@
 """
 LLM Provider abstractions supporting:
-- Mock / Intelligent Simulation (zero setup, rich domain-specific outputs)
+- Mock / Intelligent Simulation (zero setup, deterministic template output)
 - OpenAI / OpenAI-compatible API (ChatGPT, GPT-4o, Ollama, LMStudio, vLLM)
 - Anthropic API (Claude 3.5 Sonnet, etc.)
-- Webhook / HTTP endpoints
 
-User-centered: mock provider now generates highly contextual, useful examples
-that actually help users understand the system and get value even without API keys.
+Honesty rules for the simulator (these matter - see SECURITY.md / README):
+* Mock output is always labelled as simulated, because nothing here is
+  compiled, executed, or tested.
+* The simulator must never claim verification ("tests pass", "production
+  ready", "approved"), because a user can paste that code into a real project.
+* A live provider that fails raises :class:`ProviderError`. Callers decide
+  whether to fall back to the simulator and mark the message as degraded -
+  an error string is never returned as if it were a model answer.
+
+User-centered: the mock provider still generates contextual, copy-pasteable
+examples that help without API keys - it just says what it is.
 """
 
-import os
+import asyncio
 import logging
-import re
-from typing import List, Dict, Any, Optional
+import os
+from typing import ClassVar, Dict, List, Optional
+
 from .._deps import install_hint
-from ..protocol.message import Message, MessageType
 
 logger = logging.getLogger("LLMProviders")
+
+#: Prepended to every simulated reply so a transcript can never be mistaken
+#: for a real model conversation, even after it is exported to Markdown.
+SIMULATION_NOTICE = (
+    "> ⚠️ **Simulated output** (`MockLLMProvider`) - no model API was called, "
+    "and none of the code below has been compiled, executed, or tested.\n"
+    "> Configure an API key (⚙️ Settings) for a real model answer.\n\n"
+)
+
+#: Same idea for the case where a real provider was configured but failed.
+FALLBACK_NOTICE_TEMPLATE = (
+    "> ⚠️ **{provider} failed** ({reason}). The reply below is the built-in "
+    "simulator talking, **not** an answer from {provider}.\n\n"
+)
+
+
+class ProviderError(RuntimeError):
+    """
+    A live provider could not produce an answer.
+
+    ``reason`` is user-presentable; ``detail`` is for logs. Callers should
+    either surface this as an error or fall back to the simulator *and say so*
+    - never return the failure as a normal agent message.
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        reason: str,
+        *,
+        detail: str = "",
+        status_code: Optional[int] = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(f"{provider}: {reason}" + (f" [{detail}]" if detail else ""))
+        self.provider = provider
+        self.reason = reason
+        self.detail = detail
+        self.status_code = status_code
+        self.retryable = retryable
 
 
 def _aiohttp():
@@ -32,6 +80,13 @@ def _aiohttp():
 
 
 class BaseLLMProvider:
+    #: True only for the deterministic simulator. The UI, the transcript and
+    #: ``/api/run`` all surface this, so simulated text can never be mistaken
+    #: for a real model answer.
+    is_simulated = False
+    #: Short label used in message metadata and error notices.
+    label = "provider"
+
     async def generate(
         self,
         system_prompt: str,
@@ -49,15 +104,23 @@ class MockLLMProvider(BaseLLMProvider):
     Generates realistic, contextual multi-turn responses with code, reviews,
     critiques, and synthesis without requiring external API keys.
 
+    Every reply is prefixed with :data:`SIMULATION_NOTICE` and tagged as
+    simulated, and the wording deliberately avoids claiming that anything was
+    built, run, reviewed, or tested - because nothing was.
+
     User-centered improvements:
     - Detects many more domains (auth, rate limiting, caching, queues, API, DB, etc.)
-    - Produces more practical, copy-paste-ready code
+    - Produces practical copy-pasteable starting points
     - Includes helpful explanations tailored to actual user prompt
     - Better turn-awareness for coherent multi-turn dialogues
     """
 
-    # Domain detection patterns for more relevant responses
-    DOMAIN_PATTERNS = {
+    is_simulated = True
+    label = "simulator"
+
+    # Domain detection patterns for more relevant responses. Read-only: it is a
+    # lookup table, not per-instance state (hence ClassVar).
+    DOMAIN_PATTERNS: ClassVar[dict] = {
         "rate_limiter": ["rate limit", "throttle", "token bucket", "leaky bucket"],
         "cache": ["cache", "caching", "ttl", "lru", "memoize", "eviction"],
         "queue": ["queue", "event emitter", "pubsub", "pub/sub", "message bus"],
@@ -85,12 +148,16 @@ class MockLLMProvider(BaseLLMProvider):
         agent_name: str,
         task_context: Optional[str] = None,
     ) -> str:
-        # Extract last user message or prompt
+        # Every simulated reply is prefixed so it can never pass for a real one.
+        return SIMULATION_NOTICE + self._generate_reply(
+            system_prompt, messages, agent_role, agent_name, task_context
+        )
+
+    def _generate_reply(self, system_prompt, messages, agent_role, agent_name, task_context) -> str:
         last_msg = messages[-1]["content"] if messages else (task_context or "")
         history_len = len(messages)
         prompt_lower = (task_context or last_msg).lower()
         domain = self._detect_domain(prompt_lower)
-
         # Differentiate based on agent role and conversation turn
         if "arena" in agent_name.lower():
             return self._generate_arena_response(last_msg, prompt_lower, history_len, domain)
@@ -124,28 +191,28 @@ class MockLLMProvider(BaseLLMProvider):
                 f"2. **Processing Pipeline:** Implement asynchronous event execution with non-blocking I/O and proper error boundaries.\n"
                 f"3. **Resilience & Validation:** Graceful degradation, input sanitization, and failure mode handling.\n"
                 f"4. **Observability:** Logging, metrics, and clear status reporting for debugging.\n\n"
-                f"**Acceptance Criteria:**\n"
-                f"- Code must be production-ready, typed, and documented\n"
-                f"- Handle edge cases: empty inputs, concurrency, resource limits\n"
-                f"- Include usage examples\n\n"
+                f"**Acceptance criteria this simulation would aim at:**\n"
+                f"- Typed, documented code that a reviewer could accept\n"
+                f"- Edge cases to cover: empty inputs, concurrency, resource limits\n"
+                f"- Usage examples in the docstrings\n\n"
+                f"_Nothing has been written to disk or run yet - the criteria above are a plan, not a result._\n\n"
                 f"**Handoff to @Copilot:**\n"
                 f"Please implement the core module according to this specification. Ensure strict typing and comprehensive inline documentation."
             )
         else:
             return (
-                f"### [Arena AI Synthesis & Final Verification]\n\n"
-                f"Reviewed implementation from Copilot, architectural critique from Claude, and test suite from GPT.\n\n"
+                f"### [Arena AI Synthesis & Final Summary]\n\n"
+                f"Recap of what the simulated Copilot, Claude and GPT turns said.\n\n"
                 f"**Context:** {last_msg[:200]}...\n\n"
-                f"**Consensus Status: ✅ APPROVED**\n"
-                f"- ✅ Architecture adheres to modular decoupled contract for `{domain}`\n"
-                f"- ✅ Security and error handling satisfy production criteria\n"
-                f"- ✅ Test coverage validates both nominal throughput and boundary exceptions\n"
-                f"- ✅ Code is ready to copy-paste and run\n\n"
-                f"**Next Steps for User:**\n"
-                f"1. Copy the implementation to your project\n"
-                f"2. Run the provided tests with `pytest`\n"
+                f"**Status: ⚠️ UNVERIFIED - simulated consensus, no human or model review took place**\n"
+                f"- The modules above agreed in shape, not in fact: no code was executed\n"
+                f"- No tests were run, so no claim of passing coverage is made here\n"
+                f"- Treat the deliverable as a draft to review, not a sign-off\n\n"
+                f"**Suggested next steps:**\n"
+                f"1. Copy the implementation into your project\n"
+                f"2. Run the proposed tests yourself with `pytest`\n"
                 f"3. Adjust constants (TTL, limits) for your use case\n\n"
-                f"All modules have converged on the final deliverable."
+                f"The dialogue converged; the verification is still yours to do."
             )
 
     def _generate_copilot_response(self, last_msg: str, prompt_lower: str, turn: int, domain: str) -> str:
@@ -339,7 +406,7 @@ class MockLLMProvider(BaseLLMProvider):
             "    created_at: float = field(default_factory=time.time)\n"
             "    status: str = 'pending'\n\n"
             "class CoreServiceEngine:\n"
-            "    \"\"\"Production-ready service engine with thread safety.\n"
+            "    \"\"\"Service engine with a lock around shared state (draft, untested).\n"
             "    \n"
             "    Example:\n"
             "        engine = CoreServiceEngine('my-service')\n"
@@ -361,26 +428,28 @@ class MockLLMProvider(BaseLLMProvider):
         # If this is a revision turn, show improved version
         if "critique" in prompt_lower or "review" in prompt_lower or turn > 2:
             improvement_note = (
-                "\n\n**🔄 Revision addressing critique:**\n"
-                "- Added thread safety with locks\n"
-                "- Added input validation and error handling\n"
-                "- Improved resource bounds and graceful degradation\n"
-                "- Added docstring with usage example"
+                "\n\n**🔄 Revision drafted against the critique:**\n"
+                "- Locks around shared state\n"
+                "- Input validation and error handling\n"
+                "- Resource bounds and graceful degradation\n"
+                "- Docstring with usage example\n\n"
+                "_Changes are proposed only - no test run has confirmed them._"
             )
         else:
             improvement_note = ""
 
         return (
-            f"### [GitHub Copilot Implementation - {domain}]\n\n"
-            f"Here's a production-ready implementation tailored to your request:\n\n"
+            f"### [GitHub Copilot Implementation Draft - {domain}]\n\n"
+            f"A draft implementation shaped to your request (untested, unrun):\n\n"
             f"```python\n{code}\n```\n"
             f"{improvement_note}\n\n"
-            f"**Key Implementation Highlights:**\n"
-            f"- ✅ Thread-safe and handles concurrent access\n"
-            f"- ✅ Strict type annotations and input validation\n"
-            f"- ✅ Ready to copy-paste - includes usage example in docstring\n"
-            f"- ✅ Handles edge cases: empty inputs, resource limits, timeouts\n"
-            f"- Ready for review by **@Claude** (architectural critique) and **@GPT** (test harness)."
+            f"**What the draft tries to do (not yet verified):**\n"
+            f"- Thread safety via a lock around shared state\n"
+            f"- Type annotations and basic input validation\n"
+            f"- A docstring example you can paste and run\n"
+            f"- Some edge cases in mind: empty inputs, resource limits, timeouts\n"
+            f"- Ready for review by **@Claude** (architectural critique) and **@GPT** (test harness).\n\n"
+            f"_Run it and add your own tests before trusting it._"
         )
 
     def _generate_claude_response(self, last_msg: str, prompt_lower: str, turn: int, domain: str) -> str:
@@ -422,19 +491,19 @@ class MockLLMProvider(BaseLLMProvider):
             f"3. **Usability:** Includes docstring with example - great for developer experience\n\n"
             f"**Critical Observations & Recommendations:**\n"
             + "\n".join([f"- **{c.split(' - ')[0]}:** {c.split(' - ')[1] if ' - ' in c else c}" for c in concerns]) +
-            f"\n\n"
-            f"**Security & Reliability Checklist:**\n"
-            f"- [ ] Input validation on all public methods\n"
-            f"- [ ] Thread safety verified under load\n"
-            f"- [ ] Resource limits enforced (memory, queue size)\n"
-            f"- [ ] Graceful degradation on failure\n\n"
-            f"**Suggested Improvement:**\n"
-            f"```python\n"
-            f"# Add this to improve robustness:\n"
-            f"def __repr__(self):\n"
-            f"    return f\"{{self.__class__.__name__}}(...)\"  # Don't leak secrets in logs\n"
-            f"```\n\n"
-            f"Passing to **@GPT** to construct integration test suites verifying these boundary conditions."
+            "\n\n"
+            "**Security & Reliability Checklist (unchecked - this is a review prompt, not an audit):**\n"
+            "- [ ] Input validation on all public methods\n"
+            "- [ ] Thread safety verified under load\n"
+            "- [ ] Resource limits enforced (memory, queue size)\n"
+            "- [ ] Graceful degradation on failure\n\n"
+            "**Suggested Improvement:**\n"
+            "```python\n"
+            "# Add this to improve robustness:\n"
+            "def __repr__(self):\n"
+            "    return f\"{self.__class__.__name__}(...)\"  # Don't leak secrets in logs\n"
+            "```\n\n"
+            "Passing to **@GPT** to construct integration test suites verifying these boundary conditions."
         )
 
     def _generate_gpt_response(self, last_msg: str, prompt_lower: str, turn: int, domain: str) -> str:
@@ -519,19 +588,20 @@ class MockLLMProvider(BaseLLMProvider):
         ))
 
         return (
-            f"### [GPT Test Suite & Verification - {domain}]\n\n"
+            f"### [GPT Proposed Test Suite - {domain}]\n\n"
             f"Synthesizing test coverage for `{domain}` based on Claude's review and Copilot's code:\n\n"
             f"```python\n{test_code}\n```\n\n"
-            f"**Validation Summary:**\n"
-            f"- ✅ `test_allows_within_capacity` / `test_cache_hit`: Nominal path works\n"
-            f"- ✅ `test_refills_over_time` / `test_ttl_expiry`: Time-based behavior correct\n"
-            f"- ✅ `test_thread_safety` / `test_lru_eviction`: Concurrency and bounds enforced\n"
-            f"- ✅ `test_edge_cases`: Empty inputs, max limits handled gracefully\n\n"
-            f"**How to run:**\n"
+            f"**What these tests would cover (nothing has been executed yet):**\n"
+            f"- `test_allows_within_capacity` / `test_cache_hit`: the nominal path\n"
+            f"- `test_refills_over_time` / `test_ttl_expiry`: time-based behaviour\n"
+            f"- `test_thread_safety` / `test_lru_eviction`: concurrency and bounds\n"
+            f"- `test_edge_cases`: empty inputs and max limits\n\n"
+            f"**How to run them yourself:**\n"
             f"```bash\n"
             f"pytest -v --tb=short\n"
             f"```\n\n"
-            f"All assertions should PASS. Returning to **@Arena AI** for final sign-off."
+            f"The simulator cannot know whether they pass - save the file, run `pytest`, "
+            f"and read the real result. Returning to **@Arena AI** for the summary."
         )
 
     def _generate_generic_response(self, name: str, role: str, last_msg: str, turn: int, domain: str) -> str:
@@ -539,22 +609,40 @@ class MockLLMProvider(BaseLLMProvider):
             f"### [{name} - {role}]\n\n"
             f"**Domain:** `{domain}` | **Turn:** {turn}\n\n"
             f"Received: *\"{last_msg[:150]}...\"*\n\n"
-            f"Executing task for **{role}** in `{domain}` domain.\n"
-            f"- ✅ Processed incoming context and extracted requirements\n"
-            f"- ✅ Verified constraints and checked edge cases\n"
-            f"- ✅ Generated output aligned with {domain} best practices\n"
-            f"- Forwarding to peer modules for cross-validation.\n\n"
-            f"**Next:** Peer review will check thread safety, error handling, and resource bounds."
+            f"Simulated `{domain}` step for **{role}** - a template answer, not a tool run.\n"
+            f"- Read the incoming context and pulled out requirements\n"
+            f"- Listed constraints and edge cases worth checking\n"
+            f"- Drafted output in the shape a {domain} reviewer expects\n"
+            f"- Forwarding to peer modules for cross-review\n\n"
+            f"**Next:** peers should look at thread safety, error handling, and resource bounds."
         )
 
 
 class OpenAIProvider(BaseLLMProvider):
     """Integration for OpenAI API or OpenAI-compatible backends (Ollama, LMStudio, vLLM)."""
 
-    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None, model: str = "gpt-4o"):
+    label = "OpenAI"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        model: str = "gpt-4o",
+        fallback_to_mock: bool = True,
+    ):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
         self.model = model
+        #: When False, provider problems raise :class:`ProviderError` instead of
+        #: quietly answering with the simulator.
+        self.fallback_to_mock = fallback_to_mock
+
+    async def _simulate(self, system_prompt, messages, agent_role, agent_name, task_context, reason: str) -> str:
+        """Simulator answer, explicitly labelled as *not* an OpenAI answer."""
+        if not self.fallback_to_mock:
+            raise ProviderError(self.label, reason)
+        text = await MockLLMProvider().generate(system_prompt, messages, agent_role, agent_name, task_context)
+        return FALLBACK_NOTICE_TEMPLATE.format(provider=self.label, reason=reason) + text
 
     async def generate(
         self,
@@ -564,17 +652,21 @@ class OpenAIProvider(BaseLLMProvider):
         agent_name: str,
         task_context: Optional[str] = None,
     ) -> str:
-        if not self.api_key and "localhost" not in self.base_url and "127.0.0.1" not in self.base_url:
-            # Fall back to mock if no API key
-            logger.info("No OpenAI API key found, falling back to mock generator")
-            return await MockLLMProvider().generate(system_prompt, messages, agent_role, agent_name, task_context)
+        local_backend = "localhost" in self.base_url or "127.0.0.1" in self.base_url or "::1" in self.base_url
+        if not self.api_key and not local_backend:
+            # Zero-config mode: be explicit that this is not an OpenAI answer.
+            logger.info("No OpenAI API key configured - answering with the built-in simulator")
+            return await self._simulate(
+                system_prompt, messages, agent_role, agent_name, task_context,
+                reason="no API key is configured, so this is not an OpenAI answer",
+            )
 
         url = f"{self.base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
-        formatted_msgs = [{"role": "system", "content": system_prompt}] + messages
+        formatted_msgs = [{"role": "system", "content": system_prompt}, *messages]
 
         payload = {
             "model": self.model,
@@ -582,22 +674,69 @@ class OpenAIProvider(BaseLLMProvider):
             "temperature": 0.7,
         }
 
-        async with _aiohttp().ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
-                if resp.status != 200:
-                    err_txt = await resp.text()
-                    logger.error(f"OpenAI error {resp.status}: {err_txt}")
-                    return f"[Error calling OpenAI API: HTTP {resp.status}] - Falling back to simulation."
-                data = await resp.json()
-                return data["choices"][0]["message"]["content"]
+        aiohttp = _aiohttp()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    status = resp.status
+                    if status != 200:
+                        err_txt = (await resp.text())[:400]
+                        # Log a truncated copy for the operator, never the key.
+                        logger.error(f"OpenAI error {status}: {err_txt}")
+                        raise ProviderError(
+                            self.label,
+                            f"the API answered HTTP {status}",
+                            detail=err_txt,
+                            status_code=status,
+                            retryable=status in (408, 409, 425, 429, 500, 502, 503, 504),
+                        )
+                    try:
+                        data = await resp.json()
+                    except Exception as exc:
+                        raise ProviderError(
+                            self.label, "the API answered with something that is not JSON"
+                        ) from exc
+        except ProviderError:
+            raise
+        except aiohttp.ClientError as exc:
+            logger.error(f"OpenAI request failed: {exc}")
+            raise ProviderError(
+                self.label, f"could not reach {self.base_url}", detail=str(exc)[:200], retryable=True
+            ) from exc
+        except asyncio.TimeoutError as exc:
+            raise ProviderError(self.label, "timed out after 60s", retryable=True) from exc
+
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ProviderError(
+                self.label, "the API response did not contain a message"
+            ) from exc
+        if not isinstance(content, str) or not content.strip():
+            raise ProviderError(self.label, "the API returned an empty answer")
+        return content
 
 
 class AnthropicProvider(BaseLLMProvider):
     """Integration for Anthropic Messages API (Claude)."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "claude-3-5-sonnet-20241022"):
+    label = "Anthropic"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "claude-3-5-sonnet-20241022",
+        fallback_to_mock: bool = True,
+    ):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.model = model
+        self.fallback_to_mock = fallback_to_mock
+
+    async def _simulate(self, system_prompt, messages, agent_role, agent_name, task_context, reason: str) -> str:
+        if not self.fallback_to_mock:
+            raise ProviderError(self.label, reason)
+        text = await MockLLMProvider().generate(system_prompt, messages, agent_role, agent_name, task_context)
+        return FALLBACK_NOTICE_TEMPLATE.format(provider=self.label, reason=reason) + text
 
     async def generate(
         self,
@@ -608,8 +747,11 @@ class AnthropicProvider(BaseLLMProvider):
         task_context: Optional[str] = None,
     ) -> str:
         if not self.api_key:
-            logger.info("No Anthropic API key found, falling back to mock generator")
-            return await MockLLMProvider().generate(system_prompt, messages, agent_role, agent_name, task_context)
+            logger.info("No Anthropic API key configured - answering with the built-in simulator")
+            return await self._simulate(
+                system_prompt, messages, agent_role, agent_name, task_context,
+                reason="no API key is configured, so this is not an Anthropic answer",
+            )
 
         url = "https://api.anthropic.com/v1/messages"
         headers = {
@@ -634,11 +776,40 @@ class AnthropicProvider(BaseLLMProvider):
             "max_tokens": 2048,
         }
 
-        async with _aiohttp().ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
-                if resp.status != 200:
-                    err_txt = await resp.text()
-                    logger.error(f"Anthropic error {resp.status}: {err_txt}")
-                    return f"[Error calling Anthropic API: HTTP {resp.status}]"
-                data = await resp.json()
-                return data["content"][0]["text"]
+        aiohttp = _aiohttp()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    status = resp.status
+                    if status != 200:
+                        err_txt = (await resp.text())[:400]
+                        logger.error(f"Anthropic error {status}: {err_txt}")
+                        raise ProviderError(
+                            self.label,
+                            f"the API answered HTTP {status}",
+                            detail=err_txt,
+                            status_code=status,
+                            retryable=status in (408, 409, 425, 429, 500, 502, 503, 504),
+                        )
+                    try:
+                        data = await resp.json()
+                    except Exception as exc:
+                        raise ProviderError(
+                            self.label, "the API answered with something that is not JSON"
+                        ) from exc
+        except ProviderError:
+            raise
+        except aiohttp.ClientError as exc:
+            logger.error(f"Anthropic request failed: {exc}")
+            raise ProviderError(
+                self.label, "could not reach api.anthropic.com", detail=str(exc)[:200], retryable=True
+            ) from exc
+        except asyncio.TimeoutError as exc:
+            raise ProviderError(self.label, "timed out after 60s", retryable=True) from exc
+
+        blocks = data.get("content") or [] if isinstance(data, dict) else []
+        texts = [b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
+        content = "\n".join(t for t in texts if t).strip()
+        if not content:
+            raise ProviderError(self.label, "the API response did not contain a text block")
+        return content

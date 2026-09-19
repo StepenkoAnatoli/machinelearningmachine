@@ -1,29 +1,57 @@
 """
-FastAPI Server & WebSocket Hub for MachineLearningMachine Dashboard.
-Hosts real-time inter-module communication events, REST endpoints, and UI preview.
-User-centered improvements: input validation, rate limiting, security fixes, better errors.
+FastAPI app & WebSocket hub for the MachineLearningMachine dashboard.
+
+Security model (read this before exposing the port to a network)
+----------------------------------------------------------------
+* Binds to ``127.0.0.1`` by default. Any other interface needs
+  ``--allow-public`` **and** ``--auth-token`` (see
+  :func:`machinelearningmachine.server.config.validate_bind_policy`).
+* State is per browser session, not global: each session owns its own
+  :class:`~machinelearningmachine.mesh.AgentMesh`, provider configuration,
+  rate-limit bucket and WebSocket set (``server/state.py``).
+* ``/api/read/url`` is disabled unless ``--enable-url-reader`` is passed, and
+  even then every hop is validated by :mod:`machinelearningmachine.netguard`.
+* Browser assets are vendored under ``/static/vendor`` so the app can run with
+  ``Content-Security-Policy: default-src 'self'`` and no third-party origin.
+* API keys are kept in memory per session, never persisted and never logged.
+  They are format-checked only - a key is not verified against the provider
+  unless the caller asks for it explicitly.
+
+The module-level ``app`` keeps ``uvicorn machinelearningmachine.server.app:app``
+working; ``create_app(config)`` is what the CLI uses.
 """
+
+from __future__ import annotations
 
 import asyncio
 import html
 import logging
 import re
+import secrets
 import time
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
-import requests
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 
+from .. import netguard
 from .. import sessions as session_store
-from ..mesh import AgentMesh
-from ..protocol.message import Message
 from ..agents.custom import CustomAgent
-from ..agents.providers import OpenAIProvider, AnthropicProvider
+from ..agents.providers import AnthropicProvider, OpenAIProvider, ProviderError
+from ..mesh import AgentMesh
+from ..protocol.bus import MessageBus
+from ..protocol.message import Message
+from .config import (
+    AUTH_TOKEN_ENV_VAR,
+    CLIENT_COOKIE_NAME,
+    SESSION_COOKIE_NAME,
+    ServerConfig,
+)
+from .state import LoginThrottle, SessionRegistry, SessionState
 
 logger = logging.getLogger("server")
 
@@ -35,65 +63,29 @@ MAX_ROLE_LENGTH = 200
 MAX_SYSTEM_PROMPT_LENGTH = 2000
 AGENT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-_]{1,48}[a-z0-9]$|^[a-z0-9]$")
 RESERVED_AGENT_IDS = {"system", "broadcast", "all", "*", "api", "admin", "root"}
-
-# Simple in-memory rate limiting for user protection
-_last_run_time: Dict[str, float] = {}
+MAX_AGENTS_PER_SESSION = 20
+MAX_CUSTOM_AGENTS_PER_SESSION = 16
 RUN_COOLDOWN_SECONDS = 1.0  # Prevent accidental double-clicks / spam
-_last_url_read_time: Dict[str, float] = {}
 URL_READ_COOLDOWN_SECONDS = 2.0
+#: Wrong tokens an attacker may try before this client is locked out, and for how long.
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCKOUT_SECONDS = 60.0
+#: How many messages the browser keeps and renders - the same bound the bus
+#: applies server-side, so a long-lived tab cannot grow without limit.
+CLIENT_HISTORY_LIMIT = MessageBus.MAX_HISTORY
+
+#: Requests that may skip authentication. Everything else 401s when a token is set.
+PUBLIC_PATHS = {"/", "/health", "/favicon.ico"}
+PUBLIC_PREFIXES = ("/static/", "/api/auth/")
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
-app = FastAPI(
-    title="MachineLearningMachine - Inter-Module Communication Mesh",
-    description="Orchestration platform enabling Arena AI, Copilot, Claude, GPT, and custom modules to talk to each other.",
-    version="0.1.0",
-)
 
-# Enable CORS for all hosts (including preview URLs)
-# Note: allow_credentials=False when using wildcard origins - browsers reject
-# wildcard + credentials combination. This is intentional for security.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
-    allow_headers=["*"],
-)
+# ---------------------------------------------------------------------------
+# Request models with user-centred validation
+# ---------------------------------------------------------------------------
 
-# Global AgentMesh instance
-mesh = AgentMesh()
-
-# Active WebSocket connections
-active_connections: List[WebSocket] = []
-
-
-async def broadcast_ws(payload: Dict[str, Any]):
-    disconnected = []
-    for ws in active_connections:
-        try:
-            await ws.send_json(payload)
-        except Exception:
-            disconnected.append(ws)
-    for ws in disconnected:
-        if ws in active_connections:
-            active_connections.remove(ws)
-
-
-async def on_bus_message(msg: Message):
-    """Broadcast new bus message to connected WebSockets."""
-    await broadcast_ws({
-        "type": "new_message",
-        "message": msg.to_dict(),
-    })
-
-
-# Register global bus hook
-mesh.on_message(on_bus_message)
-
-
-# Request Models with user-centered validation
 class RunTaskRequest(BaseModel):
     topology: str = Field(..., description="Communication topology")
     prompt: str = Field(..., min_length=1, max_length=MAX_PROMPT_LENGTH, description="Task prompt")
@@ -139,7 +131,7 @@ class AddAgentRequest(BaseModel):
     role: str = Field(..., min_length=1, max_length=MAX_ROLE_LENGTH)
     system_prompt: str = Field(..., min_length=10, max_length=MAX_SYSTEM_PROMPT_LENGTH)
     color: Optional[str] = Field(default="#3b82f6", pattern=r"^#[0-9a-fA-F]{6}$")
-    avatar: Optional[str] = Field(default="🤖", max_length=10)
+    avatar: Optional[str] = Field(default="🤖", max_length=8)
 
     @field_validator("agent_id")
     @classmethod
@@ -166,6 +158,9 @@ class ConfigApiKeysRequest(BaseModel):
     openai_api_key: Optional[str] = Field(default=None, max_length=500)
     anthropic_api_key: Optional[str] = Field(default=None, max_length=500)
     openai_base_url: Optional[str] = Field(default=None, max_length=500)
+    #: Ask for a live credentials check instead of trusting the shape of the key.
+    verify: bool = False
+    clear: bool = False
 
     @field_validator("openai_base_url")
     @classmethod
@@ -175,7 +170,16 @@ class ConfigApiKeysRequest(BaseModel):
         v = v.strip()
         if not (v.startswith("http://") or v.startswith("https://")):
             raise ValueError("Base URL must start with http:// or https://")
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError("Base URL must be a valid http(s) URL with a host")
+        if parsed.username or parsed.password:
+            raise ValueError("Base URL must not embed credentials")
         return v.rstrip("/")
+
+
+class LoginRequest(BaseModel):
+    token: str = Field(..., min_length=1, max_length=512)
 
 
 class SaveSessionRequest(BaseModel):
@@ -198,239 +202,13 @@ class ReadUrlRequest(BaseModel):
         return v
 
 
-@app.get("/api/agents")
-async def get_agents():
-    """List all registered modules."""
-    return mesh.list_agents()
-
-
-@app.post("/api/agents")
-async def add_agent(req: AddAgentRequest):
-    """Dynamically register a new custom module with validation."""
-    if req.agent_id in mesh.agents:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Agent ID '{req.agent_id}' already exists. Choose a different ID."
-        )
-
-    # Prevent too many custom agents (resource protection)
-    if len(mesh.agents) >= 20:
-        raise HTTPException(
-            status_code=400,
-            detail="Too many agents registered (max 20). Remove some or clear session."
-        )
-
-    try:
-        agent = CustomAgent(
-            agent_id=req.agent_id,
-            name=req.name,
-            role=req.role,
-            system_prompt=req.system_prompt,
-            color=req.color or "#ec4899",
-            avatar=req.avatar or "🧩",
-            bus=mesh.bus,
-        )
-        mesh.register_agent(agent)
-        await broadcast_ws({"type": "agents_updated", "agents": mesh.list_agents()})
-        logger.info(f"Custom agent registered: {req.agent_id}")
-        return {"status": "success", "agent": agent.to_dict()}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to add agent {req.agent_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to register agent. Please try again.")
-
-
-@app.get("/api/history")
-async def get_history(limit: Optional[int] = None):
-    """Get past messages in the session, optionally limited."""
-    history = mesh.get_history()
-    if limit is not None:
-        limit = max(1, min(limit, 500))
-        history = history[-limit:]
-    return [m.to_dict() for m in history]
-
-
-@app.post("/api/clear")
-async def clear_session():
-    """Clear message history and reset module memory."""
-    mesh.clear_history()
-    await broadcast_ws({"type": "history_cleared"})
-    return {"status": "cleared"}
-
-
-@app.get("/api/export/markdown")
-async def export_markdown():
-    """Export transcript as markdown with proper content type."""
-    markdown = mesh.export_markdown()
-    if not markdown.strip() or markdown.strip() == "# Multi-Agent Dialogue Transcript":
-        return {"markdown": "# No messages yet\n\nStart a dialogue to generate a transcript."}
-    return {"markdown": markdown}
-
-
-@app.get("/api/export/json")
-async def export_json():
-    """Export transcript as JSON."""
-    json_str = mesh.export_json()
-    # Return parsed validation
-    try:
-        import json
-        parsed = json.loads(json_str)
-        if not parsed:
-            return {"json": "[]"}
-    except Exception:
-        pass
-    return {"json": json_str}
-
-
-@app.get("/api/export/markdown/download")
-async def export_markdown_download():
-    """Download markdown as file with proper headers."""
-    markdown = mesh.export_markdown()
-    return PlainTextResponse(
-        content=markdown,
-        media_type="text/markdown",
-        headers={"Content-Disposition": "attachment; filename=module_mesh_transcript.md"}
-    )
-
-
-@app.get("/api/export/json/download")
-async def export_json_download():
-    """Download JSON as file with proper headers."""
-    json_str = mesh.export_json()
-    return PlainTextResponse(
-        content=json_str,
-        media_type="application/json",
-        headers={"Content-Disposition": "attachment; filename=module_mesh_transcript.json"}
-    )
-
-
-@app.post("/api/config")
-async def update_config(req: ConfigApiKeysRequest):
-    """Configure API keys for real LLM models. Keys are kept in-memory only."""
-    configured = []
-    try:
-        if req.openai_api_key or req.openai_base_url:
-            # Validate key format loosely - don't log it
-            if req.openai_api_key and not req.openai_api_key.startswith(("sk-", "ollama", "lm-")) and len(req.openai_api_key) < 8:
-                if "localhost" not in (req.openai_base_url or "") and "127.0.0.1" not in (req.openai_base_url or ""):
-                    raise HTTPException(status_code=400, detail="OpenAI API key looks invalid")
-
-            provider = OpenAIProvider(api_key=req.openai_api_key, base_url=req.openai_base_url)
-            if mesh.gpt:
-                mesh.gpt.provider = provider
-            if mesh.copilot:
-                mesh.copilot.provider = provider
-            configured.append("OpenAI")
-
-        if req.anthropic_api_key:
-            if not req.anthropic_api_key.startswith("sk-ant-") and len(req.anthropic_api_key) < 10:
-                raise HTTPException(status_code=400, detail="Anthropic API key looks invalid")
-
-            provider = AnthropicProvider(api_key=req.anthropic_api_key)
-            if mesh.claude:
-                mesh.claude.provider = provider
-            if mesh.arena_ai:
-                mesh.arena_ai.provider = provider
-            configured.append("Anthropic")
-
-        if not configured:
-            return {"status": "success", "message": "No keys provided - using built-in simulator"}
-
-        return {"status": "success", "message": f"Configured: {', '.join(configured)}. Keys kept in-memory only."}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Config error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to configure providers")
-
-
-# ===== Saved Sessions (store / list / load / delete) =====
-
-
-@app.post("/api/sessions")
-async def save_session(req: SaveSessionRequest):
-    """Save the current agents + conversation to this computer for later."""
-    if not mesh.get_history():
-        raise HTTPException(
-            status_code=400,
-            detail="There is nothing to save yet - run a dialogue first, then save it.",
-        )
-    try:
-        meta = session_store.save_session(
-            name=req.name,
-            agents=mesh.list_agents(),
-            messages=[m.to_dict() for m in mesh.get_history()],
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to save session: {e}")
-        raise HTTPException(status_code=500, detail="Could not save the session. Please try again.")
-    logger.info(f"Session saved: {meta['id']} ({meta['name']})")
-    return {"status": "saved", "session": meta}
-
-
-@app.get("/api/sessions")
-async def list_sessions():
-    """List all saved sessions, newest first."""
-    return {"sessions": session_store.list_sessions()}
-
-
-@app.get("/api/sessions/{session_id}")
-async def get_session(session_id: str):
-    """Return one full saved session."""
-    data = session_store.get_session(session_id)
-    if not data:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return data
-
-
-@app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
-    """Delete a saved session."""
-    if not session_store.delete_session(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
-    return {"status": "deleted"}
-
-
-@app.post("/api/sessions/load")
-async def load_session(req: LoadSessionRequest):
-    """Restore agents + conversation from a saved session into the live mesh."""
-    data = session_store.get_session(req.session_id)
-    if not data:
-        raise HTTPException(
-            status_code=404,
-            detail="Session not found - it may have been deleted.",
-        )
-
-    try:
-        mesh.reset_to_session(data.get("agents", []))
-        messages = []
-        for m in data.get("messages", []):
-            clean = {k: v for k, v in m.items() if k != "formatted_time"}
-            messages.append(Message(**clean))
-        mesh.load_messages(messages)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Could not restore this session: {e}")
-    except Exception as e:
-        logger.error(f"Failed to load session {req.session_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to load the session. Please try again.")
-
-    await broadcast_ws({
-        "type": "session_loaded",
-        "name": data.get("name"),
-        "agents": mesh.list_agents(),
-        "history": [m.to_dict() for m in mesh.get_history()],
-    })
-    logger.info(f"Session loaded: {data.get('name')} ({len(messages)} messages)")
-    return {"status": "loaded", "name": data.get("name"), "messages": len(messages)}
-
-
-# ===== Web page reader (feeds the Read-Aloud Studio) =====
+# ---------------------------------------------------------------------------
+# HTML -> readable text (pure functions, no I/O, unit-testable)
+# ---------------------------------------------------------------------------
 
 MAX_READ_CHARS = 60_000
-MAX_READ_BYTES = 1_000_000  # stop downloading pages bigger than ~1 MB
+#: Cap on how much of a page we buffer; enforced again inside netguard.
+MAX_READ_BYTES = netguard.MAX_FETCH_BYTES
 
 
 def _html_to_text(raw_html: str) -> str:
@@ -460,32 +238,8 @@ def _extract_title(raw_html: str) -> str:
     return ""
 
 
-def fetch_page_text(url: str) -> Dict[str, Any]:
-    """
-    Fetch a public web page and reduce it to readable plain text.
-    Runs in a worker thread (called via ``asyncio.to_thread``).
-    """
-    resp = requests.get(
-        url,
-        timeout=15,
-        stream=True,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; ModuleMesh-Reader/1.0)"},
-    )
-    try:
-        resp.raise_for_status()
-        # Only read as much of the body as we need.
-        chunks = []
-        downloaded = 0
-        for chunk in resp.iter_content(chunk_size=65536):
-            chunks.append(chunk)
-            downloaded += len(chunk)
-            if downloaded >= MAX_READ_BYTES:
-                break
-        body = b"".join(chunks).decode("utf-8", errors="replace")
-    finally:
-        resp.close()
-
-    content_type = resp.headers.get("content-type", "")
+def page_text_from_body(body: str, content_type: str) -> Dict[str, Any]:
+    """Turn a fetched body into {title, text, truncated} for the reader."""
     title = ""
     if "json" in content_type:
         text = body
@@ -494,169 +248,937 @@ def fetch_page_text(url: str) -> Dict[str, Any]:
         text = _html_to_text(body)
     else:
         text = body
-
     text = text.strip()
     truncated = len(text) > MAX_READ_CHARS
     return {"title": title, "text": text[:MAX_READ_CHARS], "truncated": truncated}
 
 
-@app.post("/api/read/url")
-async def read_url(req: ReadUrlRequest, request: Request):
-    """Fetch a web page and return its readable text (for reading aloud)."""
-    client_id = request.client.host if request.client else "unknown"
-    now = time.time()
-    last = _last_url_read_time.get(client_id, 0)
-    if now - last < URL_READ_COOLDOWN_SECONDS:
-        raise HTTPException(status_code=429, detail="Please wait a moment between page reads")
-    _last_url_read_time[client_id] = now
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
 
-    try:
-        data = await asyncio.to_thread(fetch_page_text, req.url)
-    except requests.exceptions.Timeout:
-        raise HTTPException(status_code=504, detail="That page took too long to load - try a different URL")
-    except requests.exceptions.RequestException as e:
-        raw = str(e)
-        if "404" in raw or "Not Found" in raw:
-            detail = "That page was not found (404) - double-check the link."
-        elif "403" in raw:
-            detail = "That site refused the request (403) - it may block automated readers. Try another page."
-        elif "Name or service not known" in raw or "getaddrinfo" in raw:
-            detail = "Could not find that address - check the URL for typos."
-        else:
-            detail = "Could not reach that page. Check the URL and your internet connection, then try again."
-        raise HTTPException(status_code=400, detail=detail)
-    except Exception as e:
-        logger.error(f"URL read failed for {req.url}: {e}")
-        raise HTTPException(status_code=500, detail="Could not read that page. Please try again.")
+def create_app(config: Optional[ServerConfig] = None) -> FastAPI:
+    """Build the dashboard app. ``config`` controls auth and the URL reader."""
+    config = config or ServerConfig()
 
-    if not data["text"]:
-        raise HTTPException(status_code=422, detail="No readable text found at that URL")
-    return {"status": "ok", "url": req.url, **data}
+    app = FastAPI(
+        title="MachineLearningMachine - Inter-Module Communication Mesh",
+        description=(
+            "Orchestration platform enabling Arena AI, Copilot, Claude, GPT, and custom "
+            "modules to talk to each other. Local tool: authenticated, per-session state, "
+            "no third-party assets."
+        ),
+        version="0.1.0",
+    )
+    app.state.config = config
+    registry = _build_registry(config)
+    app.state.registry = registry
+    # Failed sign-ins are counted per client, not per session, and the counter
+    # survives a discarded cookie jar (see state.LoginThrottle).
+    throttle = LoginThrottle(max_failures=LOGIN_MAX_FAILURES, lockout_seconds=LOGIN_LOCKOUT_SECONDS)
+    app.state.login_throttle = throttle
 
+    if config.allow_origins:
+        # Only when an operator explicitly names origins; never "*" with cookies in play.
+        from fastapi.middleware.cors import CORSMiddleware
 
-@app.post("/api/run")
-async def run_dialogue(req: RunTaskRequest, request: Request):
-    """Execute a multi-agent dialogue based on chosen topology with rate limiting and validation."""
-    # Simple rate limiting by IP to prevent spam / accidental double-clicks
-    client_id = request.client.host if request.client else "unknown"
-    now = time.time()
-    last = _last_run_time.get(client_id, 0)
-    if now - last < RUN_COOLDOWN_SECONDS:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Please wait {RUN_COOLDOWN_SECONDS:.0f}s between runs"
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(config.allow_origins),
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["Content-Type", "Authorization"],
         )
-    _last_run_time[client_id] = now
 
-    # Validate agent existence early for better error messages
-    if req.topology == "p2p":
-        if req.from_agent not in mesh.agents:
-            raise HTTPException(status_code=400, detail=f"Initiating agent '{req.from_agent}' not found")
-        if req.to_agent not in mesh.agents:
-            raise HTTPException(status_code=400, detail=f"Responding agent '{req.to_agent}' not found")
-        if req.from_agent == req.to_agent:
-            raise HTTPException(status_code=400, detail="Cannot start dialogue with same agent as both sides")
-    elif req.agent_ids:
-        missing = [aid for aid in req.agent_ids if aid not in mesh.agents]
-        if missing:
-            raise HTTPException(status_code=400, detail=f"Agents not found: {', '.join(missing)}")
+    app.add_middleware(SecurityHeadersMiddleware)
+    _register_routes(app, config, registry, throttle)
+    _mount_static(app)
+    return app
 
-    await broadcast_ws({
-        "type": "run_started",
-        "topology": req.topology,
-        "prompt": req.prompt[:200],  # Don't broadcast full prompt for privacy
-    })
 
-    try:
-        if req.topology == "p2p":
-            transcript = await mesh.talk_p2p(
-                from_agent_id=req.from_agent or "arena-ai",
-                to_agent_id=req.to_agent or "copilot",
-                prompt=req.prompt,
-                turns=req.turns or 4,
+def _build_registry(config: ServerConfig) -> SessionRegistry:
+    def make_mesh(cfg: ServerConfig) -> AgentMesh:
+        return AgentMesh(max_history=CLIENT_HISTORY_LIMIT)
+
+    registry = SessionRegistry(
+        max_sessions=config.max_sessions,
+        idle_ttl=config.session_idle_ttl,
+        mesh_factory=make_mesh,
+        config=config,
+    )
+    return registry
+
+
+def _register_routes(
+    app: FastAPI, config: ServerConfig, registry: SessionRegistry, throttle: LoginThrottle
+) -> None:
+    # -- helpers ----------------------------------------------------------
+    async def broadcast_ws(state: SessionState, payload: Dict[str, Any]) -> None:
+        """Send to this session's sockets only - never to a stranger's tab."""
+        dead = []
+        for ws in list(state.websockets):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            state.websockets.discard(ws)
+
+    def attach_listener(state: SessionState) -> None:
+        async def on_bus_message(msg: Message) -> None:
+            await broadcast_ws(state, {"type": "new_message", "message": msg.to_dict()})
+
+        state.mesh.on_message(on_bus_message)
+        state.provider_config.setdefault("_listener", id(on_bus_message))
+
+    registry.on_evict = lambda state: _schedule_close_all(state)
+
+    def _schedule_close_all(state: SessionState) -> None:
+        for ws in list(state.websockets):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                loop.create_task(_close_ws(ws))
+            state.websockets.discard(ws)
+
+    async def _close_ws(ws: WebSocket) -> None:
+        try:
+            await ws.close(code=1000)
+        except Exception:
+            pass
+
+    def token_from_request(request: Request) -> Optional[str]:
+        header = request.headers.get("authorization", "")
+        if header.lower().startswith("bearer "):
+            return header[7:].strip()
+        return request.headers.get("x-mesh-token")
+
+    def state_of(request: Request) -> Optional[SessionState]:
+        return getattr(request.state, "session_state", None)
+
+    # -- dependency: session + authentication -----------------------------
+    @app.middleware("http")
+    async def session_and_auth(request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/static"):
+            return await call_next(request)
+
+        client_id = session_store.sanitize_namespace(request.cookies.get(CLIENT_COOKIE_NAME))
+        issued_client_cookie = False
+        if not client_id:
+            client_id, issued_client_cookie = secrets.token_hex(12), True
+
+        supplied = token_from_request(request)
+        token_ok = bool(supplied) and config.check_token(supplied)
+
+        presented_session = request.cookies.get(SESSION_COOKIE_NAME)
+        state = registry.get(presented_session)
+        if state is not None and state.ephemeral:
+            # The client is echoing the cookie back, so this session now *is*
+            # pinned to that browser: give it the normal idle lifetime.
+            state.ephemeral = False
+        if state is None and (not config.require_auth or token_ok):
+            # A token-protected server never allocates a session for a caller who
+            # has not proven the token yet: otherwise anyone could fill the
+            # bounded registry (each entry owns a mesh, a transcript and
+            # listeners) and evict real users without authenticating at all.
+            # A caller that proves the token by header but keeps no cookies is
+            # marked ephemeral: short idle lifetime, and evicted first.
+            state = _state_for(client_id, ephemeral=config.require_auth and not presented_session)
+        if state is not None and token_ok:
+            # Header-based access (API clients) also unlocks this browser session.
+            state.authenticated = True
+        request.state.session_state = state
+        request.state.client_id = client_id
+        request.state.new_client_cookie = issued_client_cookie
+
+        if config.require_auth and not _is_public_path(path):
+            if state is None or not state.authenticated:
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": "This server requires an access token.",
+                        "auth_required": True,
+                        "hint": (
+                            "Paste the token in the dashboard, or send "
+                            "'Authorization: Bearer <token>'. It is configured with "
+                            f"--auth-token or {AUTH_TOKEN_ENV_VAR}."
+                        ),
+                    },
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+        # CSRF: a *body-carrying* mutation must be JSON. A cross-site <form> can
+        # only send urlencoded / multipart / text/plain, all of which are
+        # rejected here, so it cannot drive this API. Bodiless POSTs (e.g.
+        # /api/clear) carry nothing for a form to forge, so they are allowed.
+        if request.method in ("POST", "DELETE", "PUT", "PATCH") and state is not None:
+            length = (request.headers.get("content-length") or "0").strip()
+            has_body = length not in ("", "0") or "transfer-encoding" in request.headers
+            content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+            if has_body and content_type != "application/json":
+                return JSONResponse(
+                    status_code=415,
+                    content={
+                        "detail": "Requests with a body must use Content-Type: application/json."
+                    },
+                )
+
+        response = await call_next(request)
+
+        # A route may have created the session on the way through (sign-in does),
+        # so re-read it before deciding which cookies the client gets to keep.
+        state = state_of(request) or state
+
+        if response.status_code < 500:
+            # Secure follows the actual scheme (including X-Forwarded-Proto from a
+            # TLS-terminating proxy): a Secure-only cookie over plain http would
+            # simply be dropped by the browser and every session would reset.
+            secure = (
+                config.secure_cookies
+                if config.secure_cookies is not None
+                else request_is_https(request)
             )
-        elif req.topology == "pipeline":
-            transcript = await mesh.run_pipeline(
-                prompt=req.prompt,
-                agent_ids=req.agent_ids,
+            if state is not None:
+                _set_cookie(response, SESSION_COOKIE_NAME, state.session_id, max_age=None, secure=secure)
+            if issued_client_cookie:
+                _set_cookie(
+                    response, CLIENT_COOKIE_NAME, client_id,
+                    max_age=60 * 60 * 24 * 365, secure=secure,
+                )
+        return response
+
+    def _state_for(client_id: str, *, ephemeral: bool = False) -> SessionState:
+        """
+        Create a session state and wire its private broadcast listener.
+
+        ``ephemeral`` marks a session that was created for a caller we could not
+        bind to a persistent cookie (a bearer-token client that keeps no cookies).
+        Those get a much shorter idle lifetime and are evicted first, so a
+        script cannot crowd real browsers out of the bounded registry.
+        """
+        state = registry.create(client_id, ephemeral=ephemeral)
+        _attach_listener(state)
+        return state
+
+    def _attach_listener(state: SessionState) -> None:
+        async def on_bus_message(msg: Message) -> None:
+            await broadcast_ws(state, {"type": "new_message", "message": msg.to_dict()})
+
+        state.mesh.on_message(on_bus_message)
+
+    def request_is_https(request: Request) -> bool:
+        scheme = (request.url.scheme or "").lower()
+        forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+        return scheme == "https" or forwarded == "https"
+
+    def _set_cookie(response: Response, name: str, value: str, *, max_age: Optional[int], secure: bool) -> None:
+        if not value:
+            return
+        response.set_cookie(
+            key=name,
+            value=value,
+            max_age=max_age,
+            httponly=True,
+            samesite="lax",
+            secure=secure,
+            path="/",
+        )
+
+    def current_state(request: Request) -> SessionState:
+        state = state_of(request)
+        if state is None:
+            raise HTTPException(status_code=503, detail="No session available - reload the page.")
+        return state
+
+    # -- authentication endpoints ----------------------------------------
+    @app.get("/api/auth/status")
+    async def auth_status(request: Request):
+        state = state_of(request)
+        return {
+            "auth_required": config.require_auth,
+            "authenticated": bool(state and state.authenticated) or not config.require_auth,
+            "url_reader_enabled": config.enable_url_reader,
+            "version": app.version,
+        }
+
+    @app.post("/api/auth/login", status_code=200)
+    async def auth_login(req: LoginRequest, request: Request):
+        if not config.require_auth:
+            # Loopback mode needs no token. Accepting (and remembering) one here
+            # would imply a protection that is not switched on, so refuse instead
+            # of pretending the sign-in did something.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This server does not require an access token (it is bound to "
+                    "localhost), so there is nothing to sign in to."
+                ),
             )
-        elif req.topology == "debate":
-            transcript = await mesh.run_debate(
-                prompt=req.prompt,
-                agent_ids=req.agent_ids,
+        # Keyed by the client cookie the browser *presented*, falling back to the
+        # peer address - never by a freshly generated id, or discarding cookies
+        # would reset the counter. (The session itself is not yet created here.)
+        key = session_store.sanitize_namespace(request.cookies.get(CLIENT_COOKIE_NAME)) or (
+            request.client.host if request.client else "unknown"
+        )
+        retry = throttle.locked_for(key)
+        if retry > 0:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many incorrect tokens. Try again in {max(1, int(retry))}s.",
             )
-        elif req.topology == "hub":
-            transcript = await mesh.run_hub_and_spoke(
-                prompt=req.prompt,
-                hub_id=req.from_agent or "arena-ai",
-                spoke_ids=req.agent_ids,
+        # Constant-time compare, and never log or echo the token itself.
+        if not config.check_token(req.token.strip()):
+            throttle.record_failure(key)
+            raise HTTPException(status_code=401, detail="That access token is not valid.")
+        throttle.reset(key)
+        state = state_of(request)
+        if state is None:
+            # The session exists only once the token checked out.
+            state = _state_for(key)
+            request.state.session_state = state
+        state.authenticated = True
+        return {
+            "status": "ok",
+            "authenticated": True,
+            "agents": state.mesh.list_agents(),
+            "history": [m.to_dict() for m in state.mesh.get_history()][-200:],
+        }
+
+    @app.post("/api/auth/logout")
+    async def auth_logout(request: Request):
+        state = state_of(request)
+        if state is not None:
+            state.authenticated = False
+        return {"status": "signed_out"}
+
+    # -- agents -----------------------------------------------------------
+    @app.get("/api/agents")
+    async def get_agents(state: SessionState = Depends(current_state)):
+        """List the modules registered in *this* session."""
+        return state.mesh.list_agents()
+
+    @app.post("/api/agents")
+    async def add_agent(req: AddAgentRequest, state: SessionState = Depends(current_state)):
+        """Dynamically register a new custom module with validation."""
+        mesh = state.mesh
+        if req.agent_id in mesh.agents:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Agent ID '{req.agent_id}' already exists. Choose a different ID.",
             )
-        else:
-            raise HTTPException(status_code=400, detail=f"Unknown topology '{req.topology}'")
+        custom_count = sum(1 for aid in mesh.agents if aid not in mesh.BUILTIN_AGENT_IDS)
+        if len(mesh.agents) >= MAX_AGENTS_PER_SESSION or custom_count >= MAX_CUSTOM_AGENTS_PER_SESSION:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Too many agents in this session (max {MAX_AGENTS_PER_SESSION}). "
+                    "Remove some or clear the session."
+                ),
+            )
+        try:
+            agent = CustomAgent(
+                agent_id=req.agent_id,
+                name=req.name,
+                role=req.role,
+                system_prompt=req.system_prompt,
+                color=req.color or "#ec4899",
+                avatar=req.avatar or "🧩",
+                bus=mesh.bus,
+            )
+            mesh.register_agent(agent)
+            await broadcast_ws(state, {"type": "agents_updated", "agents": mesh.list_agents()})
+            logger.info("Custom agent registered: %s", req.agent_id)
+            return {"status": "success", "agent": agent.to_dict()}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as exc:
+            logger.error("Failed to add agent %s", req.agent_id, exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to register agent. Please try again.") from exc
 
-        await broadcast_ws({"type": "run_completed"})
-        return {"status": "completed", "messages": [m.to_dict() for m in transcript]}
+    # -- transcript -------------------------------------------------------
+    @app.get("/api/history")
+    async def get_history(limit: Optional[int] = None, state: SessionState = Depends(current_state)):
+        history = state.mesh.get_history()
+        if limit is not None:
+            limit = max(1, min(limit, 500))
+            history = history[-limit:]
+        return [m.to_dict() for m in history]
 
-    except HTTPException:
-        raise
-    except ValueError as e:
-        # User errors - 400
-        await broadcast_ws({"type": "run_error", "error": str(e)})
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Dialogue execution failed: {e}", exc_info=True)
-        await broadcast_ws({"type": "run_error", "error": "Internal error during dialogue execution"})
-        raise HTTPException(status_code=500, detail="Failed to execute dialogue. Please try again.")
+    @app.post("/api/clear")
+    async def clear_session(state: SessionState = Depends(current_state)):
+        """Clear *this session's* message history and module memory."""
+        state.mesh.clear_history()
+        state.last_run_warnings = []
+        await broadcast_ws(state, {"type": "history_cleared"})
+        return {"status": "cleared"}
 
+    @app.get("/api/export/markdown")
+    async def export_markdown(state: SessionState = Depends(current_state)):
+        markdown = state.mesh.export_markdown()
+        if not markdown.strip() or markdown.strip() == "# Multi-Agent Dialogue Transcript":
+            return {"markdown": "# No messages yet\n\nStart a dialogue to generate a transcript."}
+        return {"markdown": _with_provenance_header(markdown, state)}
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    active_connections.append(websocket)
-    try:
-        # Send initial status snapshot
-        await websocket.send_json({
-            "type": "init",
+    @app.get("/api/export/json")
+    async def export_json(state: SessionState = Depends(current_state)):
+        json_str = state.mesh.export_json()
+        return {"json": json_str if json_str.strip() != "[]" else "[]"}
+
+    @app.get("/api/export/markdown/download")
+    async def export_markdown_download(state: SessionState = Depends(current_state)):
+        markdown = _with_provenance_header(state.mesh.export_markdown(), state)
+        return PlainTextResponse(
+            content=markdown,
+            media_type="text/markdown",
+            headers={"Content-Disposition": "attachment; filename=module_mesh_transcript.md"},
+        )
+
+    @app.get("/api/export/json/download")
+    async def export_json_download(state: SessionState = Depends(current_state)):
+        return PlainTextResponse(
+            content=state.mesh.export_json(),
+            media_type="application/json",
+            headers={"Content-Disposition": "attachment; filename=module_mesh_transcript.json"},
+        )
+
+    # -- providers / keys -------------------------------------------------
+    @app.post("/api/config")
+    async def update_config(req: ConfigApiKeysRequest, state: SessionState = Depends(current_state)):
+        """
+        Configure real LLM providers for *this session only*.
+
+        Keys live in memory for the lifetime of the process, are never written
+        to disk, never returned by any endpoint and never logged. They are only
+        shape-checked here; pass ``"verify": true`` to actually test them
+        against the provider.
+        """
+        mesh = state.mesh
+
+        if req.clear:
+            for agent in (mesh.gpt, mesh.copilot, mesh.claude, mesh.arena_ai):
+                if agent is not None:
+                    agent.provider = _simulator_for(config)
+            state.api_keys = {}
+            state.provider_config = {"mode": "simulated", "configured": []}
+            await broadcast_ws(state, {"type": "agents_updated", "agents": mesh.list_agents()})
+            return {"status": "success", "message": "Back to the built-in simulator for this session."}
+
+        configured: List[str] = []
+        problems: List[str] = []
+        try:
+            if req.openai_api_key or req.openai_base_url:
+                if req.openai_api_key and not _looks_like_key(req.openai_api_key):
+                    if not _is_local_url(req.openai_base_url):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="That does not look like an OpenAI-style key (expected 'sk-...' or a local backend).",
+                        )
+                provider = OpenAIProvider(
+                    api_key=req.openai_api_key or state.api_keys.get("openai", ""),
+                    base_url=req.openai_base_url,
+                    fallback_to_mock=config.fallback_to_mock,
+                )
+                if req.openai_api_key:
+                    state.api_keys["openai"] = req.openai_api_key
+                if req.verify:
+                    ok, why = await _verify_openai(provider)
+                    if not ok:
+                        problems.append(f"OpenAI check failed: {why}")
+                for agent in (mesh.gpt, mesh.copilot):
+                    if agent is not None:
+                        agent.provider = provider
+                configured.append("OpenAI")
+
+            if req.anthropic_api_key:
+                if not req.anthropic_api_key.startswith("sk-ant-") and len(req.anthropic_api_key) < 10:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="That does not look like an Anthropic key (expected 'sk-ant-...').",
+                    )
+                provider = AnthropicProvider(
+                    api_key=req.anthropic_api_key,
+                    fallback_to_mock=config.fallback_to_mock,
+                )
+                state.api_keys["anthropic"] = req.anthropic_api_key
+                for agent in (mesh.claude, mesh.arena_ai):
+                    if agent is not None:
+                        agent.provider = provider
+                configured.append("Anthropic")
+
+            if not configured:
+                state.provider_config = {"mode": "simulated", "configured": []}
+                return {
+                    "status": "success",
+                    "message": "No keys provided - this session keeps using the built-in simulator.",
+                }
+
+            state.provider_config = {
+                "mode": "live" if not problems else "unverified",
+                "configured": configured,
+                "verified": not problems,
+                "problems": problems,
+                # Honest about what we did and did not check.
+                "note": "Keys are shape-checked only, kept in memory, and never sent back to the browser.",
+            }
+            await broadcast_ws(state, {"type": "agents_updated", "agents": mesh.list_agents()})
+            message = (
+                f"Configured: {', '.join(configured)} for this session only. "
+                "Keys stay in memory and are never saved or logged."
+            )
+            if problems:
+                message += " " + " ".join(problems)
+                return {"status": "partial", "message": message, "configured": configured, "problems": problems}
+            return {
+                "status": "success",
+                "message": message,
+                "configured": configured,
+                "verified": bool(req.verify),
+            }
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("Config error", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to configure providers") from exc
+
+    @app.get("/api/config")
+    async def read_config(state: SessionState = Depends(current_state)):
+        """Provider status for this session. Deliberately never includes keys."""
+        return {
+            "mode": state.provider_config.get("mode", "simulated"),
+            "configured": state.provider_config.get("configured", []),
+            "verified": state.provider_config.get("verified"),
+            "has_openai_key": bool(state.api_keys.get("openai")),
+            "has_anthropic_key": bool(state.api_keys.get("anthropic")),
+            "note": "Keys are held in memory for this session only and are never returned to the client.",
+        }
+
+    # -- saved sessions (namespaced per client) ---------------------------
+    @app.post("/api/sessions")
+    async def save_session(req: SaveSessionRequest, state: SessionState = Depends(current_state)):
+        if not state.mesh.get_history():
+            raise HTTPException(
+                status_code=400,
+                detail="There is nothing to save yet - run a dialogue first, then save it.",
+            )
+        try:
+            meta = session_store.save_session(
+                name=req.name,
+                agents=state.mesh.list_agents(),
+                messages=[m.to_dict() for m in state.mesh.get_history()],
+                namespace=state.client_id,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as exc:
+            logger.error("Failed to save session", exc_info=True)
+            raise HTTPException(status_code=500, detail="Could not save the session. Please try again.") from exc
+        logger.info("Session saved: %s (%s)", meta["id"], meta["name"])
+        return {"status": "saved", "session": meta}
+
+    @app.get("/api/sessions")
+    async def list_sessions(state: SessionState = Depends(current_state)):
+        return {"sessions": session_store.list_sessions(state.client_id), "namespaced": bool(state.client_id)}
+
+    @app.get("/api/sessions/{session_id}")
+    async def get_saved_session(session_id: str, state: SessionState = Depends(current_state)):
+        data = session_store.get_session(session_id, state.client_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return data
+
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_saved_session(session_id: str, state: SessionState = Depends(current_state)):
+        if not session_store.delete_session(session_id, state.client_id):
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {"status": "deleted"}
+
+    @app.post("/api/sessions/load")
+    async def load_session(req: LoadSessionRequest, state: SessionState = Depends(current_state)):
+        data = session_store.get_session(req.session_id, state.client_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="Session not found - it may have been deleted.")
+        mesh = state.mesh
+        try:
+            mesh.reset_to_session(data.get("agents", []))
+            messages = []
+            for m in data.get("messages", []):
+                clean = {k: v for k, v in m.items() if k != "formatted_time"}
+                try:
+                    messages.append(Message(**clean))
+                except Exception:
+                    logger.warning("Skipping unreadable message in saved session %s", req.session_id)
+            mesh.load_messages(messages)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Could not restore this session: {e}") from e
+        except Exception as exc:
+            logger.error("Failed to load session %s", req.session_id, exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to load the session. Please try again.") from exc
+
+        await broadcast_ws(state, {
+            "type": "session_loaded",
+            "name": data.get("name"),
             "agents": mesh.list_agents(),
             "history": [m.to_dict() for m in mesh.get_history()],
-            "limits": {
-                "max_prompt_length": MAX_PROMPT_LENGTH,
-                "max_history": mesh.bus._max_history,
-            }
         })
-        while True:
-            data = await websocket.receive_text()
-            # Heartbeat / ping handling
-            if data == "ping":
-                await websocket.send_text("pong")
-    except WebSocketDisconnect:
-        if websocket in active_connections:
-            active_connections.remove(websocket)
-    except Exception as e:
-        logger.warning(f"WebSocket error: {e}")
-        if websocket in active_connections:
-            active_connections.remove(websocket)
+        return {"status": "loaded", "name": data.get("name"), "messages": len(messages)}
+
+    # -- web page reader (opt-in, SSRF-guarded) ---------------------------
+    @app.post("/api/read/url")
+    async def read_url(req: ReadUrlRequest, request: Request, state: SessionState = Depends(current_state)):
+        """
+        Fetch a public web page and return its readable text.
+
+        Off unless the server was started with ``--enable-url-reader``. When on,
+        :mod:`machinelearningmachine.netguard` validates the URL and *every*
+        redirect against the loopback/private/link-local/reserved ranges, so
+        this endpoint cannot be pointed at internal services.
+        """
+        if not config.enable_url_reader:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "The page reader is disabled on this server. Start it with "
+                    "--enable-url-reader if you want to read web pages aloud."
+                ),
+            )
+        now = time.time()
+        if now - state.last_url_read_time < URL_READ_COOLDOWN_SECONDS:
+            raise HTTPException(status_code=429, detail="Please wait a moment between page reads")
+        state.last_url_read_time = now
+
+        try:
+            result = await asyncio.to_thread(
+                netguard.guarded_fetch, req.url, max_bytes=MAX_READ_BYTES
+            )
+        except netguard.UnsafeURL as e:
+            # 403-ish for the client, but never echo the blocked URL's internals.
+            raise HTTPException(status_code=400, detail=e.reason) from e
+        except netguard.FetchError as e:
+            raise HTTPException(status_code=400, detail=e.reason) from e
+        except Exception as exc:
+            logger.error("URL read failed (host withheld to avoid logging user data)", exc_info=True)
+            raise HTTPException(status_code=500, detail="Could not read that page. Please try again.") from exc
+
+        data = page_text_from_body(result.text, result.content_type)
+        if result.truncated:
+            data["truncated"] = True
+        if not data["text"]:
+            raise HTTPException(status_code=422, detail="No readable text found at that URL")
+        return {
+            "status": "ok",
+            "url": result.final_url,
+            "redirects": result.redirects,
+            **data,
+        }
+
+    # -- runs -------------------------------------------------------------
+    @app.post("/api/run")
+    async def run_dialogue(req: RunTaskRequest, request: Request, state: SessionState = Depends(current_state)):
+        """Execute a multi-agent dialogue for this session, with rate limiting."""
+        mesh = state.mesh
+        now = time.time()
+        if now - state.last_run_time < RUN_COOLDOWN_SECONDS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Please wait {RUN_COOLDOWN_SECONDS:.0f}s between runs",
+            )
+        state.last_run_time = now
+
+        if req.topology == "p2p":
+            if req.from_agent not in mesh.agents:
+                raise HTTPException(status_code=400, detail=f"Initiating agent '{req.from_agent}' not found")
+            if req.to_agent not in mesh.agents:
+                raise HTTPException(status_code=400, detail=f"Responding agent '{req.to_agent}' not found")
+            if req.from_agent == req.to_agent:
+                raise HTTPException(
+                    status_code=400, detail="Cannot start dialogue with same agent as both sides"
+                )
+        elif req.agent_ids:
+            missing = [aid for aid in req.agent_ids if aid not in mesh.agents]
+            if missing:
+                raise HTTPException(status_code=400, detail=f"Agents not found: {', '.join(missing)}")
+
+        await broadcast_ws(state, {
+            "type": "run_started",
+            "topology": req.topology,
+            "prompt": req.prompt[:200],  # Don't broadcast full prompt for privacy
+        })
+
+        try:
+            if req.topology == "p2p":
+                transcript = await mesh.talk_p2p(
+                    from_agent_id=req.from_agent or "arena-ai",
+                    to_agent_id=req.to_agent or "copilot",
+                    prompt=req.prompt,
+                    turns=req.turns or 4,
+                )
+            elif req.topology == "pipeline":
+                transcript = await mesh.run_pipeline(prompt=req.prompt, agent_ids=req.agent_ids)
+            elif req.topology == "debate":
+                transcript = await mesh.run_debate(prompt=req.prompt, agent_ids=req.agent_ids)
+            elif req.topology == "hub":
+                transcript = await mesh.run_hub_and_spoke(
+                    prompt=req.prompt,
+                    hub_id=req.from_agent or "arena-ai",
+                    spoke_ids=req.agent_ids,
+                )
+            else:  # pragma: no cover - validated by the model
+                raise HTTPException(status_code=400, detail=f"Unknown topology '{req.topology}'")
+        except HTTPException:
+            raise
+        except ProviderError as e:
+            # fallback_to_mock=False: report the provider failure instead of
+            # pretending the stage produced an answer.
+            await broadcast_ws(state, {"type": "run_error", "error": f"{e.provider}: {e.reason}"})
+            raise HTTPException(status_code=502, detail=f"{e.provider} failed: {e.reason}") from e
+        except ValueError as e:
+            await broadcast_ws(state, {"type": "run_error", "error": str(e)})
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as exc:
+            logger.error("Dialogue execution failed", exc_info=True)
+            await broadcast_ws(state, {"type": "run_error", "error": "Internal error during dialogue execution"})
+            raise HTTPException(status_code=500, detail="Failed to execute dialogue. Please try again.") from exc
+
+        messages = [m.to_dict() for m in transcript]
+        simulated = [m for m in messages if m.get("metadata", {}).get("simulated")]
+        degraded = [m for m in messages if m.get("metadata", {}).get("provider_error")]
+        warnings = sorted({str(m["metadata"]["provider_error"]) for m in degraded})
+        state.last_run_warnings = warnings
+        await broadcast_ws(state, {"type": "run_completed", "simulated_count": len(simulated)})
+        return {
+            "status": "completed",
+            "messages": messages,
+            # Tell the client what it is looking at; the transcript is never
+            # silently "verified" output.
+            "simulated": bool(simulated) and len(simulated) == len(messages),
+            "partially_simulated": bool(simulated) and len(simulated) != len(messages),
+            "provider_warnings": warnings,
+        }
+
+    # -- websocket --------------------------------------------------------
+    @app.websocket("/ws")
+    async def websocket_endpoint(websocket: WebSocket):
+        state = _ws_state(websocket, config, registry)
+        if state is None:
+            # Refuse before accepting: an unauthenticated socket must not even
+            # get as far as a 101 response.
+            await websocket.close(code=4401)
+            return
+
+        await websocket.accept()
+        state.websockets.add(websocket)
+        try:
+            await websocket.send_json({
+                "type": "init",
+                "agents": state.mesh.list_agents(),
+                "history": [m.to_dict() for m in state.mesh.get_history()],
+                "authenticated": state.authenticated or not config.require_auth,
+                "limits": {
+                    "max_prompt_length": MAX_PROMPT_LENGTH,
+                    "max_history": state.mesh.bus._max_history,
+                    "max_messages_client": state.mesh.bus._max_history,
+                    "max_agents": MAX_AGENTS_PER_SESSION,
+                },
+                "flags": {"url_reader_enabled": config.enable_url_reader},
+            })
+            while True:
+                data = await websocket.receive_text()
+                if data == "ping":
+                    await websocket.send_text("pong")
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            logger.warning("WebSocket error: %s", e)
+        finally:
+            state.websockets.discard(websocket)
+
+    def _ws_state(websocket: WebSocket, cfg: ServerConfig, reg: SessionRegistry) -> Optional[SessionState]:
+        """Resolve (and authorise) the session for a WebSocket handshake."""
+        client_id = session_store.sanitize_namespace(websocket.cookies.get(CLIENT_COOKIE_NAME))
+        state = reg.get(websocket.cookies.get(SESSION_COOKIE_NAME))
+        if cfg.require_auth and (state is None or not state.authenticated):
+            header = websocket.headers.get("authorization", "")
+            token = header[7:].strip() if header.lower().startswith("bearer ") else None
+            if not cfg.check_token(token):
+                # Refused without creating anything. Note the token is only read
+                # from a header on purpose: a ?token= query parameter would end up
+                # in access logs.
+                return None
+            if state is None:
+                state = _state_for(client_id or "")
+            state.authenticated = True
+            return state
+        if state is None:
+            # The page normally created one with its first API call; this keeps a
+            # freshly opened dashboard working before any fetch has happened.
+            state = _state_for(client_id or "")
+        return state
+
+    # -- meta / static ----------------------------------------------------
+    @app.api_route("/", methods=["GET", "HEAD"])
+    async def serve_index():
+        index_file = STATIC_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(str(index_file))
+        return JSONResponse({"status": "healthy", "service": "MachineLearningMachine Agent Mesh API"})
+
+    @app.api_route("/health", methods=["GET", "HEAD"])
+    async def health():
+        """
+        Unauthenticated liveness probe, deliberately minimal.
+
+        Operational detail (agents, transcripts, session count) lives behind
+        /api/status, because /health cannot be authenticated in most uptime
+        monitors.
+        """
+        return {
+            "status": "ok",
+            "version": app.version,
+            "auth_required": config.require_auth,
+            "url_reader_enabled": config.enable_url_reader,
+        }
+
+    @app.get("/api/status")
+    async def status(state: SessionState = Depends(current_state)):
+        """Per-session detail for the status panel (authenticated like the rest)."""
+        return {
+            "agents": len(state.mesh.agents),
+            "messages": len(state.mesh.get_history()),
+            "connections": len(state.websockets),
+            "provider_mode": state.provider_config.get("mode", "simulated"),
+            "last_run_warnings": state.last_run_warnings,
+            "url_reader_enabled": config.enable_url_reader,
+            **registry.stats(),
+        }
+
+    def _with_provenance_header(markdown: str, state: SessionState) -> str:
+        """Exported transcripts must say which provider produced them."""
+        messages = state.mesh.get_history()
+        simulated = sum(1 for m in messages if m.metadata.get("simulated"))
+        mode = state.provider_config.get("mode", "simulated")
+        stamp = (
+            f"> Provider mode: **{mode}**. {simulated} of {len(messages)} messages were "
+            "simulated, i.e. generated by the built-in templates and never executed or tested.\n\n"
+        )
+        return stamp + markdown
 
 
-# Mount static files and index
-STATIC_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+def _is_public_path(path: str) -> bool:
+    if path in PUBLIC_PATHS:
+        return True
+    return any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES)
 
 
-@app.api_route("/", methods=["GET", "HEAD"])
-async def serve_index():
-    index_file = STATIC_DIR / "index.html"
-    if index_file.exists():
-        return FileResponse(str(index_file))
-    return JSONResponse({"status": "healthy", "service": "MachineLearningMachine Agent Mesh API"})
+def _looks_like_key(key: str) -> bool:
+    return key.startswith(("sk-", "ollama", "lm-")) or len(key) >= 20
 
 
-@app.api_route("/health", methods=["GET", "HEAD"])
-async def health():
-    return {
-        "status": "ok",
-        "agents": len(mesh.agents),
-        "messages": len(mesh.get_history()),
-        "connections": len(active_connections),
-        "version": "0.1.0"
-    }
+def _is_local_url(base_url: Optional[str]) -> bool:
+    if not base_url:
+        return False
+    return any(marker in base_url for marker in ("localhost", "127.0.0.1", "::1", "host.docker.internal"))
+
+
+def _simulator_for(config: ServerConfig):
+    from ..agents.providers import MockLLMProvider
+
+    return MockLLMProvider()
+
+
+async def _verify_openai(provider: OpenAIProvider) -> Tuple[bool, str]:
+    """
+    Ask the configured OpenAI-compatible backend whether the key works.
+
+    Only used when the caller explicitly asks for verification, and it only
+    ever sends the key to the base URL the operator typed in.
+    """
+    try:
+        aiohttp_module = __import__("aiohttp", fromlist=["ClientSession"])
+    except ImportError:
+        return False, "aiohttp is not installed, so the key could not be verified"
+    try:
+        async with aiohttp_module.ClientSession(timeout=aiohttp_module.ClientTimeout(total=15)) as session:
+            async with session.get(
+                f"{provider.base_url}/models",
+                headers={"Authorization": f"Bearer {provider.api_key}"},
+            ) as resp:
+                if resp.status == 200:
+                    return True, ""
+                return False, f"the provider answered HTTP {resp.status}"
+    except Exception as exc:  # network down, bad host, ...
+        return False, f"could not reach the provider ({exc.__class__.__name__})"
+
+
+class SecurityHeadersMiddleware:
+    """
+    ASGI middleware adding a strict CSP and friends.
+
+    Everything the dashboard needs is served from this origin (see
+    ``static/vendor/``), so ``default-src 'self'`` is enough and kills the
+    "any CDN can execute code in the dashboard" class of problems. Written as a
+    plain ASGI middleware (not BaseHTTPMiddleware) so WebSocket upgrades are
+    untouched.
+    """
+
+    CSP = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "form-action 'none'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "object-src 'none'"
+    )
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(message)
+                headers.set("Content-Security-Policy", self.CSP)
+                headers.set("X-Content-Type-Options", "nosniff")
+                headers.set("X-Frame-Options", "DENY")
+                headers.set("Referrer-Policy", "no-referrer")
+                headers.set("Permissions-Policy", "microphone=(self)")
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+class MutableHeaders:
+    """Tiny helper over the raw ASGI header list."""
+
+    def __init__(self, message: Dict[str, Any]) -> None:
+        self._message = message
+        if "headers" not in message or message["headers"] is None:
+            message["headers"] = []
+
+    def set(self, name: str, value: str) -> None:
+        raw_name = name.lower().encode("latin-1")
+        headers = self._message["headers"]
+        for index, (key, _value) in enumerate(headers):
+            if key.lower() == raw_name:
+                headers[index] = (raw_name, value.encode("latin-1"))
+                return
+        headers.append((raw_name, value.encode("latin-1")))
+
+
+def _mount_static(app: FastAPI) -> None:
+    STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+#: Default app: loopback-safe, URL reader off, no auth (matching a local demo).
+app = create_app()

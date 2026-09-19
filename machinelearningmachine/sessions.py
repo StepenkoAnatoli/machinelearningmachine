@@ -6,26 +6,33 @@ so users can store a conversation and continue it later — no export/import
 file juggling required. Sessions are written to the user's home directory
 (``~/.module_mesh/sessions``) so they survive repo updates and are never
 committed to git. Override the location with the environment variable
-``MODULE_MESH_SESSIONS_DIR`` (handy for tests).
+``MACHINELEARNINGMACHINE_SESSIONS_DIR`` (alias ``MODULE_MESH_SESSIONS_DIR``),
+which is also how tests point the store at a temp directory.
 
 User-centered design:
 - Human-friendly session names, sanitized safely for filenames
 - Oldest sessions are pruned automatically (bounded storage)
 - Defensive JSON handling: a corrupt file never crashes the app
+- Per-client namespaces, so one user can never list or load another's files
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .env import get as env_get
+
 #: Environment variable that overrides the session storage directory.
+#: Both ``MACHINELEARNINGMACHINE_SESSIONS_DIR`` and this short alias are honoured
+#: (see :mod:`machinelearningmachine.env`); the constant keeps the legacy spelling
+#: because tests and docs refer to it.
 SESSIONS_ENV_VAR = "MODULE_MESH_SESSIONS_DIR"
+SESSIONS_DIR_SUFFIX = "SESSIONS_DIR"
 
 #: Default location: outside the repo, inside the user's home directory.
 DEFAULT_SESSIONS_DIR = Path.home() / ".module_mesh" / "sessions"
@@ -40,11 +47,39 @@ MAX_SESSION_BYTES = 8 * 1024 * 1024
 #: Only allow these characters in session IDs (prevents path traversal).
 _SAFE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 
+#: Saved sessions can be split into per-client sub-directories ("namespaces"),
+#: so a multi-user server never lists or loads somebody else's transcripts.
+_SAFE_NAMESPACE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 
-def sessions_dir() -> Path:
-    """Return (and create) the directory where sessions are stored."""
-    env = os.environ.get(SESSIONS_ENV_VAR, "").strip()
-    directory = Path(env).expanduser() if env else DEFAULT_SESSIONS_DIR
+
+def sanitize_namespace(namespace: Optional[str]) -> Optional[str]:
+    """
+    Validate a namespace (per-client sub-folder).
+
+    Anything that is not a plain id - ``..``, absolute paths, dots and slashes
+    of any kind - collapses to ``None``, i.e. the shared root folder. The
+    dashboard passes the browser's persistent client id here.
+    """
+    if not namespace:
+        return None
+    candidate = str(namespace).strip()
+    if not _SAFE_NAMESPACE.match(candidate) or candidate in (".", ".."):
+        return None
+    return candidate
+
+
+def sessions_dir(namespace: Optional[str] = None) -> Path:
+    """
+    Return (and create) the directory where sessions are stored.
+
+    ``namespace`` selects a per-client sub-folder (see :func:`sanitize_namespace`);
+    ``None`` means the shared root, which is what a single-user local install uses.
+    """
+    override = env_get(SESSIONS_DIR_SUFFIX)
+    directory = Path(override).expanduser() if override else DEFAULT_SESSIONS_DIR
+    namespace = sanitize_namespace(namespace)
+    if namespace:
+        directory = directory / namespace
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -56,8 +91,8 @@ def sessions_dir() -> Path:
     return directory
 
 
-def _path_for(session_id: str) -> Path:
-    return sessions_dir() / f"{session_id}.json"
+def _path_for(session_id: str, namespace: Optional[str] = None) -> Path:
+    return sessions_dir(namespace) / f"{session_id}.json"
 
 
 def new_session_id() -> str:
@@ -92,12 +127,14 @@ def save_session(
     agents: List[Dict[str, Any]],
     messages: List[Dict[str, Any]],
     extra: Optional[Dict[str, Any]] = None,
+    namespace: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Persist the current mesh state and return the session's metadata.
 
-    ``agents``   - list of agent dicts (see ``AgentMesh.list_agents``)
-    ``messages`` - list of message dicts (see ``Message.to_dict``)
+    ``agents``    - list of agent dicts (see ``AgentMesh.list_agents``)
+    ``messages``  - list of message dicts (see ``Message.to_dict``)
+    ``namespace`` - per-client sub-folder, so sessions never cross users
     """
     if not isinstance(agents, list) or not isinstance(messages, list):
         raise ValueError("agents and messages must be lists")
@@ -122,16 +159,16 @@ def save_session(
         payload["messages"] = payload["messages"][len(payload["messages"]) // 2:]
         data = json.dumps(payload, ensure_ascii=False)
 
-    path = _path_for(session_id)
+    path = _path_for(session_id, namespace)
     path.write_text(data, encoding="utf-8")
-    _prune_old_sessions()
+    _prune_old_sessions(namespace)
     return _meta(session_id, clean_name, len(payload["messages"]), saved_at)
 
 
-def list_sessions() -> List[Dict[str, Any]]:
+def list_sessions(namespace: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return lightweight metadata for all stored sessions, newest first."""
     results: List[Dict[str, Any]] = []
-    for f in sessions_dir().glob("*.json"):
+    for f in sessions_dir(namespace).glob("*.json"):
         try:
             with open(f, "r", encoding="utf-8") as fh:
                 d = json.load(fh)
@@ -150,11 +187,11 @@ def list_sessions() -> List[Dict[str, Any]]:
     return results[:MAX_SESSIONS]
 
 
-def get_session(session_id: str) -> Optional[Dict[str, Any]]:
+def get_session(session_id: str, namespace: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Return the full session document, or None if it doesn't exist."""
     if not session_id or not _SAFE_ID.match(session_id):
         return None
-    path = _path_for(session_id)
+    path = _path_for(session_id, namespace)
     if not path.is_file():
         return None
     try:
@@ -170,11 +207,11 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def delete_session(session_id: str) -> bool:
+def delete_session(session_id: str, namespace: Optional[str] = None) -> bool:
     """Delete a stored session. Returns True when a file was removed."""
     if not session_id or not _SAFE_ID.match(session_id):
         return False
-    path = _path_for(session_id)
+    path = _path_for(session_id, namespace)
     try:
         if path.is_file():
             path.unlink()
@@ -184,12 +221,12 @@ def delete_session(session_id: str) -> bool:
     return False
 
 
-def _prune_old_sessions() -> None:
+def _prune_old_sessions(namespace: Optional[str] = None) -> None:
     """Keep at most MAX_SESSIONS files, deleting the oldest first."""
     try:
         files = [
             (f.stat().st_mtime, f.name, f)
-            for f in sessions_dir().glob("*.json")
+            for f in sessions_dir(namespace).glob("*.json")
             if _SAFE_ID.match(f.stem)
         ]
         # Newest first; filename is a deterministic tie-breaker when

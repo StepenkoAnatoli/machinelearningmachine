@@ -1,0 +1,177 @@
+name: CI
+
+# What "30 tests passing" is supposed to mean, enforced on every push:
+# the suite runs on three Python versions, the linter runs, the vendored
+# browser assets are verified against their manifest, the XSS suite runs under
+# jsdom, and dependencies are audited for known CVEs.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # constraints.txt is the pinned reference environment, generated on
+          # 3.11; one of its pins (websockets 17) requires >=3.11. On 3.10 let pip
+          # resolve an older websockets from the declared ranges instead of
+          # pretending the pin fits.
+          if [ "${{ matrix.python-version }}" = "3.10" ]; then
+            python -m pip install -e ".[dev]"
+          else
+            python -m pip install -e ".[dev]" -c constraints.txt
+          fi
+
+      - name: Lint
+        run: ruff check machinelearningmachine tests scripts
+
+      - name: Test
+        # -p no:cacheprovider keeps the run hermetic; the suite is offline by
+        # design (every network call is injected), so CI needs no egress.
+        run: python -m pytest -q -ra --maxfail=25
+
+      - name: Import without the optional deps present
+        # The simulator, the mesh and the CLI must work before aiohttp/requests
+        # are installed (see machinelearningmachine/_deps.py).
+        run: |
+          python -m venv .bare
+          .bare/bin/python -m pip install --quiet "pydantic>=2.6,<3.0"
+          .bare/bin/python -c "import sys; sys.path.insert(0, '.'); import machinelearningmachine; from machinelearningmachine.mesh import AgentMesh; print(AgentMesh().list_agents()[0]['agent_id'])"
+
+  package:
+    name: buildable wheel ships the dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+      - name: Verify packaged assets
+        # A wheel without static/ is how this project would ship a 404 dashboard.
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          required = [
+              "server/static/index.html",
+              "server/static/app.js",
+              "server/static/markdown.js",
+              "server/static/vendor/MANIFEST.json",
+              "server/static/vendor/dompurify/purify.min.js",
+              "server/static/vendor/marked/marked.min.js",
+              "server/static/vendor/tailwind.css",
+              # Vendoring without the third-party license texts would be a
+              # compliance bug dressed up as a security fix.
+              "server/static/vendor/licenses/marked.txt",
+              "server/static/vendor/licenses/tailwindcss.txt",
+          ]
+          missing = [r for r in required if not any(n.endswith(r) for n in names)]
+          assert not missing, f"wheel is missing: {missing}"
+          print(f"ok - {wheel} contains the dashboard and its vendored assets")
+          PY
+
+  frontend:
+    name: vendor integrity + XSS suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - name: Vendored assets match the committed manifest
+        # Regenerating must be a deliberate, reviewable commit - not a surprise
+        # at runtime. This fails if someone edits vendor/ by hand.
+        run: |
+          node - <<'JS'
+          const fs = require("fs"), path = require("path"), crypto = require("crypto");
+          const dir = "machinelearningmachine/server/static/vendor";
+          const manifest = JSON.parse(fs.readFileSync(path.join(dir, "MANIFEST.json"), "utf8"));
+          for (const [rel, info] of Object.entries(manifest.files)) {
+            const bytes = fs.readFileSync(path.join(dir, rel));
+            if (bytes.length !== info.bytes) throw new Error(`${rel} size changed (${bytes.length} != ${info.bytes})`);
+            const sri = "sha384-" + crypto.createHash("sha384").update(bytes).digest("base64");
+            if (sri !== info.sri) throw new Error(`${rel} does not match its recorded SRI hash`);
+          }
+          console.log(`ok - ${Object.keys(manifest.files).length} vendored files verified`);
+          JS
+      - name: Rebuild vendor assets and require a clean tree
+        run: |
+          python3 scripts/build_vendor.py
+          git diff --exit-code machinelearningmachine/server/static/vendor \
+            || (echo "vendor/ is out of sync with package.json - run: npm install && python3 scripts/build_vendor.py" && exit 1)
+      - name: XSS / sanitizer tests
+        run: node --test tests/js/sanitize.test.mjs
+
+  security:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip && python -m pip install pip-audit
+      - name: pip-audit (declared ranges)
+        # Auditing the requirement files rather than the runner's whole
+        # environment: the image ships its own old setuptools/pip, and a finding
+        # there is not this project's dependency to fix. What matters is whether
+        # what we ask for - and what we pin - has known CVEs.
+        run: |
+          python -m pip_audit --progress-spinner off --desc off -r requirements.txt
+          python -m pip_audit --progress-spinner off --desc off -r requirements-dev.txt
+      - name: pip-audit (the pinned reference environment)
+        run: python -m pip_audit --progress-spinner off --desc off -r constraints.txt
+      - name: npm audit (vendored browser dependencies)
+        run: npm audit --audit-level=high
+
+  secret-scan:
+    name: no credentials committed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Look for key-shaped strings
+        # Cheap, and it would have caught the one thing this project must never
+        # do: persist the API keys the UI promises are in-memory only.
+        run: |
+          ! grep -rInE "sk-(ant-|proj-)?[A-Za-z0-9]{30,}" \
+            --include='*.py' --include='*.js' --include='*.json' --include='*.md' \
+            --exclude-dir=node_modules --exclude-dir=.venv . \
+            || (echo "A string shaped like a real API key was found" && exit 1)
+          grep -rIn "password\s*=\s*[\"'][^\"']{8,}" machinelearningmachine && exit 1 || true

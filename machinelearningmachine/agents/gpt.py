@@ -5,9 +5,10 @@ Builds comprehensive pytest suites, fuzz tests, integration benchmarks, and vali
 """
 
 from typing import Optional
+
+from ..protocol.bus import MessageBus
 from .base import BaseAgent
 from .providers import BaseLLMProvider
-from ..protocol.bus import MessageBus
 
 DEFAULT_GPT_PROMPT = """You are GPT-4o, a verification engineer and test harness synthesizer.
 Your role:

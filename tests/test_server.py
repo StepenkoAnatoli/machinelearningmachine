@@ -1,5 +1,5 @@
-import pytest
 from fastapi.testclient import TestClient
+
 from machinelearningmachine.server.app import app
 
 

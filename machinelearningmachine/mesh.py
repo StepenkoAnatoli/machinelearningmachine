@@ -10,19 +10,20 @@ User-centered improvements:
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Callable, Awaitable
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from .agents.arena_ai import ArenaAIAgent
+from .agents.base import BaseAgent
+from .agents.claude import ClaudeAgent
+from .agents.copilot import CopilotAgent
+from .agents.custom import CustomAgent
+from .agents.gpt import GPTAgent
 from .protocol.bus import MessageBus
 from .protocol.message import Message
-from .agents.base import BaseAgent
-from .agents.arena_ai import ArenaAIAgent
-from .agents.copilot import CopilotAgent
-from .agents.claude import ClaudeAgent
-from .agents.gpt import GPTAgent
-from .agents.custom import CustomAgent
-from .topologies.p2p import P2PTopology
-from .topologies.pipeline import PipelineTopology
 from .topologies.debate import DebateTopology
 from .topologies.hub_spoke import HubSpokeTopology
+from .topologies.p2p import P2PTopology
+from .topologies.pipeline import PipelineTopology
 
 logger = logging.getLogger("AgentMesh")
 

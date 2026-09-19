@@ -5,9 +5,10 @@ Formulates tasks, breaks down engineering challenges, and coordinates peer modul
 """
 
 from typing import Optional
+
+from ..protocol.bus import MessageBus
 from .base import BaseAgent
 from .providers import BaseLLMProvider
-from ..protocol.bus import MessageBus
 
 DEFAULT_ARENA_PROMPT = """You are Arena AI, a high-tier autonomous software engineering orchestrator and systems architect.
 Your role:

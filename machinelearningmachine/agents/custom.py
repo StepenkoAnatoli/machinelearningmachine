@@ -4,9 +4,10 @@ Enables dynamic creation of user-specified agents or domain modules at runtime.
 """
 
 from typing import Optional
+
+from ..protocol.bus import MessageBus
 from .base import BaseAgent
 from .providers import BaseLLMProvider
-from ..protocol.bus import MessageBus
 
 
 class CustomAgent(BaseAgent):

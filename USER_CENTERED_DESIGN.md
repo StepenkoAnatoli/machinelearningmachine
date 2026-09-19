@@ -58,24 +58,34 @@ We audited the system from a real user's perspective: a developer who wants to q
 # Before: insecure and broken
 allow_origins=["*"], allow_credentials=True
 
-# After: secure, works with preview URLs
-allow_origins=["*"], allow_credentials=False, allow_methods=["GET","POST","OPTIONS"]
+# Then: a wildcard with credentials is a cross-site read of a local service.
+# Now: origins are operator-configured (--allow-origin, or the
+# MACHINELEARNINGMACHINE_ALLOW_ORIGINS env var for containers),
+# the default allows none beyond same-origin, and mutating requests with a
+# non-JSON body are refused so a cross-origin form cannot write state.
+allow_origins=normalize_origins(config.allow_origins), allow_credentials=False
 ```
-- **Why**: Browsers reject wildcard + credentials. Fixing it makes preview work reliably.
-- **User value**: No mysterious CORS errors, secure by default.
+- **Why**: Browsers reject wildcard + credentials, and `*` on a loopback service is
+  an invitation for any page in the user's browser to talk to it.
+- **User value**: No mysterious CORS errors, and no cross-origin page can write to a
+  service that holds the user's provider keys.
 
 **2. XSS Protection**
 ```javascript
 // Before: direct marked.parse → XSS possible
 parsedContent = marked.parse(msg.content)
 
-// After: sanitize + strip event handlers
-html = marked.parse(content)
-html = html.replace(/<script>.*?<\/script>/gi, "")
-html = html.replace(/on\w+="[^"]*"/gi, "")
+// Intermediate (insufficient): regex "sanitizing" - bypassed by unquoted
+// handlers, <svg>/<math>/<template>/<noscript> subtrees and parser quirks.
+// After: mark + DOMPurify allowlist, rendered as DOM nodes (static/markdown.js)
+const clean = DOMPurify.sanitize(marked.parse(text), { ...ALLOWLIST, RETURN_DOM: true });
+container.replaceChildren(...clean.body.childNodes);
 ```
-- **Why**: LLM output is untrusted, could contain `<img onerror=...>`
-- **User value**: Safe to paste LLM output, no script injection.
+- **Why**: LLM output, saved-session JSON and custom-agent fields are all untrusted
+  input. A denylist of regexes cannot express "only these tags, only these
+  attributes"; an allowlist plus a real sanitizer can.
+- **User value**: pasting hostile markup into a transcript renders as text instead of
+  executing, and there are no inline handlers left to review.
 
 **3. Input Validation with Helpful Messages**
 ```python
@@ -265,10 +275,10 @@ python -m machinelearningmachine.cli run --topology p2p --agent-a arena-ai --age
 
 | Area | Before | After | User Benefit |
 |------|--------|-------|--------------|
-| **Security** | CORS broken, XSS possible, no validation | Fixed CORS, XSS sanitized, validated | Trust, no silent failures |
-| **Performance** | 0.4s delay × 4 = 1.6s wasted, 60fps always | 0.15s delay, 30fps, pauses when hidden | Feels snappy, saves battery |
+| **Security** | CORS broken, XSS possible, no validation, unauthenticated and bound to all interfaces, SSRF in the page reader | Real sanitizer + CSP, no CDN, per-session auth/isolation, SSRF-guarded reader (off by default), validated input | Trust that matches what the code actually enforces |
+| **Performance** | 0.4s delay × 4 = 1.6s wasted, 60fps always | 0.15s delay, canvas redraws only when the mesh changes | Feels snappy, saves battery |
 | **Accessibility** | No keyboard, no ARIA, alert() | Focus trap, ARIA, toast, skip link, ESC | Inclusive, keyboard usable |
-| **Mock Quality** | Generic code for all prompts | Domain-specific, copy-paste ready | Real value without API keys |
+| **Mock Quality** | Generic code for all prompts, claiming approval | Domain-specific draft, explicitly labelled simulated/unverified | Real value without API keys, without pretending to be verification |
 | **Error Handling** | Stack traces | Friendly messages + suggestions | Knows how to fix |
 | **UX Polish** | Small prompt box, no search, no feedback | Auto-resize, char count, search, toast | Feels professional |
 
@@ -290,12 +300,27 @@ python -m machinelearningmachine.cli run --topology p2p --agent-a arena-ai --age
 
 **User value**: Fast load, no extra JS, still gets clear feedback.
 
-### 3. Why not DOMPurify for XSS?
-**Considered**: DOMPurify is gold standard for sanitization
-**Chosen**: Lightweight regex stripping + marked config (no raw HTML)
-**Why**: DOMPurify adds 10KB, requires extra CDN. For this app, where content is mostly code, simple stripping of `<script>` and `on*=` is sufficient. Documented: "In production, use DOMPurify."
+### 3. DOMPurify for XSS - the decision reversed (2026-09)
+**Originally chosen**: regex stripping + marked with raw HTML disabled, because
+"DOMPurify adds 10KB and needs an extra CDN".
+**Reverted to**: DOMPurify 3.4.15 + Marked 12.0.2, **vendored** (no CDN) and
+checksummed in `static/vendor/MANIFEST.json`.
+**Why the original reasoning failed**:
+- "no raw HTML" is not enough on its own once markup is re-parsed by a browser,
+  and the regex layer gave a false sense of a boundary; a security review found
+  trivial bypasses (`<svg onload=...>`, unquoted handlers, malformed tags).
+- The 10KB argument is moot when nothing is fetched remotely anyway: the whole
+  vendor bundle (Tailwind build, FontAwesome, marked, DOMPurify, highlight.js)
+  is served from the app itself, so the page is offline-capable and CSP-clean.
+**User value**: the transcript is the one place arbitrary text from models and
+saved files lands, and it is now rendered through an audited sanitizer whose
+bypass corpus is an executable test (`tests/js/sanitize.test.mjs`).
 
-**User value**: Faster load, still safe for typical use. If user pastes malicious HTML, it's stripped.
+A note that came out of the vendoring work itself: the DOMPurify release first
+pinned here (3.1.6) turned out to carry 20 open advisories, several of them
+sanitizer bypasses. `npm audit --audit-level=high` now runs in CI next to
+`pip-audit`, and the vendored files are rebuilt and hash-checked there, so a
+pinned-but-vulnerable asset fails the build instead of shipping quietly.
 
 ### 4. Why keep mock provider instead of forcing API keys?
 **Considered**: Remove mock, require OpenAI key for "real" experience

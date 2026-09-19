@@ -5,36 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Inter-Module Agent Mesh | Arena AI · Copilot · Claude · GPT</title>
   <meta name="description" content="Modular orchestration system enabling AI modules to talk directly - Arena AI, Copilot, Claude, GPT, and custom agents">
-  <!-- Tailwind CSS CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- FontAwesome -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  <!-- Marked for Markdown -->
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <!-- Highlight.js for Code Highlighting -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <!--
+    Browser assets are vendored (static/vendor/) - the dashboard loads nothing from a
+    third-party origin, which is what lets the server send Content-Security-Policy:
+    default-src 'self'. Regenerate with: npm install && python3 scripts/build_vendor.py
+  -->
+  <link rel="stylesheet" href="/static/vendor/tailwind.css">
+  <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css">
+  <link rel="stylesheet" href="/static/vendor/highlight.js/styles/atom-one-dark.min.css">
+  <script src="/static/vendor/marked/marked.min.js" defer></script>
+  <script src="/static/vendor/dompurify/purify.min.js" defer></script>
+  <script src="/static/vendor/highlight.js/highlight.min.js" defer></script>
+  <script src="/static/markdown.js" defer></script>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
   <link rel="stylesheet" href="/static/style.css">
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            brand: {
-              purple: '#8b5cf6',
-              cyan: '#06b6d4',
-              amber: '#d97706',
-              emerald: '#10b981',
-              dark: '#0f172a',
-              card: '#1e293b',
-              border: '#334155'
-            }
-          }
-        }
-      }
-    }
-  </script>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased">
   <a href="#main-content" class="skip-link">Skip to main content</a>
@@ -51,6 +35,7 @@
             Inter-Module Agent Mesh
           </h1>
           <p class="text-xs text-slate-400">Multi-Agent Protocol · Arena AI ⇄ Copilot ⇄ Claude ⇄ GPT</p>
+          <p id="statusSessionInfo" class="text-xs text-slate-500" role="status" aria-live="polite">This browser session only</p>
         </div>
       </div>
 
@@ -76,6 +61,29 @@
   </header>
 
   <!-- Main Container -->
+  <!-- Access-token prompt: only shown when the server requires one -->
+  <section id="authPanel" class="hidden max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4 w-full" aria-live="polite">
+    <form id="authForm" class="rounded-lg border border-amber-800/70 bg-amber-950/40 p-4 flex flex-col sm:flex-row sm:items-end gap-3">
+      <div class="flex-1">
+        <label for="authTokenInput" class="block text-xs font-semibold text-amber-200 mb-1">
+          <i class="fa-solid fa-lock mr-1" aria-hidden="true"></i>This server is protected with an access token
+        </label>
+        <input type="password" id="authTokenInput" autocomplete="off"
+          class="w-full bg-slate-900 border border-amber-800 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500"
+          placeholder="Paste the token from the server console" aria-describedby="authPanelHint">
+        <p id="authPanelHint" class="text-[11px] text-amber-200/80 mt-1">
+          The token is what the server was started with (--auth-token or MACHINELEARNINGMACHINE_AUTH_TOKEN).
+        </p>
+      </div>
+      <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-amber-400">
+        Unlock
+      </button>
+    </form>
+  </section>
+
+  <!-- What produced the transcript on screen -->
+  <section id="modeBanner" class="hidden max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 w-full" aria-live="polite"></section>
+
   <main id="main-content" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 flex flex-col space-y-6 w-full" role="main">
 
     <!-- Top Grid: Interactive Topology Graph & Active Modules -->
@@ -362,7 +370,8 @@
 
       <div id="readerTab-url" class="reader-tab-panel hidden">
         <div class="flex flex-wrap items-center gap-3">
-          <input type="url" id="readerUrl" placeholder="https://example.com/article" class="flex-1 min-w-[240px] bg-slate-800/90 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-pink-500" aria-label="Web page URL to read aloud">
+          <input type="url" id="readerUrl" placeholder="https://example.com/article" title="Public http(s) pages only" class="flex-1 min-w-[240px] bg-slate-800/90 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-pink-500" aria-label="Web page URL to read aloud">
+          <p id="readerUrlHint" class="hidden text-[11px] text-amber-300 mb-2"></p>
           <button id="btnReadUrl" class="px-4 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-xs font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Fetch and read the web page aloud">
             <i class="fa-solid fa-download" aria-hidden="true"></i><span>Fetch &amp; Read</span>
           </button>
@@ -422,7 +431,7 @@
           </div>
           <div>
             <label for="newAgentAvatar" class="block text-xs font-medium text-slate-400 mb-1">Emoji Avatar</label>
-            <input type="text" id="newAgentAvatar" value="🧩" maxlength="4"
+            <input type="text" id="newAgentAvatar" value="🧩" maxlength="8"
               class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 text-center">
           </div>
         </div>
@@ -453,7 +462,8 @@
       </div>
 
       <div class="text-xs text-slate-400 mb-4 bg-slate-800/50 p-3 rounded-lg border border-slate-800">
-        <p><strong>🔒 Privacy:</strong> Keys are kept in-memory only, never logged or persisted. By default, all modules use the built-in Intelligent Simulator that generates realistic code without external keys.</p>
+        <p><strong>🔒 Privacy:</strong> Keys live in memory for <em>this browser session only</em> - never written to disk, never sent back to the page, never logged. Another browser tab on the same server gets its own mesh and its own keys.</p>
+        <p class="mt-2"><strong>🧪 Simulator:</strong> with no keys, every module answers from the built-in template simulator. Its replies are labelled <span class="prov-badge prov-sim">simulated</span> and are <em>not</em> verified - no code is compiled, executed, or tested.</p>
       </div>
 
       <form id="formSettings" class="space-y-4">
@@ -472,8 +482,20 @@
           <input type="text" id="inputOpenAiBaseUrl" placeholder="http://localhost:11434/v1"
             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
             aria-describedby="base-url-help">
-          <p id="base-url-help" class="text-[11px] text-slate-500 mt-1">Must start with http:// or https://</p>
+          <p id="base-url-help" class="text-[11px] text-slate-500 mt-1">Must start with http:// or https:// (local backends like http://localhost:11434/v1 are fine)</p>
         </div>
+
+        <label class="flex items-start space-x-2 text-[11px] text-slate-400 bg-slate-800/50 border border-slate-800 rounded-lg p-2.5">
+          <input type="checkbox" id="inputVerifyKeys" class="mt-0.5 rounded border-slate-600 bg-slate-900 text-amber-500 focus:ring-amber-500">
+          <span>
+            <strong class="text-slate-300">Verify the OpenAI key now</strong> - sends one request to the base URL above
+            (<code>GET /models</code>) to check the credentials. Without this, saving only checks the key's <em>shape</em>.
+          </span>
+        </label>
+
+        <button type="button" id="btnClearProviders" class="text-[11px] text-slate-400 hover:text-red-300 underline">
+          Back to simulator (forget keys for this session)
+        </button>
 
         <div class="flex items-center justify-end space-x-2 pt-3 border-t border-slate-800">
           <button type="button" id="btnCancelSettings" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus-visible:ring-2 focus-visible:ring-slate-500">

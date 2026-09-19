@@ -5,22 +5,116 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "machinelearningmachine"
 version = "0.1.0"
-description = "Multi-Module Inter-Agent Communication Mesh: Connect Arena AI, Copilot, Claude, GPT, and custom AI agents"
+description = "Local multi-module inter-agent communication mesh: Arena AI, Copilot, Claude, GPT, and custom agents talking over a shared message bus"
 readme = "README.md"
-authors = [{ name = "Arena User" }]
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "The MachineLearningMachine Authors" }]
+keywords = ["agents", "orchestration", "llm", "message-bus", "fastapi", "dashboard"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+]
+
+# Ranges, not pins: this is what a normal `pip install -e .` gets you.
+# For a reproducible environment (CI, anyone who wants byte-identical deps)
+# install with constraints.txt, which pins every version below.
 dependencies = [
-    "fastapi>=0.110.0",
-    "uvicorn>=0.28.0",
-    "pydantic>=2.6.0",
-    "aiohttp>=3.9.0",
-    "requests>=2.31.0",
-    "websockets>=12.0",
+    "fastapi>=0.110,<1.0",
+    "uvicorn>=0.28,<1.0",
+    "pydantic>=2.6,<3.0",
+    "aiohttp>=3.9,<4.0",          # live providers only; the simulator works without it
+    "requests>=2.31,<3.0",        # the opt-in web page reader only
+    "websockets>=12.0,<18.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+    "ruff>=0.5",
+    "pip-audit>=2.7",
 ]
 
 [project.scripts]
 module-mesh = "machinelearningmachine.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/StepenkoAnatoli/machinelearningmachine"
+Issues = "https://github.com/StepenkoAnatoli/machinelearningmachine/issues"
+
+[tool.setuptools.packages.find]
+include = ["machinelearningmachine*"]
+
+# Without this the wheel silently ships without the dashboard: the HTML, the
+# stylesheet and the vendored browser assets are not Python files.
+[tool.setuptools.package-data]
+machinelearningmachine = [
+    "server/static/*.html",
+    "server/static/*.css",
+    "server/static/*.js",
+    "server/static/vendor/*.css",
+    "server/static/vendor/*.json",
+    "server/static/vendor/**/*.js",
+    "server/static/vendor/**/*.css",
+    "server/static/vendor/**/*.woff2",
+    "server/static/vendor/licenses/*.txt",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:machinelearningmachine.*"]
 
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [
+    "machinelearningmachine/server/static",   # browser code, linted by node --test instead
+    ".venv",
+    "node_modules",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+# Errors, pyflakes, and the security-relevant rules. The codebase deliberately
+# keeps `except Exception` in a few user-facing handlers, so E is limited to
+# the low-noise parts and not a wall of style complaints.
+select = ["E", "F", "W", "I", "B", "C4", "S", "RUF"]
+ignore = [
+    "E501",    # long lines are handled by line-length and review
+    "B008",    # FastAPI's Depends() in defaults is the documented pattern
+    "S110",    # try/except/pass is used for best-effort cleanup
+    "S112",
+]
+
+# Deliberately not selected: "UP" (typing modernisation). Rewriting ~230 existing
+# `List[str]`/`Optional[x]` annotations is churn unrelated to any defect; new code
+# may use the modern forms freely.
+
+
+[tool.ruff.lint.per-file-ignores]
+# System speech binaries are invoked by argv (never through a shell) with names
+# from a fixed table, so the "untrusted input to subprocess" family does not apply.
+"machinelearningmachine/tts.py" = ["S603", "S607"]
+# Tests deliberately use fake tokens, bind-all hosts and `node` by name: they
+# exist to prove those cases are handled, so the warnings are noise there.
+# The vendor build shells out to `npx --no-install tailwindcss ...` with a fixed
+# argv list and no user input, so S603 is noise there.
+"scripts/build_vendor.py" = ["S603"]
+"tests/*" = ["S101", "S104", "S105", "S106", "S607", "B011", "B017"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["machinelearningmachine"]

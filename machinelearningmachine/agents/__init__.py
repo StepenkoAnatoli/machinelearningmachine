@@ -1,20 +1,20 @@
-from .base import BaseAgent
 from .arena_ai import ArenaAIAgent
-from .copilot import CopilotAgent
+from .base import BaseAgent
 from .claude import ClaudeAgent
-from .gpt import GPTAgent
+from .copilot import CopilotAgent
 from .custom import CustomAgent
-from .providers import BaseLLMProvider, MockLLMProvider, OpenAIProvider, AnthropicProvider
+from .gpt import GPTAgent
+from .providers import AnthropicProvider, BaseLLMProvider, MockLLMProvider, OpenAIProvider
 
 __all__ = [
-    "BaseAgent",
+    "AnthropicProvider",
     "ArenaAIAgent",
-    "CopilotAgent",
-    "ClaudeAgent",
-    "GPTAgent",
-    "CustomAgent",
+    "BaseAgent",
     "BaseLLMProvider",
+    "ClaudeAgent",
+    "CopilotAgent",
+    "CustomAgent",
+    "GPTAgent",
     "MockLLMProvider",
     "OpenAIProvider",
-    "AnthropicProvider",
 ]

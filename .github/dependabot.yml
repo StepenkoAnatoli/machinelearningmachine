@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # Keep the pinned constraints file fresh so CI and audits have something to
+  # compare against. Security updates land as ordinary PRs.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule: { interval: "weekly", day: "tuesday" }
+    open-pull-requests-limit: 5
+    versioning-strategy: lockfile-if-maintainable
+    labels: ["dependencies", "python"]
+
+  # Frontend assets are vendored; bump them in package.json, then run
+  # `npm install && python3 scripts/build_vendor.py` and commit the manifest diff.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule: { interval: "weekly", day: "tuesday" }
+    open-pull-requests-limit: 3
+    labels: ["dependencies", "frontend"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule: { interval: "weekly", day: "tuesday" }
+    labels: ["ci"]

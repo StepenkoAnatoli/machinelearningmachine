@@ -62,6 +62,10 @@ def speak(text: str, rate: float = 1.0) -> bool:
         )
         return False
 
+    # Every call below passes an argv list (never a shell string) to one of the
+    # fixed interpreter names returned by available_engine(); the text is an
+    # argument, not a command. That is why ruff's S603/S607 are waived for this
+    # file in pyproject.toml - the executable is never derived from user input.
     try:
         if engine == "say":
             # Default rate ~180 wpm; scale gently with the requested rate.
@@ -100,6 +104,6 @@ def speak(text: str, rate: float = 1.0) -> bool:
             check=False,
         )
         return True
-    except Exception as e:  # noqa: BLE001 - speech must never crash a dialogue
+    except Exception as e:
         print(f"⚠️  Could not read aloud: {e}")
         return False

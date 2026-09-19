@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 import machinelearningmachine.server.app as appmod
 from machinelearningmachine import sessions as session_store
-from machinelearningmachine.server.app import app, mesh
+from machinelearningmachine.server.app import app
 
 
 @pytest.fixture(autouse=True)
@@ -163,40 +163,22 @@ def test_server_sessions_roundtrip(monkeypatch):
 
 
 def test_save_session_requires_history():
-    # The shared mesh may already have history from earlier tests; clear it.
-    mesh.clear_history()
+    # State is per browser session, so a brand-new client starts with no history.
     client = TestClient(app)
     resp = client.post("/api/sessions", json={"name": "Empty"})
     assert resp.status_code == 400
     assert "nothing to save" in resp.json()["detail"]
 
 
-def test_read_url_strips_html(monkeypatch):
-    class FakeResponse:
-        headers = {"content-type": "text/html; charset=utf-8"}
-        text = (
-            "<html><head><title>Hello &amp; welcome</title>"
-            "<script>evil()</script><style>body{}</style></head>"
-            "<body><h1>Head</h1><nav>hidden nav</nav>"
-            "<p>Para one.</p><p>Para two.</p><ul><li>Item A</li></ul>"
-            "<footer>footer junk</footer></body></html>"
-        )
-
-        def raise_for_status(self):
-            return None
-
-        def iter_content(self, chunk_size=65536):
-            yield self.text.encode("utf-8")
-
-        def close(self):
-            return None
-
-    def fake_get(url, **kwargs):
-        assert url == "https://example.com/page"
-        return FakeResponse()
-
-    monkeypatch.setattr(appmod.requests, "get", fake_get)
-    out = appmod.fetch_page_text("https://example.com/page")
+def test_page_text_extraction_strips_html():
+    raw = (
+        "<html><head><title>Hello &amp; welcome</title>"
+        "<script>evil()</script><style>body{}</style></head>"
+        "<body><h1>Head</h1><nav>hidden nav</nav>"
+        "<p>Para one.</p><p>Para two.</p><ul><li>Item A</li></ul>"
+        "<footer>footer junk</footer></body></html>"
+    )
+    out = appmod.page_text_from_body(raw, "text/html; charset=utf-8")
     assert out["title"] == "Hello & welcome"
     assert "Head" in out["text"]
     assert "Para one." in out["text"]
@@ -211,6 +193,29 @@ def test_read_url_endpoint_validates():
     client = TestClient(app)
     resp = client.post("/api/read/url", json={"url": "ftp://nope.example"})
     assert resp.status_code == 422
+
+
+def test_read_url_is_disabled_by_default():
+    """The fetcher is opt-in: a default server must not expose it at all."""
+    client = TestClient(app)
+    resp = client.post("/api/read/url", json={"url": "https://example.com"})
+    assert resp.status_code == 404
+    assert "enable-url-reader" in resp.json()["detail"]
+
+
+def test_saved_sessions_are_namespaced_per_client(tmp_path):
+    """Two browsers must not see, load, or delete each other's saved files."""
+    session_store.save_session("Alice only", [], _sample_messages(2), namespace="client-a")
+    bob = session_store.save_session("Bob only", [], _sample_messages(1), namespace="client-b")
+
+    listed = session_store.list_sessions("client-a")
+    assert [s["name"] for s in listed] == ["Alice only"]
+    assert session_store.get_session(bob["id"], "client-a") is None
+    assert session_store.delete_session(bob["id"], "client-a") is False
+
+    # A hostile namespace can only ever collapse to "no namespace".
+    assert session_store.sanitize_namespace("../../etc") is None
+    assert session_store.sessions_dir("../../etc") == session_store.sessions_dir(None)
 
 
 def test_tts_engine_reporting():
