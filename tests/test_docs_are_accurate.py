@@ -69,6 +69,34 @@ def test_ci_runs_every_jsdom_suite():
     assert len(_jsdom_counts()) >= 2, "expected a sanitizer suite and a client suite"
 
 
+def test_ci_npm_audit_step_can_tell_a_cve_from_an_outage():
+    """
+    `npm audit` exits 1 both when it finds a real high+ CVE and when the
+    advisory endpoint cannot be reached ("audit endpoint returned an error" on
+    a 429/5xx from registry.npmjs.org). A bare `npm audit` in CI therefore turns
+    a network blip into a red build that reads exactly like a security finding,
+    and its exit code cannot tell the two apart.
+
+    scripts/audit_vendor_deps.mjs keeps them separate - retry then report an
+    infrastructure failure, versus fail with the package, the shipped version
+    and the GHSA - and refuses to call an audit green when it covered zero
+    packages. Pin that CI (and `npm run audit:js`) goes through it.
+    """
+    wrapper = "node scripts/audit_vendor_deps.mjs"
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert f"run: {wrapper}\n" in workflow, "CI should audit browser deps through the wrapper"
+    assert "run: npm audit --audit-level=high\n" not in workflow, (
+        "a bare `npm audit` cannot distinguish a CVE from an unreachable endpoint"
+    )
+    package = (ROOT / "package.json").read_text(encoding="utf-8")
+    assert f'"audit:js": "{wrapper}"' in package
+    assert (ROOT / "scripts" / "audit_vendor_deps.mjs").is_file()
+    # The classification logic is what the whole step rests on, so it must be
+    # the subject of a suite CI actually runs.
+    assert (JS_DIR / "audit_vendor_deps.test.mjs").is_file()
+
+
+
 def test_readme_and_security_document_the_loopback_default():
     # The example that mattered most: telling users to bind a public interface.
     assert "--host 0.0.0.0 --port 8000\n" not in README, "README must not present a public bind as the example"

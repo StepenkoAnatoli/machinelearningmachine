@@ -203,9 +203,16 @@ input. Rules the frontend follows (`static/markdown.js`):
   FontAwesome, Marked, DOMPurify and Highlight.js are vendored under
   `static/vendor/`, pinned and checksummed in `static/vendor/MANIFEST.json`;
   `npm ci && python3 scripts/build_vendor.py` regenerates them and CI fails if
-  the tree drifts from the manifest. CI also runs `npm audit --audit-level=high`
-  and `pip-audit`, because a pinned asset is also a pinned vulnerability: the
-  first DOMPurify version vendored here (3.1.6) had 20 open advisories.
+  the tree drifts from the manifest. CI also audits both halves of the
+  dependency set - `scripts/audit_vendor_deps.mjs` for the browser assets
+  (npm's advisory database, `--audit-level=high`) and `pip-audit` for the
+  Python ones - because a pinned asset is also a pinned vulnerability: the
+  first DOMPurify version vendored here (3.1.6) had 20 open advisories. The
+  wrapper separates a real high+ finding (fail, naming the shipped version and
+  the GHSA) from an unreachable advisory endpoint (retry, then fail as an
+  infrastructure error), because `npm audit` alone reports both as the same
+  exit code 1; it also refuses to call an audit green when it covered zero
+  packages.
 
 The XSS payload corpus that the regex filter used to miss is now an executable
 test, and so is the client's reaction to a server that admits it lost data:

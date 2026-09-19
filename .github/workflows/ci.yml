@@ -201,7 +201,21 @@ jobs:
       - name: pip-audit (the pinned reference environment)
         run: python -m pip_audit --progress-spinner off --desc off -r constraints.txt
       - name: npm audit (vendored browser dependencies)
-        run: npm audit --audit-level=high
+        # `npm audit` exits 1 for two opposite situations: a real high+ CVE in
+        # a pinned browser dependency, or "audit endpoint returned an error"
+        # when registry.npmjs.org answers 429/5xx. Only the first is a finding
+        # about this project, and a bare `npm audit` in CI cannot tell them
+        # apart - both surface as nothing but "exit code 1".
+        #
+        # This wrapper separates them: transient endpoint failures are retried
+        # and then reported as an infrastructure failure quoting the npm error;
+        # a real finding fails with the package, the shipped version, the GHSA
+        # and the fix; and an audit that covered zero packages is refused
+        # rather than reported green.
+        #
+        # Exit codes: 0 clean, 1 real high+ finding, 2 audit could not run,
+        # 3 nothing was audited.
+        run: node scripts/audit_vendor_deps.mjs
 
   secret-scan:
     name: no credentials committed

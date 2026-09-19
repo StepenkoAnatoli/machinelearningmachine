@@ -319,9 +319,13 @@ admits it lost frames (`tests/js/`).
 
 A note that came out of the vendoring work itself: the DOMPurify release first
 pinned here (3.1.6) turned out to carry 20 open advisories, several of them
-sanitizer bypasses. `npm audit --audit-level=high` now runs in CI next to
-`pip-audit`, and the vendored files are rebuilt and hash-checked there, so a
-pinned-but-vulnerable asset fails the build instead of shipping quietly.
+sanitizer bypasses. The browser dependencies are now audited against npm's
+advisory database at `--audit-level=high` (`scripts/audit_vendor_deps.mjs`, run
+in CI next to `pip-audit`), and the vendored files are rebuilt and hash-checked
+there, so a pinned-but-vulnerable asset fails the build instead of shipping
+quietly. That wrapper also tells the two kinds of red apart: a registry that
+cannot be reached is retried and then reported as an infrastructure failure,
+not as a vulnerability - and not as a pass.
 
 ### 4. Why keep mock provider instead of forcing API keys?
 **Considered**: Remove mock, require OpenAI key for "real" experience
