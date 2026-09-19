@@ -75,7 +75,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 442 tests (410 Python + 32 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 449 tests (417 Python + 32 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -411,7 +411,7 @@ python3 -m machinelearningmachine.cli run --live both --provider-timeout 30 --pr
 | --- | --- |
 | `--live {openai,anthropic,both}` | Which modules get real providers. `--live openai` wires `@gpt` and `@copilot`; `anthropic` wires `@claude` and `@arena-ai`; `both` wires all four |
 | `--base-url URL` | Send the live calls somewhere else (Ollama, vLLM, LM Studio, a proxy). Validated by the same outbound policy as the dashboard |
-| `--provider-timeout SECONDS` | Per-request ceiling for a live call (1-900) |
+| `--provider-timeout SECONDS` | Per-request ceiling for a live call (1-900), and the ceiling on the *total* time one turn may spend waiting between retries: an upstream `Retry-After` longer than that is reported, not slept |
 | `--strict-provider-errors` | A provider failure fails the run instead of falling back to the labelled simulator |
 
 `--live openai` with no `OPENAI_API_KEY` and no `--base-url` is refused with exit code 1

@@ -210,6 +210,48 @@ class BaseLLMProvider:
         raise NotImplementedError
 
 
+def _wait_does_not_fit(
+    err: ProviderError,
+    delay: float,
+    *,
+    remaining: float,
+    budget: float,
+) -> ProviderError:
+    """
+    Turn "we could wait, but not that long" into the error it deserves.
+
+    The alternative shapes were both worse. Sleeping a *truncated* wait retries
+    before the upstream's limit resets, spends the attempt, and usually earns a
+    second 429 - the D25 bug wearing a different hat. Sleeping the full wait
+    hands the upstream control of this client's clock, which is how a
+    ``Retry-After: 600`` from one server becomes a ten-minute hang the operator
+    cannot explain, because ``--provider-timeout`` says 60.
+
+    So the loop stops, and the reason carries both numbers: what was asked for
+    and what this client is allowed to spend. It stays ``retryable`` - the
+    upstream failure *is* transient, this client just ran out of patience.
+    """
+    asked = (
+        f"and asked to wait {delay:g}s"
+        if err.retry_after is not None
+        else f"and the next retry would wait {delay:g}s"
+    )
+    room = (
+        f"more than the {budget:g}s this client may spend waiting between attempts"
+        if remaining >= budget
+        else f"more than the {remaining:g}s left of the {budget:g}s this client may spend waiting"
+    )
+    return ProviderError(
+        err.provider,
+        f"{err.reason} {asked}, {room}",
+        detail=err.detail,
+        status_code=err.status_code,
+        retryable=True,
+        attempts=err.attempts,
+        retry_after=err.retry_after,
+    )
+
+
 async def post_for_json(
     *,
     provider: BaseLLMProvider,
@@ -230,6 +272,10 @@ async def post_for_json(
       not - a server that says "come back in 3 s" is not retried after 0.8 s;
     * every wait goes through :func:`_backoff_sleep`, the seam a test can measure
       instead of sleep;
+    * the *sum* of those waits may not exceed ``provider.timeout`` - the operator's
+      ``--provider-timeout`` is a ceiling on how long one turn may spend waiting, so a
+      server that asks for ten minutes gets an error naming both numbers rather than a
+      client that sleeps for ten;
     * the failure that ends the loop is raised as :class:`ProviderError` carrying
       ``attempts`` and ``retry_after``, so the transcript can say how hard it tried;
     * response bodies are truncated before they reach a log line or an error, and an
@@ -239,6 +285,13 @@ async def post_for_json(
     attempts = provider.max_attempts
     backoff = provider.retry_backoff
     timeout = provider.timeout
+    #: The ceiling on *waiting*, charged across the whole call: the same number
+    #: the operator gave one request (``--provider-timeout``) is what the sum of
+    #: the waits between attempts may not exceed. Without it the flag bounded a
+    #: single request and nothing bounded the sleeps around it - measured at
+    #: 454.1 s of waiting against ``timeout=2.0`` with ``retry_backoff=100``.
+    wait_budget = max(0.0, float(timeout))
+    waited = 0.0
     last_error: ProviderError
 
     for attempt in range(1, attempts + 1):
@@ -324,6 +377,13 @@ async def post_for_json(
                 delay = last_error.retry_after
             else:
                 delay = backoff * attempt + random.uniform(0, backoff)  # noqa: S311
+            remaining = wait_budget - waited
+            if delay > remaining:
+                # Cannot be honoured without outliving the operator's ceiling,
+                # and truncating it would retry before the limit resets. Stop,
+                # and say which two numbers collided.
+                raise _wait_does_not_fit(last_error, delay, remaining=remaining, budget=wait_budget)
+            waited += delay
             await _backoff_sleep(delay)
             continue
         if last_error.attempts > 1 and last_error.retryable:

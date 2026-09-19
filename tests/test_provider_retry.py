@@ -518,3 +518,152 @@ async def test_a_real_aiohttp_response_header_is_read_case_insensitively(backoff
     assert backoffs == [2.0], f"the lower-cased header was not honoured: {backoffs}"
 
 
+
+
+# ------------------------------------------- D26: the wait budget is the timeout
+
+
+async def test_a_retry_after_longer_than_the_timeout_is_never_slept(monkeypatch, backoffs):
+    """
+    A server that asks for ten minutes must not make a client sleep ten minutes.
+
+    Reproduced before the fix, with the same double: ``Retry-After: 600``
+    against ``--provider-timeout 60`` - and, on the exponential path,
+    ``timeout=2.0`` with ``retry_backoff=100`` and ``max_attempts=3`` slept
+    195.7 s + 258.3 s = 454.1 s in one run (389.9 s, 410.3 s and 424.8 s in
+    three others). ``--provider-timeout`` bounded one request and nothing else.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, headers={429: {"Retry-After": "600"}}),
+    )
+    provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    assert backoffs == [], f"nothing may be slept when the ask does not fit: {backoffs}"
+    assert len(calls) == 1, "a request that cannot be waited out is not retried"
+    err = exc.value
+    assert err.attempts == 1, "attempts counts requests actually sent"
+    assert err.status_code == 429 and err.retryable is True
+    # Both numbers, or the user cannot tell which ceiling they hit.
+    assert "600" in err.reason and "60" in err.reason, err.reason
+    assert err.retry_after == 600.0
+
+
+async def test_the_exponential_budget_is_bounded_by_the_timeout_too(monkeypatch, backoffs):
+    """No upstream header needed to overrun: a large backoff does it alone."""
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([503, 503, 503, 503, 503], calls),
+    )
+    provider = _provider(max_attempts=5, retry_backoff=100.0, timeout=2.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    assert sum(backoffs) <= 2.0, f"waited {backoffs} against a 2s provider timeout"
+    assert len(calls) == 1
+    assert "100" in exc.value.reason or "2s" in exc.value.reason.replace(" ", ""), exc.value.reason
+
+
+async def test_a_wait_that_fits_the_budget_is_spent_and_the_answer_arrives(monkeypatch, backoffs):
+    """The bound must not break D25: an ask that fits is honoured in full."""
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, headers={429: {"Retry-After": "4"}}),
+    )
+    provider = _provider(max_attempts=2, retry_backoff=0.5, timeout=10.0)
+    out = await provider.generate(
+        system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+        agent_role="r", agent_name="GPT",
+    )
+    assert out == "recovered answer"
+    assert backoffs == [4.0], backoffs
+    assert len(calls) == 2
+
+
+async def test_repeated_waits_are_charged_against_one_budget(monkeypatch, backoffs):
+    """
+    The ceiling is a *sum*, not a per-wait cap: two 4 s waits fit in 10 s, a
+    third does not, and the client says so instead of oversleeping.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 429, 429, 200], calls, headers={429: {"Retry-After": "4"}}),
+    )
+    provider = _provider(max_attempts=4, retry_backoff=0.5, timeout=10.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    assert backoffs == [4.0, 4.0], backoffs
+    assert sum(backoffs) <= 10.0
+    assert len(calls) == 3, "three requests were really sent"
+    assert exc.value.attempts == 3
+    assert "2" in exc.value.reason and "10" in exc.value.reason, exc.value.reason
+
+
+@pytest.mark.parametrize(
+    "timeout,expected_waits,expected_calls",
+    [
+        (60.0, [30.0], 2),   # the ask fits: honoured in full, answer arrives
+        (10.0, [], 1),       # the ask does not fit: refused, one request sent
+    ],
+)
+async def test_the_wait_budget_scales_with_the_provider_timeout(
+    monkeypatch, backoffs, timeout, expected_waits, expected_calls
+):
+    """
+    The bound is the operator's knob, not a constant baked in here: the same
+    ``Retry-After: 30`` is slept on a 60 s timeout and refused on a 10 s one.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, headers={429: {"Retry-After": "30"}}),
+    )
+    provider = _provider(max_attempts=2, retry_backoff=0.5, timeout=timeout)
+    if expected_waits:
+        out = await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+        assert out == "recovered answer"
+    else:
+        with pytest.raises(ProviderError):
+            await provider.generate(
+                system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+                agent_role="r", agent_name="GPT",
+            )
+    assert backoffs == expected_waits, (timeout, backoffs)
+    assert len(calls) == expected_calls, (timeout, calls)
+
+
+async def test_anthropic_shares_the_wait_budget(monkeypatch, backoffs):
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp(
+            [429, 200], calls,
+            body={"content": [{"type": "text", "text": "recovered"}]},
+            headers={429: {"Retry-After": "600"}},
+        ),
+    )
+    provider = _provider(AnthropicProvider, max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="Claude",
+        )
+    assert backoffs == [], backoffs
+    assert exc.value.attempts == 1
+    assert "600" in exc.value.reason and "60" in exc.value.reason, exc.value.reason
