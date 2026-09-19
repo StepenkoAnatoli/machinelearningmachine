@@ -42,14 +42,27 @@ if not exist ".venv\Scripts\python.exe" (
 )
 set "VENV_PY=.venv\Scripts\python.exe"
 
+"%VENV_PY%" -m pip --version >nul 2>nul
+if errorlevel 1 (
+    echo [*] Recreating incomplete or corrupted .venv environment ...
+    rmdir /s /q .venv 2>nul
+    %PY% -m venv .venv
+    if errorlevel 1 (
+        echo [ERROR] Could not create the .venv environment.
+        echo         Try running manually:  %PY% -m venv .venv
+        pause
+        exit /b 1
+    )
+)
+
 rem ---------- 3. Install dependencies (first run only) ----------
 if not exist ".venv\.deps_installed" (
     echo [*] First run: installing dependencies (one-time, a few minutes) ...
-    "%VENV_PY%" -m pip install --upgrade pip >nul
+    "%VENV_PY%" -m pip install --upgrade pip >nul 2>nul
     "%VENV_PY%" -m pip install -e .
     if errorlevel 1 (
-        echo [!] Editable install failed - falling back to requirements.txt ...
-        "%VENV_PY%" -m pip install -r requirements.txt
+        echo [!] Editable install failed - falling back to standard install ...
+        "%VENV_PY%" -m pip install .
     )
     if errorlevel 1 (
         echo [ERROR] The dependency install failed.

@@ -178,77 +178,86 @@ def main() -> int:
         raise SystemExit("node_modules is missing - run `npm install` first.")
 
     out = VENDOR
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "licenses").mkdir(parents=True, exist_ok=True)
-
     print("Vendoring browser dependencies into", out.relative_to(ROOT))
-    manifest = {
-        "generated_by": "scripts/build_vendor.py",
-        "note": (
-            "Browser assets shipped with the app so the dashboard needs no CDN. "
-            "Do not edit by hand - regenerate with `npm install && python3 scripts/build_vendor.py`."
-        ),
-        "files": {},
-    }
 
-    for src_rel, dst_rel in ASSETS:
-        src = NODE_MODULES / src_rel
-        if not src.exists():
-            raise SystemExit(f"missing {src} - run `npm install`.")
-        data = src.read_bytes()
-        dst = out / dst_rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(data)
-        pkg_name = src_rel.split("/")[0]
-        if pkg_name.startswith("@"):
-            pkg_name += "/" + src_rel.split("/")[1]
-        manifest["files"][dst_rel] = {
-            "package": pkg_name,
-            "version": pkg_version(pkg_name),
-            "bytes": len(data),
-            "sri": sri(data),
+    # Stage assets into a temporary directory so a failed build never destroys
+    # the existing committed vendor/ folder.
+    with tempfile.TemporaryDirectory(dir=STATIC) as tmp:
+        stage = Path(tmp) / "vendor"
+        stage.mkdir(parents=True, exist_ok=True)
+        (stage / "licenses").mkdir(parents=True, exist_ok=True)
+
+        manifest = {
+            "generated_by": "scripts/build_vendor.py",
+            "note": (
+                "Browser assets shipped with the app so the dashboard needs no CDN. "
+                "Do not edit by hand - regenerate with `npm install && python3 scripts/build_vendor.py`."
+            ),
+            "files": {},
         }
-        print(f"  {dst_rel:<48} {len(data):>8} bytes")
 
-    # Every vendored package must arrive with its license text, and the build
-    # fails rather than quietly omitting one.
-    missing = []
-    for dst_name, src_rel in sorted(LICENSES.items()):
-        src = NODE_MODULES / src_rel
-        if not src.exists():
-            missing.append(f"{src_rel} (for licenses/{dst_name})")
-            continue
-        shutil.copyfile(src, out / "licenses" / dst_name)
-    if missing:
-        raise SystemExit(
-            "vendored licenses missing from node_modules - the assets cannot ship "
-            "without them:\n  " + "\n  ".join(missing)
-        )
-    manifest["licenses"] = {
-        "note": (
-            "One file per vendored package, copied from the package itself. "
-            "DOMPurify is dual-licensed (Apache-2.0 / MPL-2.0), so both texts ship."
-        ),
-        "files": dict(sorted(LICENSES.items())),
-    }
-    print(f"  {'licenses/':<48} {len(LICENSES):>8} files")
+        for src_rel, dst_rel in ASSETS:
+            src = NODE_MODULES / src_rel
+            if not src.exists():
+                raise SystemExit(f"missing {src} - run `npm install`.")
+            data = src.read_bytes()
+            dst = stage / dst_rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(data)
+            pkg_name = src_rel.split("/")[0]
+            if pkg_name.startswith("@"):
+                pkg_name += "/" + src_rel.split("/")[1]
+            manifest["files"][dst_rel] = {
+                "package": pkg_name,
+                "version": pkg_version(pkg_name),
+                "bytes": len(data),
+                "sri": sri(data),
+            }
+            print(f"  {dst_rel:<48} {len(data):>8} bytes")
 
-    build_tailwind(out)
-    tailwind_data = (out / "tailwind.css").read_bytes()
-    manifest["files"]["tailwind.css"] = {
-        "package": "tailwindcss",
-        "version": pkg_version("tailwindcss"),
-        "bytes": len(tailwind_data),
-        "sri": sri(tailwind_data),
-        "note": "compiled from static/index.html + static/app.js; regenerate, do not edit",
-    }
-    print(f"  {'tailwind.css':<48} {len(tailwind_data):>8} bytes")
+        # Every vendored package must arrive with its license text, and the build
+        # fails rather than quietly omitting one.
+        missing = []
+        for dst_name, src_rel in sorted(LICENSES.items()):
+            src = NODE_MODULES / src_rel
+            if not src.exists():
+                missing.append(f"{src_rel} (for licenses/{dst_name})")
+                continue
+            shutil.copyfile(src, stage / "licenses" / dst_name)
+        if missing:
+            raise SystemExit(
+                "vendored licenses missing from node_modules - the assets cannot ship "
+                "without them:\n  " + "\n  ".join(missing)
+            )
+        manifest["licenses"] = {
+            "note": (
+                "One file per vendored package, copied from the package itself. "
+                "DOMPurify is dual-licensed (Apache-2.0 / MPL-2.0), so both texts ship."
+            ),
+            "files": dict(sorted(LICENSES.items())),
+        }
+        print(f"  {'licenses/':<48} {len(LICENSES):>8} files")
 
-    (out / "MANIFEST.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+        build_tailwind(stage)
+        tailwind_data = (stage / "tailwind.css").read_bytes()
+        manifest["files"]["tailwind.css"] = {
+            "package": "tailwindcss",
+            "version": pkg_version("tailwindcss"),
+            "bytes": len(tailwind_data),
+            "sri": sri(tailwind_data),
+            "note": "compiled from static/index.html + static/app.js; regenerate, do not edit",
+        }
+        print(f"  {'tailwind.css':<48} {len(tailwind_data):>8} bytes")
+
+        # Write manifest with explicit LF newlines to prevent Windows CRLF drift
+        manifest_data = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        (stage / "MANIFEST.json").write_bytes(manifest_data)
+
+        # Atomic commit: swap staging directory into place
+        if out.exists():
+            shutil.rmtree(out)
+        shutil.move(str(stage), str(out))
+
     print("Wrote", (out / "MANIFEST.json").relative_to(ROOT))
     print(
         "\nIf the dashboard now renders blank, a class used in a template literal may be\n"

@@ -1,0 +1,8 @@
+include LICENSE README.md SECURITY.md PRODUCTION_HARDENING.md USER_CENTERED_DESIGN.md
+include constraints.txt requirements.txt requirements-dev.txt
+include package.json package-lock.json
+include tests/conftest.py
+recursive-include .github *.yml
+recursive-include tests/js *.test.mjs
+recursive-include scripts *.py
+recursive-include examples *.py

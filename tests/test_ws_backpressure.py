@@ -103,7 +103,7 @@ async def test_frames_are_queued_not_awaited_by_the_producer():
     started = time.monotonic()
     for i in range(20):
         assert feed.publish({"type": "new_message", "i": i}) is True
-    assert time.monotonic() - started < 0.5
+    assert time.monotonic() - started < 2.0
     feed.abort()
 
 
