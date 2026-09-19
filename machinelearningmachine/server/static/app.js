@@ -101,30 +101,44 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function showToast(message, type = "info", duration = 4000) {
     if (!toastContainer) return;
-    
+
     const toast = document.createElement("div");
-    toast.className = `toast toast-${type}`;
-    toast.setAttribute("role", "alert");
-    toast.setAttribute("aria-live", "polite");
-    
+    // Only the four known kinds may reach the class list: a value from a
+    // response must never be able to add a class (or anything else) to markup.
     const icons = {
       success: "fa-check-circle",
       error: "fa-exclamation-circle",
       warning: "fa-exclamation-triangle",
-      info: "fa-info-circle"
+      info: "fa-info-circle",
     };
-    
-    toast.innerHTML = `
-      <i class="fa-solid ${icons[type] || icons.info} mt-0.5 flex-shrink-0"></i>
-      <span class="flex-1">${escapeHtml(message)}</span>
-      <button class="ml-2 text-current opacity-60 hover:opacity-100 flex-shrink-0" aria-label="Dismiss notification">
-        <i class="fa-solid fa-xmark text-xs"></i>
-      </button>
-    `;
-    
-    const dismissBtn = toast.querySelector("button");
+    const kind = Object.prototype.hasOwnProperty.call(icons, type) ? type : "info";
+    toast.className = "toast toast-" + kind;
+    toast.setAttribute("role", "alert");
+    toast.setAttribute("aria-live", "polite");
+
+    const icon = document.createElement("i");
+    icon.className = "fa-solid " + icons[kind] + " mt-0.5 flex-shrink-0";
+    icon.setAttribute("aria-hidden", "true");
+
+    const label = document.createElement("span");
+    label.className = "flex-1";
+    // textContent, not an HTML string: toasts quote provider errors, saved
+    // session names and server details, all of which are untrusted text.
+    label.textContent = String(message == null ? "" : message);
+
+    const dismissBtn = document.createElement("button");
+    dismissBtn.className = "ml-2 text-current opacity-60 hover:opacity-100 flex-shrink-0";
+    dismissBtn.setAttribute("aria-label", "Dismiss notification");
+    const dismissIcon = document.createElement("i");
+    dismissIcon.className = "fa-solid fa-xmark text-xs";
+    dismissIcon.setAttribute("aria-hidden", "true");
+    dismissBtn.appendChild(dismissIcon);
     dismissBtn.addEventListener("click", () => dismissToast(toast));
-    
+
+    toast.appendChild(icon);
+    toast.appendChild(label);
+    toast.appendChild(dismissBtn);
+
     toastContainer.appendChild(toast);
     
     // Auto dismiss
@@ -263,11 +277,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  function escapeHtml(str) {
-    const div = document.createElement("div");
-    div.textContent = str;
-    return div.innerHTML;
-  }
+  // No hand-rolled escaper lives here any more. Text that must become markup is
+  // rendered through MeshRender (static/markdown.js); everything else uses
+  // textContent/setAttribute, which cannot be escaped out of.
 
   // ===== SpeechKit: read what you write (browser Web Speech API) =====
   // Zero-install text-to-speech: uses the voices already on the user's
@@ -1949,25 +1961,62 @@ document.addEventListener("DOMContentLoaded", () => {
       sessions.forEach((s) => {
         const when = new Date(s.saved_at * 1000);
         const dateStr = when.toLocaleDateString() + " " + when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
         const row = document.createElement("div");
         row.className = "session-row flex items-center justify-between gap-2 p-2.5 rounded-lg bg-slate-800/70 border border-slate-700/60";
         row.setAttribute("role", "listitem");
-        row.innerHTML = `
-          <div class="min-w-0">
-            <p class="text-xs font-semibold text-slate-200 truncate">${escapeHtml(s.name)}</p>
-            <p class="text-[10px] text-slate-500">${dateStr} · ${s.message_count} messages</p>
-          </div>
-          <div class="flex items-center gap-1.5 flex-shrink-0">
-            <button class="session-load px-2.5 py-1 text-[11px] rounded bg-indigo-600 hover:bg-indigo-500 text-white transition focus-visible:ring-2 focus-visible:ring-indigo-400" data-id="${escapeHtml(s.id)}" aria-label="Load session ${escapeHtml(s.name)}">
-              Load
-            </button>
-            <button class="session-del px-2 py-1 text-[11px] rounded bg-slate-800 hover:bg-red-900/60 border border-slate-700 text-slate-400 hover:text-red-300 transition focus-visible:ring-2 focus-visible:ring-red-400" data-id="${escapeHtml(s.id)}" aria-label="Delete session ${escapeHtml(s.name)}">
-              <i class="fa-solid fa-trash-can" aria-hidden="true"></i>
-            </button>
-          </div>
-        `;
+
+        const info = document.createElement("div");
+        info.className = "min-w-0";
+        const nameEl = document.createElement("p");
+        nameEl.className = "text-xs font-semibold text-slate-200 truncate";
+        nameEl.textContent = String(s.name || s.id || "Untitled session");
+        nameEl.title = nameEl.textContent;
+        const metaEl = document.createElement("p");
+        metaEl.className = "text-[10px] text-slate-500";
+        metaEl.textContent = `${dateStr} \u00b7 ${Number(s.message_count) || 0} messages`;
+        info.appendChild(nameEl);
+        info.appendChild(metaEl);
+
+        const actions = document.createElement("div");
+        actions.className = "flex items-center gap-1.5 flex-shrink-0";
+
+        const makeButton = (cls, label, iconCls) => {
+          const btn = document.createElement("button");
+          btn.className = cls;
+          // dataset/setAttribute, never an interpolated attribute in a template:
+          // a session name containing a quote must not be able to escape it.
+          btn.dataset.id = String(s.id || "");
+          btn.setAttribute("aria-label", label);
+          if (iconCls) {
+            const ico = document.createElement("i");
+            ico.className = iconCls;
+            ico.setAttribute("aria-hidden", "true");
+            btn.appendChild(ico);
+          } else {
+            btn.textContent = label;
+          }
+          return btn;
+        };
+
+        const loadBtn = makeButton(
+          "session-load px-2.5 py-1 text-[11px] rounded bg-indigo-600 hover:bg-indigo-500 text-white transition focus-visible:ring-2 focus-visible:ring-indigo-400",
+          `Load session "${nameEl.textContent}"`
+        );
+        const delBtn = makeButton(
+          "session-del px-2 py-1 text-[11px] rounded bg-slate-800 hover:bg-red-900/60 border border-slate-700 text-slate-400 hover:text-red-300 transition focus-visible:ring-2 focus-visible:ring-red-400",
+          `Delete "${nameEl.textContent}"`,
+          "fa-solid fa-trash-can"
+        );
+        delBtn.querySelector("i").insertAdjacentElement("afterend", document.createTextNode(" "));
+        actions.appendChild(loadBtn);
+        actions.appendChild(delBtn);
+
+        row.appendChild(info);
+        row.appendChild(actions);
+
         row.querySelector(".session-load").addEventListener("click", async () => {
-          const btn = row.querySelector(".session-load");
+          const btn = loadBtn;
           btn.disabled = true;
           try {
             const resp = await apiFetch("/api/sessions/load", {

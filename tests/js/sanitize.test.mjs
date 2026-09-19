@@ -217,3 +217,49 @@ test("the app source itself keeps untrusted strings out of innerHTML", () => {
   assert.doesNotMatch(app, /marked\.parse/); // only markdown.js may call marked
   assert.doesNotMatch(app, /replace\(\/on\\w\+/); // the old regex "sanitizer" must stay gone
 });
+
+test("no user data is ever concatenated into HTML by the app", () => {
+  // The invariant that makes per-field checks unnecessary: every innerHTML
+  // assignment in app.js receives literal markup only, so untrusted values can
+  // reach the DOM solely through textContent / setAttribute / MeshRender.
+  const app = read(join(staticDir, "app.js"));
+
+  const offenders = [];
+  for (const match of app.matchAll(/\.innerHTML\s*=\s*([\s\S]{0,400}?);\n/g)) {
+    if (match[1].includes("${")) offenders.push(match[1].replace(/\s+/g, " ").slice(0, 80));
+  }
+  assert.deepEqual(offenders, [], "innerHTML must receive literal markup only");
+
+  // Interpolating into an attribute is the classic breakout - one unescaped
+  // quote in a saved session name and the markup is yours. Attributes that
+  // carry data must be set through setAttribute/dataset instead.
+  const attrs = app.match(/(data-[a-z-]+|aria-[a-z-]+|title)="[^"]*\$\{/g) || [];
+  assert.deepEqual(attrs, [], `interpolated attribute values: ${attrs.slice(0, 3)}`);
+
+  // No hand-rolled escaper may come back: the whole point of markdown.js is
+  // that escaping is one audited module with a test corpus.
+  assert.doesNotMatch(app, /function escapeHtml|escapeAttribute|sanitiz\w*\s*=\s*\(text/);
+  assert.doesNotMatch(app, /insertAdjacentHTML|document\.write|createContextualFragment/);
+});
+
+test("toasts and session rows are built from DOM nodes, not strings", () => {
+  const app = read(join(staticDir, "app.js"));
+
+  // Toasts quote provider errors and server details - all untrusted text.
+  const toast = app.slice(app.indexOf("function showToast"), app.indexOf("function dismissToast"));
+  assert.ok(toast.length > 100, "showToast should be found");
+  assert.doesNotMatch(toast, /innerHTML/, "showToast must not build HTML from a message");
+  assert.match(toast, /label\.textContent\s*=\s*String\(message/);
+  // The class name comes from a fixed key lookup, never from the caller's string.
+  assert.match(toast, /Object\.prototype\.hasOwnProperty\.call\(icons, type\)/);
+
+  // Saved-session rows carry names that come from a file on disk.
+  const rowsStart = app.indexOf("sessions.forEach((s) =>");
+  const rows = app.slice(rowsStart, app.indexOf("async function deleteSession", rowsStart) > -1
+    ? app.indexOf("async function deleteSession", rowsStart)
+    : rowsStart + 4000);
+  assert.ok(rows.length > 100, "the session list renderer should be found");
+  assert.doesNotMatch(rows, /innerHTML/, "session rows must be built with DOM APIs");
+  assert.match(rows, /nameEl\.textContent\s*=\s*String\(s\.name/);
+  assert.match(rows, /btn\.dataset\.id\s*=\s*String\(s\.id/);
+});
