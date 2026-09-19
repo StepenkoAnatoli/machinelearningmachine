@@ -20,6 +20,14 @@ document.addEventListener("DOMContentLoaded", () => {
   /** This tab's own run while it waits (202): its id and 1-indexed position. */
   let queuedRunId = null;
   let queuePosition = null;
+  /**
+   * Terminal frames by run id (`run_completed`/`run_error`/`run_cancelled`).
+   * HTTP and the socket are separate connections, so a terminal frame can beat
+   * the 202 that names the run; the late 202 reconciles against this instead of
+   * adopting a dead run as queued. Run ids are never reused, so an entry can
+   * only ever match the run it records. Bounded: old runs are forgotten.
+   */
+  let terminalRuns = new Map();
   /** True when this tab's run was queued (its HTTP already returned 202). */
   let localQueued = false;
   /** The server released this session's mesh; reconnecting would only re-allocate. */
@@ -895,6 +903,12 @@ document.addEventListener("DOMContentLoaded", () => {
       syncRunActivity();
       showToast(`Starting ${data.topology} dialogue${data.run_id ? " (" + data.run_id + ")" : ""}...`, "info", 2000);
     } else if (data.type === "run_completed" || data.type === "run_error" || data.type === "run_cancelled") {
+      if (data.run_id) {
+        terminalRuns.set(data.run_id, { type: data.type, error: data.error || null });
+        while (terminalRuns.size > 20) {
+          terminalRuns.delete(terminalRuns.keys().next().value);
+        }
+      }
       const ownQueuedDone = Boolean(queuedRunId && data.run_id === queuedRunId);
       const activeDone = Boolean(activeRunId && data.run_id === activeRunId);
       if (ownQueuedDone) {
@@ -1709,16 +1723,43 @@ document.addEventListener("DOMContentLoaded", () => {
         // frame arrives; Stop targets the queued run, not the active one.
         const queued = await resp.json().catch(() => ({}));
         if (queued && queued.status === "queued" && queued.run_id) {
-          ownQueued = true;
-          localQueued = true;
-          queuedRunId = queued.run_id;
-          queuePosition = queued.queue_position || null;
-          showToast(
-            `Queued at position ${queued.queue_position || 1} (${queued.run_id}). It runs automatically when the active run finishes.`,
-            "info",
-            6000
-          );
-          syncRunActivity();
+          const terminal = terminalRuns.get(queued.run_id);
+          if (terminal) {
+            // The socket beat the HTTP response: this run already ended (another
+            // tab cancelled it while queued, or it ran to completion first) and
+            // its frame stayed silent for want of an identity to attach to. Say
+            // the ending it actually had; the feed's picture of any other run is
+            // left untouched.
+            terminalRuns.delete(queued.run_id);
+            localRun = false;
+            if (terminal.type === "run_cancelled") {
+              showToast("Queued run cancelled before it started.", "info");
+            } else if (terminal.type === "run_error") {
+              showToast("Dialogue failed: " + (terminal.error || "Unknown error"), "error", 5000);
+            } else {
+              showToast("Dialogue completed", "success");
+            }
+            apiFetch("/api/status").then((r) => (r.ok ? r.json() : null)).then(applyStatus).catch(() => {});
+            syncRunActivity();
+          } else if (activeRunId === queued.run_id) {
+            // Started before the 202 arrived: already the active run, not queued.
+            // localRun is kept until its completion frame releases it.
+            ownQueued = true;
+            localQueued = true;
+            showToast(`Already started (${queued.run_id}) - running now.`, "info", 4000);
+            syncRunActivity();
+          } else {
+            ownQueued = true;
+            localQueued = true;
+            queuedRunId = queued.run_id;
+            queuePosition = queued.queue_position || null;
+            showToast(
+              `Queued at position ${queued.queue_position || 1} (${queued.run_id}). It runs automatically when the active run finishes.`,
+              "info",
+              6000
+            );
+            syncRunActivity();
+          }
         } else {
           showToast("Failed: the server queued the run but did not name it", "error", 5000);
         }

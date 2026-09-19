@@ -49,6 +49,8 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D22** | `run_queued` omits the active run id, so a tab that missed `run_started` wedges busy | The browser regression never saw `run_started` (a gap ate it), went busy on `run_queued` with no id to attribute to, and stayed busy after the queued run was cancelled and the active run completed | Low (needs a 128-frame gap to eat exactly `run_started`; a reconnect heals it via the snapshot) |
 
+| **D23** | Socket frames beating HTTP 202 wedge the tab busy or show a stale queue position | The browser regressions resolved the 202 after `run_started` (the tab adopted a dead queued identity, and the completion took the wrong branch and never released the button) and after `run_cancelled` (no frame would ever come for the adopted id) | Low (needs HTTP/WS reorder inside one round trip; a reload heals it) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -341,6 +343,8 @@ exercise was not to add unfounded claims:
 | D21 queued runs skip validation | F11 | `server/app.py:/api/run` pre-busy checks for an empty roster and hub hub/spokes, in mesh order with mesh-identical messages | `test_queued_run_validation.py` (busy/idle parity: empty roster × pipeline/debate/hub, unknown hub, hub-as-own-spoke) |
 
 | D22 queued frame omits the active id | F15 | `server/app.py` `run_queued` carries `active_run_id`, `static/app.js` adopts it on receipt | `test_run_queue.py::test_queued_frame_names_the_active_run_it_waits_behind`, jsdom missed-`run_started` adoption case |
+
+| D23 socket beats HTTP 202 | F15 | `static/app.js` terminal-run record + 202 reconcile (ended → release with its ending; already active → active mode; else queued mode) | jsdom started-before-202 and cancelled-before-202 cases (deferred 202 body) |
 
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
 `--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented as
