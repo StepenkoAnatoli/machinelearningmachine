@@ -982,11 +982,8 @@ def _register_routes(
         """Start the next waiting run, if any (called before the lock is released)."""
         if not state.run_queue:
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return  # no loop (unit tests driving state directly): the next /api/run drains it
-        task = loop.create_task(_run_queued_entry(state))
+        # Both callers are coroutine finally-blocks, so a loop is always running.
+        task = asyncio.get_running_loop().create_task(_run_queued_entry(state))
         _DETACHED_TASKS.add(task)
         task.add_done_callback(_DETACHED_TASKS.discard)
 
@@ -1125,10 +1122,35 @@ def _register_routes(
                 raise HTTPException(
                     status_code=400, detail="Cannot start dialogue with same agent as both sides"
                 )
-        elif req.agent_ids:
-            missing = [aid for aid in req.agent_ids if aid not in mesh.agents]
-            if missing:
-                raise HTTPException(status_code=400, detail=f"Agents not found: {', '.join(missing)}")
+        elif req.topology in ("pipeline", "debate", "hub"):
+            # The mesh rejects these before doing any work, with these exact words -
+            # so the endpoint rejects them before the busy check too. Otherwise the
+            # same payload is a 400 when idle and a 202 when busy (an empty list
+            # would even run the default roster, having been stored as None).
+            if req.topology == "hub":
+                hub_id = req.from_agent or "arena-ai"
+                if hub_id not in mesh.agents:
+                    available = ", ".join(mesh.agents.keys())
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Hub agent '{hub_id}' not found. Available: {available}",
+                    )
+            if req.agent_ids is not None and not req.agent_ids:
+                if req.topology == "pipeline":
+                    detail = "At least one agent ID required for pipeline"
+                elif req.topology == "debate":
+                    detail = "At least one agent required for debate"
+                else:  # hub: agent_ids become the spokes
+                    detail = "At least one spoke agent required"
+                raise HTTPException(status_code=400, detail=detail)
+            if req.agent_ids:
+                missing = [aid for aid in req.agent_ids if aid not in mesh.agents]
+                if missing:
+                    raise HTTPException(
+                        status_code=400, detail=f"Agents not found: {', '.join(missing)}"
+                    )
+            if req.topology == "hub" and req.agent_ids and hub_id in req.agent_ids:
+                raise HTTPException(status_code=400, detail="Hub agent cannot also be a spoke")
         # No agent ids for pipeline/debate/hub is not an error: the mesh has a
         # documented default roster, and inventing a requirement here would break
         # every caller that relies on it (the dashboard included).

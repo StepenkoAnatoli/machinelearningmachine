@@ -45,6 +45,8 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D20** | A second run is refused instead of waiting | Two concurrent `POST /api/run` in one session answered `200` and `409`; the browser regression found no queue position, no way to cancel a waiting run, and a dashboard that cleared another tab's run state when its own request was refused | Medium (a second tab/user must retry by hand; the refusal path can desynchronise the dashboard buttons) |
 
+| **D21** | Queued runs skip validation that identical immediate runs get | `{"topology": "pipeline", "agent_ids": []}` was `400` on an idle session but `202` - and then ran the *default* roster - on a busy one; hub runs with an unknown hub agent or the hub as its own spoke were `400`-now versus `202`-then-`run_error` | Medium (a request that must fail can execute instead - including live provider calls - when the session happens to be busy) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -255,6 +257,13 @@ exercise was not to add unfounded claims:
   the outcome from the feed (`run_queued`/`run_started`/completion, all stamped with
   the run id) or by re-reading `/api/history`.
 
+- **Queued runs validate the roster at enqueue, not at start (D21).** Agents are
+  checked before a run is accepted, idle or queued alike - but a roster change while
+  a run waits (registering or deleting a custom agent between enqueue and execution)
+  surfaces as `run_error` at execution instead of HTTP 400. Same TOCTOU the immediate
+  path always had between validation and execution, with a wider window; the queue
+  does not re-validate at start.
+
 - **DNS rebinding is documented, not closed.** `validate_provider_target` checks
   addresses, then `aiohttp` resolves again. Same pre-existing gap as the page reader.
 - **Backpressure is bounded, not prevented.** A tab that cannot keep up loses frames and
@@ -327,6 +336,8 @@ exercise was not to add unfounded claims:
 
 | D20 second run refused | F15 | `server/config.py:MAX_QUEUED_SUFFIX`, `server/state.py:run_queue`, `cli.py:--max-queued`, `server/app.py` queue branch + pump + queued-aware cancel, `static/app.js` queued lifecycle | `test_run_queue.py` (202+position, 429+Retry-After, 0→409, FIFO order, queued cancel, per-scope isolation), `test_cli_live.py` max_queued resolution, jsdom queued-position + queue-full cases, e2e "concurrency in the same tab queues instead of refusing" |
 
+| D21 queued runs skip validation | F11 | `server/app.py:/api/run` pre-busy checks for an empty roster and hub hub/spokes, in mesh order with mesh-identical messages | `test_queued_run_validation.py` (busy/idle parity: empty roster × pipeline/debate/hub, unknown hub, hub-as-own-spoke) |
+
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
 `--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented as
 a bounded per-connection outbox and an `asyncio.wait_for` rather than a queue, a worker
@@ -389,5 +400,7 @@ stale controls on reconnect. The snapshot now includes the session-scoped active
 run id and pending cancellation flag; init restores Stop and Execute accordingly.
 The existing local-request guard remains active until its HTTP request settles.
 
+D19 local validation: **366 Python tests passed**, **27 jsdom tests passed**;
+full-scope Ruff and the loopback server e2e gate passed. The gate server was stopped.
 D19 local validation: **366 Python tests passed**, **27 jsdom tests passed**;
 full-scope Ruff and the loopback server e2e gate passed. The gate server was stopped.
