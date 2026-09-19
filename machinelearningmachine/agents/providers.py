@@ -1,8 +1,8 @@
 """
 LLM Provider abstractions supporting:
 - Mock / Intelligent Simulation (zero setup, deterministic template output)
-- OpenAI / OpenAI-compatible API (ChatGPT, GPT-4o, Ollama, LMStudio, vLLM)
-- Anthropic API (Claude 3.5 Sonnet, etc.)
+- OpenAI / OpenAI-compatible API (GPT-6 Astra, Ollama, LMStudio, vLLM)
+- Anthropic API (Claude Fable 5.1, etc.)
 
 Honesty rules for the simulator (these matter - see SECURITY.md / README):
 * Mock output is always labelled as simulated, because nothing here is
@@ -30,6 +30,15 @@ from urllib.parse import urlparse
 from .._deps import install_hint
 
 logger = logging.getLogger("LLMProviders")
+
+# Keep the defaults in one place so the provider, built-in agents, dashboard and
+# CLI cannot quietly advertise different generations. These are the current
+# production API IDs used by the built-in live integrations; callers can still
+# pass ``model=...`` to either provider for a local or pinned model.
+DEFAULT_OPENAI_MODEL = "gpt-6-astra"
+DEFAULT_ANTHROPIC_MODEL = "claude-fable-5-1"
+OPENAI_MODEL_DISPLAY_NAME = "GPT-6 Astra"
+ANTHROPIC_MODEL_DISPLAY_NAME = "Claude Fable 5.1"
 
 #: Prepended to every simulated reply so a transcript can never be mistaken
 #: for a real model conversation, even after it is exported to Markdown.
@@ -1060,7 +1069,7 @@ class OpenAIProvider(BaseLLMProvider):
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model: str = "gpt-4o",
+        model: str = DEFAULT_OPENAI_MODEL,
         fallback_to_mock: bool = True,
         allow_env_key: bool = True,
         timeout: float = DEFAULT_REQUEST_TIMEOUT,
@@ -1109,8 +1118,14 @@ class OpenAIProvider(BaseLLMProvider):
         payload = {
             "model": self.model,
             "messages": formatted_msgs,
-            "temperature": 0.7,
         }
+        if self.model.startswith(("gpt-5", "gpt-6")):
+            # Current GPT reasoning models use reasoning effort instead of the
+            # legacy temperature knob. Keep older/custom OpenAI-compatible models
+            # on the original setting so the override remains backwards compatible.
+            payload["reasoning_effort"] = "medium"
+        else:
+            payload["temperature"] = 0.7
 
         # A truncated answer is still an answer, but it must never *look* complete.
         # ``stats`` carries what the exchange cost, so the shape checks below can
@@ -1135,7 +1150,7 @@ class AnthropicProvider(BaseLLMProvider):
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "claude-3-5-sonnet-20241022",
+        model: str = DEFAULT_ANTHROPIC_MODEL,
         fallback_to_mock: bool = True,
         allow_env_key: bool = True,
         timeout: float = DEFAULT_REQUEST_TIMEOUT,

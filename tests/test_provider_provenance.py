@@ -266,8 +266,11 @@ def test_agents_report_their_provider_kind():
     for agent in mesh.list_agents():
         assert agent["provider_kind"] == "simulated"
     mesh.gpt.provider = OpenAIProvider(api_key="sk-some-long-enough-key")
+    mesh.claude.provider = AnthropicProvider(api_key="sk-ant-some-long-enough-key")
     assert mesh.get_agent("gpt").to_dict()["provider_kind"] == "live"
-    assert mesh.get_agent("gpt").to_dict()["model"] == "gpt-4o"
+    assert mesh.get_agent("gpt").to_dict()["model"] == "gpt-6-astra"
+    assert mesh.get_agent("claude").to_dict()["provider_kind"] == "live"
+    assert mesh.get_agent("claude").to_dict()["model"] == "claude-fable-5-1"
 
 
 def test_markdown_export_records_provenance():

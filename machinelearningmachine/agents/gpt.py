@@ -1,5 +1,5 @@
 """
-GPT Agent Module (ChatGPT / GPT-4o):
+GPT Agent Module (GPT-6 Astra):
 Acts as the Verification Engineer, Test Harness Synthesizer, and Logic Validator.
 Builds comprehensive pytest suites, fuzz tests, integration benchmarks, and validation criteria.
 """
@@ -8,9 +8,9 @@ from typing import Optional
 
 from ..protocol.bus import MessageBus
 from .base import BaseAgent
-from .providers import BaseLLMProvider
+from .providers import OPENAI_MODEL_DISPLAY_NAME, BaseLLMProvider
 
-DEFAULT_GPT_PROMPT = """You are GPT-4o, a verification engineer and test harness synthesizer.
+DEFAULT_GPT_PROMPT = """You are GPT-6 Astra, a verification engineer and test harness synthesizer.
 Your role:
 1. Examine code proposals from Copilot and critique from Claude.
 2. Generate comprehensive, production-grade pytest unit and integration test suites.
@@ -22,7 +22,7 @@ class GPTAgent(BaseAgent):
     def __init__(
         self,
         agent_id: str = "gpt",
-        name: str = "GPT-4o",
+        name: str = OPENAI_MODEL_DISPLAY_NAME,
         role: str = "Test Suite Synthesizer & Logic Validator",
         system_prompt: str = DEFAULT_GPT_PROMPT,
         color: str = "#10b981",  # OpenAI Emerald

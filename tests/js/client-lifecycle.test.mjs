@@ -261,7 +261,7 @@ test("one socket per tab, and the roster arrives on it", async () => {
     authenticated: true,
     agents: [
       { agent_id: "copilot", name: "GitHub Copilot", role: "Code", provider: "MockLLMProvider", provider_kind: "simulated", color: "#06b6d4", avatar: "🐙", system_prompt: "x" },
-      { agent_id: "claude", name: "Claude 3.5", role: "Critique", provider: "MockLLMProvider", provider_kind: "simulated", color: "#d97706", avatar: "🔮", system_prompt: "y" },
+      { agent_id: "claude", name: "Claude Fable 5.1", role: "Critique", provider: "MockLLMProvider", provider_kind: "simulated", color: "#d97706", avatar: "🔮", system_prompt: "y" },
     ],
     history: [],
     limits: { max_messages_client: 500 },
@@ -271,7 +271,7 @@ test("one socket per tab, and the roster arrives on it", async () => {
 
   assert.match(body(win, "agentCountBadge"), /2 Modules/);
   assert.match(body(win, "moduleList"), /GitHub Copilot/);
-  assert.match(body(win, "moduleList"), /Claude 3\.5/);
+  assert.match(body(win, "moduleList"), /Claude Fable 5\.1/);
   assert.ok(!calls.fetch.some((c) => String(c.url).startsWith("/api/agents")),
     "the boot path must not need a second fetch for what init already carried");
 });
@@ -400,7 +400,7 @@ test("a clamped reply is badged where it hangs, not only in the toast", async ()
     type: "new_message",
     run_id: "run-1",
     message: {
-      id: "m1", sender_id: "gpt", sender_name: "GPT-4o", recipient_id: "*", topic: "general",
+      id: "m1", sender_id: "gpt", sender_name: "GPT-6 Astra", recipient_id: "*", topic: "general",
       message_type: "answer",
       content: "here is the implementation\n\n> ✂️ **Truncated:** 20000 of 70000 characters dropped.",
       artifacts: {}, metadata: { simulated: true, content_truncated: 20000 }, timestamp: 1700000000,
@@ -427,7 +427,7 @@ test("a degraded reply's badge says how long the retries waited", async () => {
     type: "new_message",
     run_id: "run-1",
     message: {
-      id: "m1", sender_id: "gpt", sender_name: "GPT-4o", recipient_id: "*", topic: "general",
+      id: "m1", sender_id: "gpt", sender_name: "GPT-6 Astra", recipient_id: "*", topic: "general",
       message_type: "answer",
       content: "> \u26a0\ufe0f **OpenAI failed** (rate limited). The reply below is the simulator talking.",
       artifacts: {},

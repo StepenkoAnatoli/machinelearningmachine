@@ -8,7 +8,7 @@
 [![WebSocket](https://img.shields.io/badge/WebSocket-Real--Time-orange)](https://websockets.readthedocs.io/)
 [![User-Centered](https://img.shields.io/badge/design-user--centered-purple)](https://github.com/StepenkoAnatoli/machinelearningmachine)
 
-A modular orchestration system that enables AI modules to talk directly to each other — connecting **Arena AI**, **GitHub Copilot**, **Claude**, **GPT-4o**, and custom user-defined modules across standardized inter-agent communication topologies.
+A modular orchestration system that enables AI modules to talk directly to each other — connecting **Arena AI**, **GitHub Copilot**, **Claude**, **GPT-6 Astra**, and custom user-defined modules across standardized inter-agent communication topologies.
 
 > **Never installed anything from a download before? Start here:**
 > **[INSTALL-WINDOWS.md](INSTALL-WINDOWS.md)** is a step-by-step guide written for
@@ -122,15 +122,17 @@ A modular orchestration system that enables AI modules to talk directly to each 
   - Out of the box every module answers from a deterministic **simulator** - useful for
     demoing the protocol and the UI, and clearly labelled as simulated (see
     [Mock output vs. real output](#-mock-output-vs-real-output-read-this)).
-  - ⚙️ Settings can point the modules at real **OpenAI (GPT-4o)**, **Anthropic (Claude 3.5)**,
+  - ⚙️ Settings can point the modules at real **OpenAI (GPT-6 Astra)**, **Anthropic (Claude Fable 5.1)**,
     or **local Ollama / LMStudio / vLLM** backends. Keys are held in memory for your
     browser session only, are never saved or returned by the API, are only
     *shape-checked* unless you tick **Verify the OpenAI key now** (one `GET /models` call),
     and a base URL you type there is checked against the same SSRF policy as the page
     reader - on a publicly reachable bind, private/loopback addresses are refused
     (`--allow-insecure-provider-urls` re-enables them for a machine that really does run
-    its own Ollama). In the terminal, `run --live openai` is what reads your environment
-    keys.
+    its own Ollama). The live defaults are GPT-6 Astra (`gpt-6-astra`) and Claude Fable
+    5.1 (`claude-fable-5-1`); Python callers can pass `model=` to either provider when
+    using a pinned or local-compatible model. In the terminal, `run --live openai` is
+    what reads your environment keys.
   - A live provider that fails raises `ProviderError`: you either get a reply visibly
     marked `provider failed → simulated`, or - with `--strict-provider-errors` - a 502.
 
@@ -146,14 +148,14 @@ A modular orchestration system that enables AI modules to talk directly to each 
                   └──────┬──────────────┬──────────────┬────────────┘
                          │              │              │
         ┌────────────────┴──┐   ┌───────┴──────┐   ┌───┴───────────────┐
-        │     Arena AI      │   │GitHub Copilot│   │    Claude 3.5     │
+        │     Arena AI      │   │GitHub Copilot│   │    Claude Fable 5.1 │
         │(Lead Orchestrator)│   │(Code Synth)  │   │(Systems Architect)│
         └─────────┬─────────┘   └───────┬──────┘   └───┬───────────────┘
                   │                     │              │
                   └───────────────┬─────┴──────────────┘
                                   │
                         ┌─────────┴─────────┐
-                        │      GPT-4o       │
+                        │      GPT-6 Astra    │
                         │(Test Synthesizer) │
                         └───────────────────┘
 ```
@@ -427,6 +429,7 @@ python3 -m machinelearningmachine.cli run --live both --provider-timeout 30 --pr
 | --- | --- |
 | `--live {openai,anthropic,both}` | Which modules get real providers. `--live openai` wires `@gpt` and `@copilot`; `anthropic` wires `@claude` and `@arena-ai`; `both` wires all four |
 | `--base-url URL` | Send the live calls somewhere else (Ollama, vLLM, LM Studio, a proxy). Validated by the same outbound policy as the dashboard |
+| `--openai-model MODEL` / `--anthropic-model MODEL` | Override the current GPT-6 Astra / Claude Fable 5.1 defaults, especially when a local backend exposes a different model ID |
 | `--provider-timeout SECONDS` | Per-request ceiling for a live call (1-900), and the ceiling on the *total* time one turn may spend waiting between retries: an upstream `Retry-After` longer than that is reported, not slept |
 | `--strict-provider-errors` | A provider failure fails the run instead of falling back to the labelled simulator |
 
@@ -581,8 +584,8 @@ machinelearningmachine/
 │   │   ├── base.py          # BaseAgent with memory & async send/receive
 │   │   ├── arena_ai.py      # Arena AI Lead Orchestrator
 │   │   ├── copilot.py       # GitHub Copilot Implementation Specialist
-│   │   ├── claude.py        # Claude 3.5 Deep Systems Critic
-│   │   ├── gpt.py           # GPT-4o Verification & Test Synthesizer
+│   │   ├── claude.py        # Claude Fable 5.1 Deep Systems Critic
+│   │   ├── gpt.py           # GPT-6 Astra Verification & Test Synthesizer
 │   │   ├── custom.py        # Custom user-defined modules
 │   │   └── providers.py     # Real LLM drivers (OpenAI, Anthropic, Ollama) & Mock Engine
 │   ├── topologies/

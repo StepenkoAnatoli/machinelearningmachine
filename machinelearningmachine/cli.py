@@ -239,6 +239,18 @@ def main():
         ),
     )
     run_parser.add_argument(
+        "--openai-model",
+        default=None,
+        metavar="MODEL",
+        help="OpenAI model ID for --live openai (default: current GPT-6 Astra; useful for local backends)",
+    )
+    run_parser.add_argument(
+        "--anthropic-model",
+        default=None,
+        metavar="MODEL",
+        help="Anthropic model ID for --live anthropic (default: current Claude Fable 5.1)",
+    )
+    run_parser.add_argument(
         "--provider-timeout",
         type=float,
         default=60.0,
@@ -437,7 +449,12 @@ async def _apply_live_providers(mesh, args) -> None:
 
     import os
 
-    from .agents.providers import AnthropicProvider, OpenAIProvider
+    from .agents.providers import (
+        DEFAULT_ANTHROPIC_MODEL,
+        DEFAULT_OPENAI_MODEL,
+        AnthropicProvider,
+        OpenAIProvider,
+    )
 
     # ``or 60.0`` would be the lazy way and is wrong: 0 is a value the user typed,
     # and silently turning it into the default is how a mistake becomes a surprise.
@@ -449,6 +466,8 @@ async def _apply_live_providers(mesh, args) -> None:
     if not (1.0 <= timeout <= 900.0):
         raise ValueError("--provider-timeout must be between 1 and 900 seconds")
     base_url = (getattr(args, "base_url", None) or "").strip() or os.environ.get("OPENAI_BASE_URL", "")
+    openai_model = (getattr(args, "openai_model", None) or "").strip() or None
+    anthropic_model = (getattr(args, "anthropic_model", None) or "").strip() or None
 
     # Read explicitly, then handed over with allow_env_key=False: the provider must
     # not go looking in the environment behind this decision.
@@ -469,7 +488,11 @@ async def _apply_live_providers(mesh, args) -> None:
         # assign agents from *this* provider, so a shared name is the one place a
         # merge could quietly point Claude at an OpenAI endpoint and still typecheck.
         openai_provider = OpenAIProvider(
-            api_key=openai_key or None, base_url=base_url, timeout=timeout, allow_env_key=False
+            api_key=openai_key or None,
+            base_url=base_url,
+            model=openai_model or DEFAULT_OPENAI_MODEL,
+            timeout=timeout,
+            allow_env_key=False,
         )
         for agent in (mesh.gpt, mesh.copilot):
             if agent is not None:
@@ -483,7 +506,10 @@ async def _apply_live_providers(mesh, args) -> None:
         if not anthropic_key:
             raise ValueError("--live anthropic needs ANTHROPIC_API_KEY in the environment.")
         anthropic_provider = AnthropicProvider(
-            api_key=anthropic_key, timeout=timeout, allow_env_key=False
+            api_key=anthropic_key,
+            model=anthropic_model or DEFAULT_ANTHROPIC_MODEL,
+            timeout=timeout,
+            allow_env_key=False,
         )
         for agent in (mesh.claude, mesh.arena_ai):
             if agent is not None:
