@@ -208,3 +208,38 @@ def test_vendored_files_do_not_match_the_build_script_by_accident():
         assert Path(rel).name in script or rel.split("/")[-1] in script, (
             f"{rel} is in the manifest but not named by the build script"
         )
+
+
+#: Classes in index.html that are deliberately absent from the compiled stylesheets:
+#: two are styled by hand in style.css and one is Tailwind's dark-mode variant
+#: marker, which produces a variant rather than a rule of its own.
+_NON_UTILITY_CLASSES = {"dark", "preset-btn", "reader-tab-panel"}
+
+
+def test_the_shipped_stylesheets_cover_every_class_the_markup_uses():
+    """
+    The vendored tailwind.css is a *build product* committed into the tree, so it
+    can fall behind the markup without any file looking wrong. It did: index.html
+    gained .max-w-xl/.mt-5/.sm\\:flex/.text-left (the three-step empty state and the
+    How-to-use dialog) while the stylesheet kept the previous build, and the
+    dashboard those utilities belonged to shipped unstyled.
+
+    CI catches this by rebuilding the assets and requiring a clean tree - but only
+    after a push, as a red job with no explanation attached to the markup that
+    caused it. This is the same check, locally, next to the files involved.
+    """
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    css = "".join(
+        (STATIC / rel).read_text(encoding="utf-8")
+        for rel in ("vendor/tailwind.css", "style.css", "vendor/fontawesome/css/all.min.css")
+    ).replace("\\", "")  # `.sm\:flex` is written escaped in the stylesheet
+    used = {token for match in re.finditer(r'class="([^"]*)"', html) for token in match.group(1).split()}
+    missing = sorted(
+        token
+        for token in used
+        if token not in _NON_UTILITY_CLASSES and not re.search(r"\." + re.escape(token) + r"(?![\w-])", css)
+    )
+    assert not missing, (
+        f"index.html uses classes the shipped stylesheets do not define: {missing} - "
+        "rebuild the vendored assets (npm ci && python scripts/build_vendor.py) and commit them"
+    )

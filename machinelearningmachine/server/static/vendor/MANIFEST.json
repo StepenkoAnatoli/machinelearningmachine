@@ -43,10 +43,10 @@
       "version": "12.0.2"
     },
     "tailwind.css": {
-      "bytes": 25098,
+      "bytes": 25199,
       "note": "compiled from static/index.html + static/app.js; regenerate, do not edit",
       "package": "tailwindcss",
-      "sri": "sha384-1iAqJ55+k1h0JFN3VU7XGEpFaxEzfRFt3gyOdR2x7JxRS60MTibKhSF4cvRwZ+vC",
+      "sri": "sha384-BqJsAsI2a48KAZNy/q28QLU18yuwawNUk4YgVcxmoZMUloq1nQiofGExVRLChSl1",
       "version": "3.4.4"
     }
   },

@@ -1,0 +1,13 @@
+include LICENSE README.md SECURITY.md PRODUCTION_HARDENING.md USER_CENTERED_DESIGN.md INSTALL-WINDOWS.md
+# The one-click launchers (and the line-ending rules they depend on): the install
+# guide tells a beginner to double-click one of these, so an sdist without them
+# would ship instructions for a file it does not contain.
+include .gitattributes
+include launch-windows.bat launch-linux.sh launch-macos.command
+include constraints.txt requirements.txt requirements-dev.txt
+include package.json package-lock.json
+include tests/conftest.py
+recursive-include .github *.yml
+recursive-include tests/js *.test.mjs
+recursive-include scripts *.py
+recursive-include examples *.py

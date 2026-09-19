@@ -1177,8 +1177,152 @@ async def test_the_transcript_records_a_shape_failure_with_its_real_effort(monke
     for agent in mesh.agents.values():
         agent.provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=60.0)
     transcript = await mesh.talk_p2p("arena-ai", "copilot", "build a rate limiter", turns=1)
-    meta = transcript[0].metadata
-    assert meta["simulated"] is True and "did not contain a message" in meta["provider_error"]
-    assert meta["provider_attempts"] == len(calls) // 2 or meta["provider_attempts"] == 2, meta
-    assert "after 2 attempts" in meta["provider_error"], meta["provider_error"]
-    assert meta["provider_waited"] == pytest.approx(1.0), meta
+    # Two agents share the scripted double: the first one's 429 was retried, its
+    # peer was answered on its first request. ``len(calls) // 2`` used to stand in
+    # for "this agent's share" - it is ``3 // 2 == 1`` here, so that term admitted
+    # the very value D34 fixed and the assertion passed on the reason clause alone.
+    retried, first_try = transcript[0].metadata, transcript[1].metadata
+    assert retried["simulated"] is True and "did not contain a message" in retried["provider_error"]
+    assert retried["provider_attempts"] == 2, retried
+    assert retried["provider_waited"] == pytest.approx(1.0), retried
+    assert "after 2 attempts" in retried["provider_error"], retried["provider_error"]
+    # The peer was asked once: borrowing the retried agent's 2 would be D34 read backwards.
+    assert first_try["provider_attempts"] == 1 and first_try["provider_waited"] == 0.0, first_try
+    assert "attempts" not in first_try["provider_error"], first_try["provider_error"]
+
+
+# ------- D36: text that is not text must fail the turn, not the process
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"content": [{"type": "text", "text": 123}]},
+        {"content": [{"type": "text", "text": {"nested": 1}}]},
+        {"content": [{"type": "text", "text": ["not", "text"]}]},
+        {"content": 5},
+    ],
+)
+async def test_a_text_block_that_is_not_text_is_a_provider_error(monkeypatch, backoffs, body):
+    """
+    Reproduced before the fix: ``"\\n".join(t for t in texts if t)`` raised a raw
+    ``TypeError`` out of ``AnthropicProvider.generate`` for a block whose ``text``
+    was a number, an object or a list - and for a ``content`` that was not
+    iterable at all. That is not a ``ProviderError``, so nothing downstream could
+    label it: the caller saw ``TypeError: sequence item 0: expected str instance,
+    int found`` with no provider, no attempt count and no ``waited``.
+
+    The body is one the provider cannot use, which is exactly the case D34
+    taught to report as a failure that cost what it cost.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([200], calls, body=body),
+    )
+    provider = _provider(AnthropicProvider, max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="Claude",
+        )
+    err = exc.value
+    assert err.provider == "Anthropic", err.provider
+    assert "did not contain a text block" in err.reason, err.reason
+    assert err.attempts == len(calls) == 1
+    assert err.waited == 0.0
+    assert "TypeError" not in str(err), str(err)
+
+
+async def test_a_non_text_block_after_a_retry_counts_the_requests_and_the_wait(
+    monkeypatch, backoffs
+):
+    """
+    The same body after a real 429: the exchange cost two requests and one
+    ``Retry-After: 1`` wait, and the failure has to say so - the raw
+    ``TypeError`` this used to be carried neither number.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, body={"content": [{"type": "text", "text": 123}]},
+                             headers={429: {"Retry-After": "1"}}),
+    )
+    provider = _provider(AnthropicProvider, max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="Claude",
+        )
+    err = exc.value
+    assert backoffs == [1.0], backoffs
+    assert len(calls) == 2 and err.attempts == 2, (len(calls), err.attempts)
+    assert err.waited == pytest.approx(1.0), err.waited
+    assert "after 2 attempts, 1s spent waiting" in err.reason, err.reason
+    assert err.reason in str(err)
+
+
+async def test_the_transcript_of_a_non_text_block_keeps_the_attempt_record(monkeypatch, backoffs):
+    """What the reader of a degraded turn sees, for the D36 shape."""
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, body={"content": [{"type": "text", "text": 123}]},
+                             headers={429: {"Retry-After": "1"}}),
+    )
+    mesh = AgentMesh()
+    for agent in mesh.agents.values():
+        agent.provider = _provider(AnthropicProvider, max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    transcript = await mesh.talk_p2p("arena-ai", "copilot", "build a rate limiter", turns=1)
+    # The first agent's exchange was retried; its peer was answered by the same
+    # scripted double on its first request, so its record must not borrow the 2.
+    retried, first_try = transcript[0].metadata, transcript[1].metadata
+    assert "did not contain a text block" in retried["provider_error"], retried
+    assert "TypeError" not in retried["provider_error"], retried["provider_error"]
+    assert retried["provider_attempts"] == 2 and retried["provider_waited"] == pytest.approx(1.0), retried
+    assert "after 2 attempts, 1s spent waiting" in retried["provider_error"], retried["provider_error"]
+    assert retried["simulated"] is True
+    assert first_try["provider_attempts"] == 1 and first_try["provider_waited"] == 0.0, first_try
+    assert "attempts" not in first_try["provider_error"], first_try["provider_error"]
+
+
+async def test_a_malformed_block_beside_a_usable_one_is_still_an_answer(monkeypatch, backoffs):
+    """
+    The fix must not over-reach: a block this provider cannot read is skipped,
+    exactly as a non-text block already was, and the turn still answers.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([200], calls,
+                             body={"content": [{"type": "text", "text": 123},
+                                               {"type": "text", "text": "real answer"}]}),
+    )
+    provider = _provider(AnthropicProvider, max_attempts=3, retry_backoff=0.5, timeout=60.0)
+    out = await provider.generate(
+        system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+        agent_role="r", agent_name="Claude",
+    )
+    assert out == "real answer"
+    assert len(calls) == 1
+
+
+async def test_strict_mode_reports_a_non_text_block_as_a_provider_failure(monkeypatch, backoffs):
+    """
+    With fallback off there is nobody to relabel the crash: the run used to die
+    with a bare ``TypeError`` from a join, which is not the provider's answer.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([200], calls, body={"content": [{"type": "text", "text": 123}]}),
+    )
+    mesh = AgentMesh()
+    mesh.arena_ai.provider = _provider(
+        AnthropicProvider, fallback_to_mock=False, max_attempts=3, retry_backoff=0.5, timeout=60.0
+    )
+    with pytest.raises(ProviderError) as exc:
+        await mesh.arena_ai.generate_response("build a rate limiter")
+    err = exc.value
+    assert "did not contain a text block" in err.reason, err.reason
+    assert err.attempts == len(calls) == 1
