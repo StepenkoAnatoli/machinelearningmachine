@@ -69,6 +69,8 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D32** | Session store performance at 1000+ messages lacked automated benchmark validation | Without an active benchmark script covering 1000+ message transcripts, scaling regressions in the saved-session fast path could go unnoticed | Low (performance measurement and regression prevention) |
 
+| **D33** | `parse_retry_after` could raise, and the retry loop's catch-all then reported *its* failure instead of the provider's | A 429 carrying a 400-digit `Retry-After` gave `float(int(...))` an `OverflowError`, which escaped the parser and was swallowed by `except Exception` in the loop: measured `reason="the request failed (OverflowError)"`, `retryable=False`, `status_code=None`, **one** request sent. A transient rate limit was relabelled as a permanent, unattributed failure because of one header nobody could read | Medium (a vendor- or attacker-controlled header decides whether the failure looks retryable) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -116,8 +118,9 @@ Functional
   `str(exc)` must describe the same number of requests, whatever status ended the
   turn. No wait is spent in silence: each one is logged before it happens, named
   as the upstream's or the client's own, and totalled on the error and in the
-  transcript. No new dependency, and no wait that a test has to spend.
-  (D25, D26, D27, D28)
+  transcript. Reading the header cannot itself become the failure: the parser never
+  raises, so an unreadable ask leaves the 429 intact. No new dependency, and no wait
+  that a test has to spend. (D25, D26, D27, D28, D33)
 
 Non-functional
 - **N1** No new runtime dependency (retry/backoff, queueing, atomic writes are stdlib).
@@ -197,7 +200,7 @@ Every evidence cell is a test that was run and passed, not a plan. All offline.
 | F11 | validation before the cooldown stamp, `Retry-After` on 409/429 | `tests/test_run_serialization.py` - `state.last_run_time` unchanged by a 400 |
 | F12 | `server/app.py: _safe_reason` for every failure string that reaches a client | `tests/test_provider_output_bounds.py` (unit cases) |
 | F15 | `server/config.py:MAX_QUEUED_SUFFIX`, `server/state.py:run_queue` + positions, `cli.py:--max-queued`, `server/app.py` queue branch + lock-handoff pump + queued-aware cancel, `static/app.js` queued lifecycle | `test_run_queue.py` (202+position, 429+Retry-After, 0→409, FIFO order, queued cancel, per-session isolation), `test_cli_live.py` max_queued resolution, jsdom queued-position + queue-full + adoption + race cases, e2e "concurrency in the same tab queues instead of refusing" |
-| F16 | `providers.py: parse_retry_after` + `RETRY_AFTER_HEADER`, `_backoff_sleep` seam, `ProviderError.retry_after`, retry branch in `post_for_json` | `tests/test_provider_retry.py` - 11 header forms parsed (including `-5`, `3.5`, `soon`, an impossible date), an HTTP-date counted down against a fixed instant, `Retry-After: 3` producing exactly a 3 s wait, a malformed header falling back to the exponential budget, a 401's header never honoured, both providers sharing it, one case against a real loopback aiohttp server sending `retry-after` lower-cased, and a source-level pin that `post_for_json` waits through the seam only. The bound (D26): `Retry-After: 600` against `timeout=60` sleeps nothing and raises with both numbers, a `retry_backoff=100`/`timeout=2` exponential budget is refused the same way, two 4 s waits fit a 10 s budget and a third does not, the same `Retry-After: 30` is slept at `timeout=60` and refused at `timeout=10` (parametrised), and Anthropic shares the bound. Agreement (D27): `agents/providers.py: _labelled_with_attempts`, applied on *every* raise path, pinned by five parametrised status sequences (`[503,503]`, `[429,401]`, `[ConnectionError,401]`, `[503,429,401]`, `[401]`) asserting `attempts == len(requests)`, the number parsed out of `reason` and out of `str(exc)`, and the *absence* of retry language after a single attempt, plus a transcript case where one agent reports `after 2 attempts` and its peer, asked once, reports none. No silent waiting (D28): `ProviderError.waited`, the WARNING line in `post_for_json`, `metadata.provider_waited` in `agents/base.py` - pinned by two caplog cases (the wait line names the delay, the attempt it precedes, and whether it came from `upstream Retry-After` or from `jittered backoff`), `waited` on the exhausted and on the D26-refused error, no waiting clause when nothing was waited, a saved-session round trip, and a jsdom case that the degraded badge's tooltip carries `after 3 attempts, 4s spent waiting` |
+| F16 | `providers.py: parse_retry_after` + `RETRY_AFTER_HEADER`, `_backoff_sleep` seam, `ProviderError.retry_after`, retry branch in `post_for_json` | `tests/test_provider_retry.py` - 11 header forms parsed (including `-5`, `3.5`, `soon`, an impossible date), an HTTP-date counted down against a fixed instant, `Retry-After: 3` producing exactly a 3 s wait, a malformed header falling back to the exponential budget, a 401's header never honoured, both providers sharing it, one case against a real loopback aiohttp server sending `retry-after` lower-cased, and a source-level pin that `post_for_json` waits through the seam only. The bound (D26): `Retry-After: 600` against `timeout=60` sleeps nothing and raises with both numbers, a `retry_backoff=100`/`timeout=2` exponential budget is refused the same way, two 4 s waits fit a 10 s budget and a third does not, the same `Retry-After: 30` is slept at `timeout=60` and refused at `timeout=10` (parametrised), and Anthropic shares the bound. Agreement (D27): `agents/providers.py: _labelled_with_attempts`, applied on *every* raise path, pinned by five parametrised status sequences (`[503,503]`, `[429,401]`, `[ConnectionError,401]`, `[503,429,401]`, `[401]`) asserting `attempts == len(requests)`, the number parsed out of `reason` and out of `str(exc)`, and the *absence* of retry language after a single attempt, plus a transcript case where one agent reports `after 2 attempts` and its peer, asked once, reports none. No silent waiting (D28): `ProviderError.waited`, the WARNING line in `post_for_json`, `metadata.provider_waited` in `agents/base.py` - pinned by two caplog cases (the wait line names the delay, the attempt it precedes, and whether it came from `upstream Retry-After` or from `jittered backoff`), `waited` on the exhausted and on the D26-refused error, no waiting clause when nothing was waited, a saved-session round trip, and a jsdom case that the degraded badge's tooltip carries `after 3 attempts, 4s spent waiting`. The parser cannot raise (D33): `agents/providers.py: parse_retry_after` catches `OverflowError`, pinned by three unrepresentable digit strings plus the two cases that matter together - a 400-digit `Retry-After` on a 429 still retries and still reports `status_code=429`, while an enormous-but-representable `1e20` is a real ask and is refused by the budget with both numbers named |
 | N1/N2 | stdlib-only core, `asyncio.wait_for` on every await that can block | CI matrix (3.10/3.11/3.12) + `test_import_without_optional_deps` |
 | N3 | README + SECURITY.md rewritten in the same change; `serve` knobs readable from the environment | `tests/test_docs_are_accurate.py` + `tests/test_cli_live.py` |
 | N4 | `--run-timeout` (default 180 s) → 504 with a plain-language reason, `run_error` frame first | `tests/test_run_serialization.py` |
@@ -326,6 +329,15 @@ exercise was not to add unfounded claims:
   retried twice reports `provider_attempts = 2` four times and `8` nowhere; there is
   no per-run total, and `--strict-provider-errors` still judges each turn on its own.
 
+- **An unreadable `Retry-After` is indistinguishable from no header (D33).** The
+  parser never raises - a digit string too long to become a float returns `None`
+  instead of handing the loop an `OverflowError` to misreport - but `None` means the
+  exponential budget decides, so a client that could not read "wait 300" may retry
+  after 0.8 s and earn a harder limit. That is the lesser failure: the alternative
+  was a transient 429 arriving as a permanent, status-less `the request failed
+  (OverflowError)`. There is no third option, since a header that cannot be parsed
+  carries no information to act on.
+
 - **The recorded wait is the wait, not the turn (D28).** `provider_waited` sums the
   delays spent *between* attempts of one `post_for_json` call and nothing else: it
   excludes request time, the simulator fallback that follows a failure, and the
@@ -414,6 +426,7 @@ exercise was not to add unfounded claims:
 
 | D24 stale no-queue prose | F13, N3 | PRODUCTION_HARDENING.md (F2, §4 F2/F9/F15 rows, §7, §8 N-para), USER_CENTERED_DESIGN.md queue row, README test tree + jsdom count | `test_docs_are_accurate.py` (hardening-agrees, UCD-agrees, listing-counts cases) |
 
+| D33 the parser could raise and steal the failure | F16 | `agents/providers.py: parse_retry_after` (`OverflowError` -> `None`) | `test_provider_retry.py` - three unrepresentable digit strings, a 400-digit `Retry-After` on a 429 that still retries and still reports `status_code=429` / `retryable=True` / `attempts=2`, and the contrast case: `1e20` is representable, so it is a real ask and the budget refuses it with `1e+20` and `60` both in the reason |
 | D32 1000+ message bench | F5 | `scripts/bench_sessions.py` | `scripts/bench_sessions.py` (50 files × 1000 messages: 1.3 ms header vs 271.3 ms parse, 208.9x) |
 | D31 transcript infinite DOM | F12, F14 | `static/app.js` windowed transcript, `btn-show-earlier`, oldest node pruning | `tests/js/client-lifecycle.test.mjs` (windowed load, stream pruning, progressive expansion) |
 | D30 trimmed flag at document tail | F5 | `sessions.py:save_session` header ordering, `_meta(..., trimmed=...)` | `test_session_storage.py::test_large_trimmed_session_stores_trimmed_flag_in_header_and_fast_path_reads_it` |
@@ -529,3 +542,24 @@ Measured on this machine:
 
 D30-D32 local validation: **434 Python tests passed**, **37 jsdom tests passed**, `ruff check machinelearningmachine tests scripts examples` clean over the full scope, `scripts/bench_sessions.py` passed, and `scripts/e2e_server_check.py` reported `ALL E2E CHECKS PASSED` against `serve --port 8799` on its unchanged loopback default. The gate server was stopped afterwards and the port was verified closed.
 
+### D33-D34 audit of the merged retry diff
+
+D33 and D34 were found by auditing the D25-D29 diff after it merged, not by a user
+report. Two other suspicions from the same audit were *cleared by measurement* and are
+recorded here so they are not re-litigated: against a real loopback aiohttp server a
+read timeout is labelled `timed out after 0.25s (after 2 attempts)` with
+`retryable=True` and `attempts=2` (the `except asyncio.TimeoutError` branch does win
+over `except aiohttp.ClientError`, because aiohttp raises a plain timeout for a total
+deadline, not a `ServerTimeoutError`); and `server/app.py` never passes a
+browser-supplied timeout into a provider, so a session cannot widen the wait budget
+D26 charges against.
+
+One coverage limit the audit found and did **not** close: the retry suite's
+transport-error cases use a stub whose `ClientError` is the builtin `ConnectionError`,
+so aiohttp's real exception hierarchy is exercised only by the two real-loopback cases
+(lower-cased `retry-after`, and a stalled server).
+
+D33 local validation: **440 Python tests passed** (434 on the rebased base), **37
+jsdom passed**, full-scope Ruff clean, and `scripts/e2e_server_check.py` reported
+`ALL E2E CHECKS PASSED` against `serve --port 8799` on its unchanged loopback
+default, with the server stopped and the port verified closed afterwards.

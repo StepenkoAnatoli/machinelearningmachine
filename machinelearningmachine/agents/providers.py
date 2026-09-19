@@ -145,8 +145,16 @@ def parse_retry_after(value: Any, *, now: Optional[datetime] = None) -> Optional
 
     Both forms RFC 9110 allows are understood: ``delay-seconds`` ("3") and an
     HTTP-date ("Wed, 21 Oct 2026 07:28:00 GMT"). Everything else - absent,
-    empty, negative, fractional, a word, an impossible date - returns ``None``,
-    which means "no opinion" and leaves the exponential budget in charge.
+    empty, negative, fractional, a word, an impossible date, a digit string too
+    long to become a float - returns ``None``, which means "no opinion" and
+    leaves the exponential budget in charge. This function never raises: it
+    reads text somebody else controls, and an exception from here would be
+    caught by the retry loop's catch-all and reported as the failure instead of
+    the 429 that actually arrived.
+
+    An *enormous but representable* ask is deliberately not ``None``: that is a
+    real request to wait, and D26's budget refuses it with both numbers named
+    rather than pretending the server said nothing.
 
     Guessing zero for a header we could not read would be the wrong kind of
     helpful: it retries at once against a server that just said "not now", and
@@ -173,7 +181,15 @@ def parse_retry_after(value: Any, *, now: Optional[datetime] = None) -> Optional
     if not text:
         return None
     if _DELAY_SECONDS.match(text):
-        return float(int(text))
+        # ``float(int(...))`` overflows on a long enough digit string, and a
+        # header is text somebody else controls. Letting that escape would hand
+        # the loop's catch-all an OverflowError, which relabels a transient 429
+        # as a permanent "the request failed (OverflowError)" and loses the
+        # status code - one odd header rewriting what the failure was.
+        try:
+            return float(int(text))
+        except OverflowError:
+            return None
     try:
         when = parsedate_to_datetime(text)
     except (TypeError, ValueError):
