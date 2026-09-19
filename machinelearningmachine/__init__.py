@@ -24,7 +24,7 @@ try:
 except ModuleNotFoundError as exc:
     # A third-party dependency is not installed: replace the raw traceback with
     # clear installation instructions. Real bugs inside the package still raise.
-    if _deps.is_known_dependency(exc.name):
+    if exc.name is not None and _deps.is_known_dependency(exc.name):
         raise ImportError(_deps.install_hint(exc.name)) from None
     raise
 

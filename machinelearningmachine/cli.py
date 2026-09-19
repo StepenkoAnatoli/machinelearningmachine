@@ -433,7 +433,7 @@ async def _apply_live_providers(mesh, args) -> None:
     """
     which = getattr(args, "live", None)
     if not which:
-        return ""
+        return
 
     import os
 
@@ -465,27 +465,32 @@ async def _apply_live_providers(mesh, args) -> None:
                 "--live openai needs OPENAI_API_KEY in the environment, or --base-url pointing "
                 "at a local OpenAI-compatible backend (e.g. http://localhost:11434/v1)."
             )
-        provider = OpenAIProvider(
+        # Distinct names per vendor, not one reused ``provider``: both blocks
+        # assign agents from *this* provider, so a shared name is the one place a
+        # merge could quietly point Claude at an OpenAI endpoint and still typecheck.
+        openai_provider = OpenAIProvider(
             api_key=openai_key or None, base_url=base_url, timeout=timeout, allow_env_key=False
         )
         for agent in (mesh.gpt, mesh.copilot):
             if agent is not None:
-                agent.provider = provider
+                agent.provider = openai_provider
         lines.append(
             f"🌐 --live openai: @{', @'.join(a.agent_id for a in (mesh.gpt, mesh.copilot) if a)} "
-            f"will POST to {provider.base_url}/chat/completions "
-            f"(model {provider.model}, key {'from OPENAI_API_KEY' if openai_key else 'not set - local backend'})"
+            f"will POST to {openai_provider.base_url}/chat/completions "
+            f"(model {openai_provider.model}, key {'from OPENAI_API_KEY' if openai_key else 'not set - local backend'})"
         )
     if which in ("anthropic", "both"):
         if not anthropic_key:
             raise ValueError("--live anthropic needs ANTHROPIC_API_KEY in the environment.")
-        provider = AnthropicProvider(api_key=anthropic_key, timeout=timeout, allow_env_key=False)
+        anthropic_provider = AnthropicProvider(
+            api_key=anthropic_key, timeout=timeout, allow_env_key=False
+        )
         for agent in (mesh.claude, mesh.arena_ai):
             if agent is not None:
-                agent.provider = provider
+                agent.provider = anthropic_provider
         lines.append(
             f"🌐 --live anthropic: @{', @'.join(a.agent_id for a in (mesh.claude, mesh.arena_ai) if a)} "
-            f"will POST to {provider.base_url}/messages (model {provider.model}, key from ANTHROPIC_API_KEY)"
+            f"will POST to {anthropic_provider.base_url}/messages (model {anthropic_provider.model}, key from ANTHROPIC_API_KEY)"
         )
 
     for line in lines:

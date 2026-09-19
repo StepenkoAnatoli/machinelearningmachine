@@ -83,7 +83,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 424 tests (391 Python + 33 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 510 tests (476 Python + 34 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -513,8 +513,8 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 357 tests, all offline
-node --test tests/js/*.test.mjs          # 33 jsdom browser tests (needs: npm ci)
+pytest -q                                    # 476 tests, all offline
+node --test tests/js/*.test.mjs          # 34 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 ```
@@ -569,6 +569,11 @@ machinelearningmachine/
 ├── launch-linux.sh          # One-click launcher (Linux: ./launch-linux.sh)
 ├── INSTALL-WINDOWS.md       # Step-by-step install guide for complete beginners (Windows)
 ├── machinelearningmachine/
+│   ├── __init__.py          # Public API surface, wrapped so a missing dep prints install hints
+│   ├── __main__.py          # `python -m machinelearningmachine` entry point
+│   ├── _deps.py             # Dependency diagnostics; imports nothing third-party
+│   ├── env.py               # Env config in one place: MACHINELEARNINGMACHINE_* + MODULE_MESH_* aliases
+│   ├── run_control.py       # Task-local cooperative cancellation: check_cancelled / RunCancelled
 │   ├── protocol/
 │   │   ├── message.py       # InterAgentMessage, MessageType, ContentPayload
 │   │   └── bus.py           # MessageBus, routing, topic pub/sub, history
@@ -611,6 +616,7 @@ machinelearningmachine/
 ├── scripts/
 │   ├── build_vendor.py      # Regenerate static/vendor/ from pinned npm deps
 │   ├── pick_port.py         # First free local port, so a busy 8000 cannot stop a launch
+│   ├── bench_sessions.py    # Session-listing benchmark: header read vs full parse
 │   └── e2e_server_check.py  # End-to-end pass against a running server (HTTP + WS)
 ├── tests/
 │   ├── test_protocol.py     # message + bus bounds
@@ -634,14 +640,16 @@ machinelearningmachine/
 │   ├── test_session_lifecycle.py     # the reaper, eviction reasons, close 4408
 │   ├── test_session_storage.py       # atomic saves, header listings, trimming, pruning
 │   ├── test_cli_live.py              # --live opt-in, --no-delay, flag/env precedence
+│   ├── test_launchers.py             # one-click launchers: line endings, Python check, free port
 │   ├── test_server_auth.py  # bind policy, token gate, WS auth, lockout
 │   ├── test_server_isolation.py  # two browsers cannot touch each other's state
 │   ├── test_provider_provenance.py  # simulated vs live vs failed-provider labelling
 │   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
+│   ├── test_packaging.py            # every module dir is a real package; package-data globs match
 │   ├── test_docs_are_accurate.py      # docs claims that fail the build when stale
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
-│       └── client-lifecycle.test.mjs  # 18 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery, stale-record guard
+│       └── client-lifecycle.test.mjs  # 19 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery, stale-record guard
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,
 │                            #   vendor integrity, jsdom, pip-audit, npm audit, secret scan
 ├── .github/dependabot.yml   # pip + npm + actions

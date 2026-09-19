@@ -58,15 +58,19 @@ from .state import LoginThrottle, QueuedRun, SessionRegistry, SessionState
 
 logger = logging.getLogger("server")
 
-# Validation constants - user-centered limits to prevent abuse and provide clear feedback
-MAX_PROMPT_LENGTH = 5000
+# Validation constants - user-centered limits to prevent abuse and provide clear feedback.
+# The two the mesh also enforces are *read from it*, not restated: the request
+# models below reject a prompt the mesh would have accepted (and /api/status
+# advertises these very numbers to the browser), so two spellings of one policy
+# is how the API starts refusing what the dashboard promised was fine.
+MAX_PROMPT_LENGTH = AgentMesh.MAX_PROMPT_LENGTH
 MAX_AGENT_ID_LENGTH = 50
 MAX_NAME_LENGTH = 100
 MAX_ROLE_LENGTH = 200
 MAX_SYSTEM_PROMPT_LENGTH = 2000
 AGENT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-_]{1,48}[a-z0-9]$|^[a-z0-9]$")
 RESERVED_AGENT_IDS = {"system", "broadcast", "all", "*", "api", "admin", "root"}
-MAX_AGENTS_PER_SESSION = 20
+MAX_AGENTS_PER_SESSION = AgentMesh.MAX_AGENTS  # same limit as the mesh, one source
 MAX_CUSTOM_AGENTS_PER_SESSION = 16
 RUN_COOLDOWN_SECONDS = 1.0  # Prevent accidental double-clicks / spam
 URL_READ_COOLDOWN_SECONDS = 2.0
@@ -90,7 +94,10 @@ STATIC_DIR = BASE_DIR / "static"
 
 #: Fire-and-forget tasks that must be kept referenced until they finish (closing a
 #: socket is best-effort, but an unreferenced task can be garbage-collected first).
-_DETACHED_TASKS: "set[asyncio.Task[None]]" = set()
+#: ``Any`` result type on purpose: this one set holds both the queued-run tasks
+#: (which return nothing) and the socket-closing tasks (which return a count), and
+#: only their identity matters here - it is a lifetime anchor, not a result.
+_DETACHED_TASKS: "set[asyncio.Task[Any]]" = set()
 
 
 # ---------------------------------------------------------------------------
@@ -735,7 +742,7 @@ def _register_routes(
                         )
                 if req.openai_base_url:
                     _guard_provider_url(config, req.openai_base_url)
-                provider = OpenAIProvider(
+                openai_provider = OpenAIProvider(
                     api_key=req.openai_api_key or state.api_keys.get("openai", ""),
                     base_url=req.openai_base_url,
                     fallback_to_mock=config.fallback_to_mock,
@@ -747,12 +754,12 @@ def _register_routes(
                 if req.openai_api_key:
                     state.api_keys["openai"] = req.openai_api_key
                 if req.verify:
-                    ok, why = await _verify_openai(provider)
+                    ok, why = await _verify_openai(openai_provider)
                     if not ok:
                         problems.append(f"OpenAI check failed: {why}")
                 for agent in (mesh.gpt, mesh.copilot):
                     if agent is not None:
-                        agent.provider = provider
+                        agent.provider = openai_provider
                 configured.append("OpenAI")
 
             if req.anthropic_api_key:
@@ -761,7 +768,7 @@ def _register_routes(
                         status_code=400,
                         detail="That does not look like an Anthropic key (expected 'sk-ant-...').",
                     )
-                provider = AnthropicProvider(
+                anthropic_provider = AnthropicProvider(
                     api_key=req.anthropic_api_key,
                     fallback_to_mock=config.fallback_to_mock,
                     allow_env_key=False,
@@ -769,7 +776,7 @@ def _register_routes(
                 state.api_keys["anthropic"] = req.anthropic_api_key
                 for agent in (mesh.claude, mesh.arena_ai):
                     if agent is not None:
-                        agent.provider = provider
+                        agent.provider = anthropic_provider
                 configured.append("Anthropic")
 
             if not configured:
@@ -978,14 +985,77 @@ def _register_routes(
             )
         raise ValueError(f"Unknown topology '{topology}'")  # validated by the model
 
+    def _timeout_reason() -> str:
+        """The one explanation for a run that was cut off, worded once for both paths."""
+        return (
+            f"the run was stopped after {config.run_timeout:.0f}s: a provider accepted "
+            "the request and never answered. Check the endpoint in Settings, then try a "
+            "shorter prompt or a longer --run-timeout."
+        )
+
+    def _cancel_notice(run_id: str) -> Message:
+        """The transcript line a stopped run leaves behind, identical in both paths."""
+        return Message(
+            sender_id="system", sender_name="System", message_type=MessageType.SYSTEM,
+            content="Run cancelled. Replies already received have been kept.",
+            metadata={"run_id": run_id, "cancelled": True},
+        )
+
+    def _publish_terminal(
+        state: SessionState, run_id: str, transcript: List[Message], cancelled: bool
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+        """
+        Describe a finished run once, for both paths.
+
+        Counts what was simulated and what was clamped, remembers the provider
+        warnings on the session, publishes the terminal frame, and returns those same
+        three collections so the immediate path can build its JSON body from the
+        numbers it just broadcast. This is the part worth sharing: an immediate run
+        and a queued run that describe the *same* transcript differently - a badge
+        count, a warning list, a ``run_cancelled`` where the other said
+        ``run_completed`` - is a divergence no single-path test would ever catch.
+        """
+        meta = [m.metadata or {} for m in transcript]
+        simulated = [md for md in meta if md.get("simulated")]
+        clamped = [md for md in meta if md.get("content_truncated")]
+        warnings = sorted({str(md["provider_error"]) for md in meta if md.get("provider_error")})
+        state.last_run_warnings = warnings
+        state.publish({
+            "type": "run_cancelled" if cancelled else "run_completed",
+            "run_id": run_id,
+            "simulated_count": len(simulated),
+            "truncated_count": len(clamped),
+        })
+        return simulated, clamped, warnings
+
     def _schedule_queued(state: SessionState) -> None:
         """Start the next waiting run, if any (called before the lock is released)."""
         if not state.run_queue:
             return
-        # Both callers are coroutine finally-blocks, so a loop is always running.
+        # The only caller is ``_release_run``, which both run paths invoke from a
+        # coroutine's ``finally`` - so a running loop is always there to ask.
         task = asyncio.get_running_loop().create_task(_run_queued_entry(state))
         _DETACHED_TASKS.add(task)
         task.add_done_callback(_DETACHED_TASKS.discard)
+
+    def _release_run(state: SessionState) -> None:
+        """
+        Give up a run's hold on the session, identically from both run paths.
+
+        The order is the contract: the next waiting run is scheduled *before* the
+        lock is released, so a run that was queued cannot be beaten to it by a
+        request that arrives in the same instant. Every line is load-bearing and
+        none of them is obvious - omit ``_schedule_queued`` and the queue stalls
+        forever behind a run that already finished; omit the ``release()`` and this
+        browser session deadlocks for the rest of its lifetime; omit either reset
+        and ``/api/status`` keeps reporting a run that is over, which is a Stop
+        button that never comes back. Both callers run this from a ``finally``, so
+        it happens on success, on cancellation, on timeout and on error alike.
+        """
+        _schedule_queued(state)
+        state.active_run_id = None
+        state.cancel_event = None
+        state.run_lock.release()
 
     async def _run_queued_entry(state: SessionState) -> None:
         """Execute the oldest waiting run (FIFO) after the active one released the lock."""
@@ -1029,20 +1099,13 @@ def _register_routes(
             except RunCancelled:
                 transcript = [m for m in mesh.get_history() if m.id not in previous_ids]
             except asyncio.TimeoutError:
-                reason = (
-                    f"the run was stopped after {config.run_timeout:.0f}s: a provider accepted "
-                    "the request and never answered. Check the endpoint in Settings, then try a "
-                    "shorter prompt or a longer --run-timeout."
-                )
-                state.publish({"type": "run_error", "run_id": run_id, "error": reason})
+                state.publish({
+                    "type": "run_error", "run_id": run_id, "error": _timeout_reason(),
+                })
                 failed = True
             if not failed and state.cancel_event.is_set():
                 cancelled = True
-                notice = Message(
-                    sender_id="system", sender_name="System", message_type=MessageType.SYSTEM,
-                    content="Run cancelled. Replies already received have been kept.",
-                    metadata={"run_id": run_id, "cancelled": True},
-                )
+                notice = _cancel_notice(run_id)
                 await mesh.bus.dispatch(notice)
                 transcript.append(notice)
         except ProviderError as e:
@@ -1060,24 +1123,11 @@ def _register_routes(
             })
             failed = True
         finally:
-            _schedule_queued(state)
-            state.active_run_id = None
-            state.cancel_event = None
-            state.run_lock.release()
+            _release_run(state)
 
         if failed:
             return
-        meta = [m.metadata or {} for m in transcript]
-        simulated = [md for md in meta if md.get("simulated")]
-        clamped = [md for md in meta if md.get("content_truncated")]
-        warnings = sorted({str(md["provider_error"]) for md in meta if md.get("provider_error")})
-        state.last_run_warnings = warnings
-        state.publish({
-            "type": "run_cancelled" if cancelled else "run_completed",
-            "run_id": run_id,
-            "simulated_count": len(simulated),
-            "truncated_count": len(clamped),
-        })
+        _publish_terminal(state, run_id, transcript, cancelled)
 
     @app.post("/api/runs/{run_id}/cancel")
     async def cancel_run(run_id: str, state: SessionState = Depends(current_state)):
@@ -1265,20 +1315,12 @@ def _register_routes(
             except RunCancelled:
                 transcript = [m for m in mesh.get_history() if m.id not in previous_ids]
             except asyncio.TimeoutError as exc:
-                reason = (
-                    f"the run was stopped after {config.run_timeout:.0f}s: a provider accepted "
-                    "the request and never answered. Check the endpoint in Settings, then try a "
-                    "shorter prompt or a longer --run-timeout."
-                )
+                reason = _timeout_reason()
                 state.publish({"type": "run_error", "run_id": run_id, "error": reason})
                 raise HTTPException(status_code=504, detail=reason) from exc
             if state.cancel_event.is_set():
                 cancelled = True
-                notice = Message(
-                    sender_id="system", sender_name="System", message_type=MessageType.SYSTEM,
-                    content="Run cancelled. Replies already received have been kept.",
-                    metadata={"run_id": run_id, "cancelled": True},
-                )
+                notice = _cancel_notice(run_id)
                 await mesh.bus.dispatch(notice)
                 transcript.append(notice)
         except HTTPException:
@@ -1301,23 +1343,10 @@ def _register_routes(
             })
             raise HTTPException(status_code=500, detail="Failed to execute dialogue. Please try again.") from exc
         finally:
-            _schedule_queued(state)
-            state.active_run_id = None
-            state.cancel_event = None
-            state.run_lock.release()
+            _release_run(state)
 
         messages = [m.to_dict() for m in transcript]
-        meta = [m.metadata or {} for m in transcript]
-        simulated = [md for md in meta if md.get("simulated")]
-        clamped = [md for md in meta if md.get("content_truncated")]
-        warnings = sorted({str(md["provider_error"]) for md in meta if md.get("provider_error")})
-        state.last_run_warnings = warnings
-        state.publish({
-            "type": "run_cancelled" if cancelled else "run_completed",
-            "run_id": run_id,
-            "simulated_count": len(simulated),
-            "truncated_count": len(clamped),
-        })
+        simulated, clamped, warnings = _publish_terminal(state, run_id, transcript, cancelled)
         return {
             "status": "cancelled" if cancelled else "completed",
             "run_id": run_id,
