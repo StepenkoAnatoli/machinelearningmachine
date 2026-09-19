@@ -167,6 +167,11 @@ server-side tests cannot prove a browser does anything with the frames it is sen
 | `python scripts/bench_sessions.py` | 50 transcripts, 73.9 MB: `list_sessions` **1.3 ms** vs **213.4 ms** for read+parse-every-file (167×); the script exits non-zero if the header index ever stops paying for itself |
 | packaged wheel | built, installed into a clean venv, served, and the e2e pass run against it (the new CI step) |
 
+Where the browser cases actually run: the **frontend** job is what enforces them in
+CI. `pytest -q` runs them too, so one command is enough on a development machine, but
+that gate skips where `node_modules/jsdom` is absent - as it is in the three Python
+jobs - rather than pretending to have covered them.
+
 Defects found *by* these tests while they were being written - i.e. the tests earned
 their place, they did not merely decorate the change:
 
