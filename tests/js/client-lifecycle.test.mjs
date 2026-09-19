@@ -806,6 +806,49 @@ test("an incoming message matching active search filter dismisses empty search n
 });
 
 /*
+ * The first thirty seconds of a beginner's session, asserted.
+ *
+ * The dashboard's promise is that someone who has never seen it knows what to do
+ * without being told: the empty transcript lists the three steps, and the same
+ * three steps are one click away afterwards. Both used to be prose that only a
+ * maintainer would notice had drifted from the buttons it names.
+ */
+test("the three steps are on screen when nothing has been asked yet", async () => {
+  const { win } = await loadClient(okResponder);
+  const empty = win.document.getElementById("emptyPlaceholder");
+  assert.ok(empty, "an empty transcript has a placeholder");
+  assert.equal(empty.style.display, "", "and it is visible before anything runs");
+
+  const steps = [...empty.querySelectorAll(".howto-steps > li")];
+  assert.equal(steps.length, 3, "three steps, not a paragraph of features");
+  const text = empty.textContent.replace(/\s+/g, " ");
+  assert.match(text, /Say what you want done/, "step 1 says what to type");
+  assert.match(text, /Execute Dialogue/, "step 2 names the button to click");
+  assert.match(text, /Read the answers/, "step 3 says where the result appears");
+  assert.match(text, /No API keys/, "and it says the app works without an account");
+  assert.match(text, /simulated/, "including what the default answers are");
+});
+
+test("the How to use dialog opens, restates the steps, and closes", async () => {
+  const { win } = await loadClient(okResponder);
+  const modal = win.document.getElementById("helpModal");
+  const open = win.document.getElementById("btnHelp");
+  assert.ok(modal && open, "the help button and its dialog ship together");
+  assert.ok(modal.classList.contains("hidden"), "the dialog starts closed");
+  assert.ok(modal.querySelector(".howto-steps"), "the dialog explains the same three steps");
+
+  open.click();
+  assert.equal(modal.classList.contains("hidden"), false, "clicking How to use opens it");
+  assert.equal(modal.getAttribute("aria-hidden"), "false", "and it is exposed to screen readers");
+  assert.match(modal.textContent.replace(/\s+/g, " "), /Settings \/ Keys/,
+    "the dialog says where real model answers come from");
+
+  win.document.getElementById("btnDoneHelp").click();
+  assert.equal(modal.classList.contains("hidden"), true, "Got it closes the dialog again");
+  assert.equal(modal.getAttribute("aria-hidden"), "true");
+});
+
+/*
  * A guard on the harness itself, not on the client.
  *
  * `loadClient` registers every window it opens so that `afterEach` can cancel its

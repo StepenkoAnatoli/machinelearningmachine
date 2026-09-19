@@ -1,6 +1,14 @@
 # Default to LF line endings for text files
 * text=auto eol=lf
 
+# Windows batch files are the exception: cmd.exe parses a .bat body line by line
+# and is not reliable with LF-only files (labels and multi-line if/for blocks are
+# the usual casualties). launch-windows.bat is the *first* file a beginner on
+# Windows double-clicks, so it is checked out with CRLF everywhere - including
+# from the zip, which is built from the working tree.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
 # Force LF on frontend and vendored assets
 machinelearningmachine/server/static/vendor/** -text
 *.json text eol=lf

@@ -197,6 +197,26 @@ def _section(text, start, end):
     return text[text.index(start):text.index(end)]
 
 
+def test_user_centered_design_future_list_holds_only_unshipped_work():
+    """
+    The "not yet done" list has now gone stale twice: it still offered mid-run
+    cancellation and a stop button (both shipped in round 3, which the same
+    document's own table describes) and windowed scrolling for 1000+ message
+    transcripts (the dashboard has rendered at most RENDER_WINDOW cards for
+    longer than that).
+
+    A future list that names shipped features is the same failure as a badge
+    counting tests nobody runs: it makes the document untrustworthy in the one
+    place a reader goes to find out what is left.
+    """
+    ucd = (ROOT / "USER_CENTERED_DESIGN.md").read_text(encoding="utf-8")
+    future = ucd[ucd.index("## 🔮 Future User-Centered Improvements"):]
+    for shipped in ("not by a stop button", "refused rather than queued", "no windowed scroll"):
+        assert shipped not in future, f"{shipped!r} shipped rounds ago; it is not future work"
+    for still_open in ("Dark/light toggle", "Agent presets", "service worker"):
+        assert still_open in future, f"the list should still hold genuinely unshipped work like {still_open!r}"
+
+
 def test_the_findings_register_is_in_numeric_order():
     """
     D35: the register this document exists to be readable by.
