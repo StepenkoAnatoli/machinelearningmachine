@@ -614,11 +614,13 @@ machinelearningmachine/
 │   └── e2e_server_check.py  # End-to-end pass against a running server (HTTP + WS)
 ├── tests/
 │   ├── test_protocol.py     # message + bus bounds
+│   ├── test_deps.py         # missing-dependency hints name package + commands
 │   ├── test_agents.py       # agents, memory limits
 │   ├── test_topologies.py   # p2p / pipeline / debate / hub
 │   ├── test_server.py       # API basics
 │   ├── test_sessions.py     # saved sessions + per-client namespacing
 │   ├── test_netguard.py     # SSRF policy matrix (48 cases, all offline)
+│   ├── test_server_url_reader.py  # page-reader endpoint: gating, errors, byte cap
 │   ├── test_provider_url_policy.py   # provider base URLs meet the same policy, per bind
 │   ├── test_env_key_isolation.py     # an ambient OPENAI_API_KEY is never used or sent
 │   ├── test_provider_retry.py        # retry budget, Retry-After, backoff, attempt accounting
