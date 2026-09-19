@@ -74,6 +74,96 @@ def test_hardening_doc_breaks_down_the_jsdom_count_per_file():
     )
 
 
+#: The one `node --test` argument that runs every suite on every node we support.
+#: `tests/js/` is not a valid entry point ("Cannot find module"), and
+#: `"tests/js/*.test.mjs"` relies on node itself expanding the pattern, which needs >= 21.
+_JS_ARG = "tests/js/*.test.mjs"
+_JS_CMD = f"node --test {_JS_ARG}"
+_NODE_TEST = re.compile(r"node --test (\S+)")
+
+#: What a reader forms their habits from, plus the two places commands really run.
+_COMMAND_DOCS = (
+    "README.md", "SECURITY.md", "PRODUCTION_HARDENING.md", "USER_CENTERED_DESIGN.md",
+    "package.json", ".github/workflows/ci.yml",
+)
+
+
+def _backticked_spans(line):
+    """Character ranges inside `...` - inline code, i.e. prose *about* a command."""
+    spans, start = [], -1
+    for index, char in enumerate(line):
+        if char != "`":
+            continue
+        if start < 0:
+            start = index
+        else:
+            spans.append((start, index))
+            start = -1
+    if start >= 0:
+        spans.append((start, len(line)))
+    return spans
+
+
+def _command_lines(path):
+    """Yield `(line, is_copyable)`; copyable = offered as a command to run.
+
+    Copyable means a fenced code block or a `Run:` line. Everything else is prose,
+    and prose is allowed to quote the broken form - that is how a defect gets written
+    down. Editing such a quote away to satisfy a lint would make the document less
+    true, not more.
+    """
+    in_fence = False
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        copyable = in_fence or line.lstrip("* ").startswith("Run:")
+        yield line, copyable
+
+
+def _jsdom_instructions():
+    """Every `node --test` mention in a document or test-file header, with its context."""
+    files = [ROOT / name for name in _COMMAND_DOCS]
+    files += sorted((ROOT / "tests" / "js").glob("*.mjs"))
+    for path in files:
+        for line, copyable in _command_lines(path):
+            for match in _NODE_TEST.finditer(line):
+                quoted = any(a <= match.start() < b for a, b in _backticked_spans(line))
+                yield path, line, match.group(1).rstrip("`,).'\""), copyable, quoted
+
+
+def test_the_documented_way_to_run_the_browser_tests_works():
+    """A command offered for copying has to be a command that runs.
+
+    D17 generalised: what broke was the *form* of a command in a place nobody re-reads,
+    not the prose. So the form is checked wherever it is presented as an instruction -
+    including the header comments of the suites themselves, one of which told people to
+    run `node --test tests/js/`, a command that has never once worked. A guard that
+    matches nothing looks exactly like a passing one, so the same test also requires
+    that instructions were found, and that every document which mentions node's test
+    runner states the working form somewhere.
+    """
+    instructions = list(_jsdom_instructions())
+    offenders = [
+        f"{path.relative_to(ROOT)}: {line[:100]}"
+        for path, line, arg, is_copyable, quoted in instructions
+        if not quoted and arg != _JS_ARG
+    ]
+    assert not offenders, "a jsdom command is offered as runnable but is not: " + "; ".join(offenders)
+
+    copyable = sum(1 for _, _, _, is_copyable, quoted in instructions if is_copyable and not quoted)
+    assert copyable >= 3, (
+        f"only {copyable} copyable `node --test` instructions found across the docs - "
+        "a guard that passes because nothing was written down guards nothing"
+    )
+
+    for name in ("README.md", "SECURITY.md", "PRODUCTION_HARDENING.md", "USER_CENTERED_DESIGN.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        if "node --test" in text:
+            assert _JS_CMD in text, f"{name} mentions node's test runner but never gives the form that works"
+
+
 def test_ci_runs_every_jsdom_suite():
     """
     A browser test file CI never executes is a file that rots quietly - which is how

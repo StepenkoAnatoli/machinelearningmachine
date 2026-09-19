@@ -1,7 +1,10 @@
 /*
  * XSS regression tests for static/markdown.js, run under jsdom:
  *
- *     npm install && node --test tests/js/
+ *     npm install && node --test tests/js/*.test.mjs
+
+ * The glob is not decoration: `node --test tests/js/` fails outright
+ * ("Cannot find module"), and a quoted pattern only works on node >= 21.
  *
  * These payloads are the shapes that used to slip past the old regex
  * "sanitizer" (event handlers without quotes, SVG/MathML wrappers, malformed

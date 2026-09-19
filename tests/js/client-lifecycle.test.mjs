@@ -133,6 +133,11 @@ function installTimers(win) {
       realClearTimeout(record.realId);
     }
   };
+  // app.js arms one interval - the Chrome speech-synthesis nudge - and only when
+  // `speechSynthesis` exists, which jsdom does not implement. So no interval is
+  // ever actually scheduled here; registering them anyway means that if a future
+  // client feature starts using one, teardown still cancels it instead of leaking a
+  // repeating timer into the next test (and into the exit of the process).
   win.setInterval = (fn, ms = 0, ...args) => {
     const id = nextId++;
     pending.set(id, { fn, args, ms, kind: "interval" });

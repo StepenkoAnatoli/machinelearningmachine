@@ -160,7 +160,7 @@ server-side tests cannot prove a browser does anything with the frames it is sen
 | Result | |
 |---|---|
 | CI (GitHub) | green on `3.10 / 3.11 / 3.12`, vendor integrity, `npm audit`, `pip-audit`, secret scan, and the wheel-served end-to-end pass |
-| `pytest -q` | **366 passed** (was 220 at `9cffbd3`), 0 failures, 2 warnings (both starlette/httpx deprecations) |
+| `pytest -q` | **367 passed** (was 220 at `9cffbd3`), 0 failures, 2 warnings (both starlette/httpx deprecations) |
 | `node --test tests/js/*.test.mjs` | **24 pass** (15 sanitizer + 9 client lifecycle), on node 20 in CI and node 22 locally |
 | `ruff check machinelearningmachine tests scripts examples` | clean (examples were broken at baseline and are now in CI's scope) |
 | `scripts/e2e_server_check.py` | **33/33 PASS** against a live server |
@@ -235,9 +235,14 @@ exercise was not to add unfounded claims:
   chunked encoding, 401 mid-conversation). The retry/timeout/attempt paths are tested
   against scripted HTTP doubles, which is what a hermetic suite can honestly do.
 - **The browser tests depend on the runner's Node version** (D17). They are executed
-  by the shell-expanded file list, which works on node 18/20/22; `test_ci_runs_every_jsdom_suite`
-  pins that form so neither a single named file nor a quoted glob can come back. There is
-  no Node-version matrix - if a future suite needs node >= 21 APIs, the workflow has to say so.
+  by the shell-expanded file list, which works on node 18/20/22. Two tests pin the form
+  rather than trusting it: `test_ci_runs_every_jsdom_suite` for CI and `npm run test:js`,
+  and `test_the_documented_way_to_run_the_browser_tests_works` for every *copyable*
+  instruction in the docs and in the suites' own header comments - one of which had been
+  telling people to run `node --test tests/js/`, a command that has never worked. Prose
+  that quotes a broken form to explain it is deliberately exempt: the fix is a truer
+  document, not a blunter lint. There is no Node-version matrix - if a future suite needs
+  node >= 21 APIs, the workflow has to say so.
 - **The jsdom client tests stub `fetch` and `WebSocket`.** They prove the client reacts
   correctly to frames; the real socket is covered by the e2e script, and browser-specific
   rendering (canvas, Web Speech) is not asserted anywhere.
@@ -283,7 +288,7 @@ exercise was not to add unfounded claims:
 | D14 trim loop could not terminate | F5 | `sessions.py` bounded loop + explicit refusal | `test_session_storage.py::test_a_single_huge_message_does_not_loop_forever` |
 | D15 prune order tie | F5 | `sessions.py:_prune_sort_key`, sub-second `new_session_id` | `test_session_storage.py` (2 prune cases) |
 | D16 badge claimed but absent | F12, F1 | `static/app.js`, `static/style.css` | `tests/js/client-lifecycle.test.mjs` ("clamped reply is badged") |
-| D17 CI step assumed node ≥ 21 | N3 | `.github/workflows/ci.yml` (shell-expanded glob) | `tests/test_docs_are_accurate.py::test_ci_runs_every_jsdom_suite` |
+| D17 CI step assumed node ≥ 21 | N3 | `.github/workflows/ci.yml` (shell-expanded glob), every copyable command in the docs | `test_ci_runs_every_jsdom_suite`, `test_the_documented_way_to_run_the_browser_tests_works` |
 
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
 `--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented as
@@ -296,7 +301,7 @@ pool, or a new dependency.
 
 **Done and verified locally, at the commit this milestone produced:**
 
-- `pytest -q` → 366 passed; `node --test tests/js/*.test.mjs` → 24 passed;
+- `pytest -q` → 367 passed; `node --test tests/js/*.test.mjs` → 24 passed;
   `ruff check machinelearningmachine tests scripts examples` → clean.
 - The packaged wheel installs into a clean venv, serves, and passes the 33-check
   end-to-end script (this is now a CI step, so the claim is re-checked on every push).
