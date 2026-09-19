@@ -263,7 +263,8 @@ Treat anything marked `simulated` as an unreviewed draft.
   (`stream_gap`), which re-fetches the transcript from the server. A tab that is
   closed, or a run whose history has already left the bus buffer, keeps its hole.
 - **Provider retries are per-request, not per-run.** A provider that answers 429/5xx
-  is retried up to `max_attempts` times with jittered backoff; the transcript records
+  is retried up to `max_attempts` times, waiting the upstream's own `Retry-After`
+  when it sends one and a jittered backoff when it does not; the transcript records
   how many attempts it took (`metadata.provider_attempts`) but there is no circuit
   breaker and no budget across a run.
 - **SSRF mitigation is an in-process IP check.** It is a mitigation, not a boundary

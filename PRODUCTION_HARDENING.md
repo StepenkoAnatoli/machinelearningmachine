@@ -53,6 +53,8 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D24** | Hardening record still claims runs are refused and a queue would need persistence | F2, the F2 evidence row, two section-7 bullets and the N1/N2/N4 paragraph contradicted the rewritten decision B; the user-centered-design table promised a `409`; the README test tree said "9 tests" for a 17-test suite and "24" jsdom for 32 | Low (documentation-in-record; the code was already correct) |
 
+| **D25** | Retry is rate-limit blind: `post_for_json` never read a response header, so an upstream `Retry-After` was discarded | A 429 carrying `Retry-After: 3` was retried after the jittered `backoff × attempt` - measured 0.54 s, 0.79 s, 0.85 s and 0.96 s over four runs, never 3 s - so the retry landed *inside* the window the server had just named, was answered with a second 429, and the turn was lost with `attempts=2` | Medium (the client argues with the one party that knows when the limit resets) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -91,6 +93,11 @@ Functional
   (202 with a 1-indexed position, `429` + `Retry-After` when full, `409` only when
   `--max-queued 0`), runs in arrival order without interleaving, is cancellable
   while queued, and is attributable to its tab in the UI. (D20)
+- **F16** A retry waits for what the upstream asked when it asked: `Retry-After`
+  (delta-seconds or HTTP-date) sets the delay, the jittered exponential budget only
+  fills the gap when there is no usable header, and a header nobody can parse means
+  "no opinion" rather than "retry at once". No new dependency, and no wait that a
+  test has to spend. (D25)
 
 Non-functional
 - **N1** No new runtime dependency (retry/backoff, queueing, atomic writes are stdlib).
@@ -170,6 +177,7 @@ Every evidence cell is a test that was run and passed, not a plan. All offline.
 | F11 | validation before the cooldown stamp, `Retry-After` on 409/429 | `tests/test_run_serialization.py` - `state.last_run_time` unchanged by a 400 |
 | F12 | `server/app.py: _safe_reason` for every failure string that reaches a client | `tests/test_provider_output_bounds.py` (unit cases) |
 | F15 | `server/config.py:MAX_QUEUED_SUFFIX`, `server/state.py:run_queue` + positions, `cli.py:--max-queued`, `server/app.py` queue branch + lock-handoff pump + queued-aware cancel, `static/app.js` queued lifecycle | `test_run_queue.py` (202+position, 429+Retry-After, 0→409, FIFO order, queued cancel, per-session isolation), `test_cli_live.py` max_queued resolution, jsdom queued-position + queue-full + adoption + race cases, e2e "concurrency in the same tab queues instead of refusing" |
+| F16 | `providers.py: parse_retry_after` + `RETRY_AFTER_HEADER`, `_backoff_sleep` seam, `ProviderError.retry_after`, retry branch in `post_for_json` | `tests/test_provider_retry.py` - 11 header forms parsed (including `-5`, `3.5`, `soon`, an impossible date), an HTTP-date counted down against a fixed instant, `Retry-After: 3` producing exactly a 3 s wait, a malformed header falling back to the exponential budget, a 401's header never honoured, both providers sharing it, one case against a real loopback aiohttp server sending `retry-after` lower-cased, and a source-level pin that `post_for_json` waits through the seam only |
 | N1/N2 | stdlib-only core, `asyncio.wait_for` on every await that can block | CI matrix (3.10/3.11/3.12) + `test_import_without_optional_deps` |
 | N3 | README + SECURITY.md rewritten in the same change; `serve` knobs readable from the environment | `tests/test_docs_are_accurate.py` + `tests/test_cli_live.py` |
 | N4 | `--run-timeout` (default 180 s) → 504 with a plain-language reason, `run_error` frame first | `tests/test_run_serialization.py` |
@@ -280,8 +288,14 @@ exercise was not to add unfounded claims:
 - **The run lock is per-process.** With `--workers > 1` (never the default, and not
   supported by this design) the lock, the registry and the outboxes are per worker;
   nothing here pretends otherwise.
-- **Retry accounting is honest but not adaptive.** `max_attempts` is a total budget, not
-  a rate-limit-aware policy; no `Retry-After` from the upstream is honoured.
+- **Retry reads `Retry-After`, and the total wait is not yet bounded (D25).** An
+  upstream's `Retry-After` is honoured as received (delta-seconds or HTTP-date), and a
+  header nobody can parse falls back to the jittered exponential budget rather than to
+  zero - guessing "retry at once" from an unreadable header would turn one rate limit
+  into a longer one. What is *not* bounded is the sum: `--provider-timeout` ceilings a
+  single request, not the waits between attempts, so a server that asks for ten minutes
+  is still waited for ten minutes. `max_attempts` remains a total budget, with no
+  circuit breaker and nothing shared between agents or runs.
 - **Simulator-mode tests cannot exercise real provider quirks** (streamed partials,
   chunked encoding, 401 mid-conversation). The retry/timeout/attempt paths are tested
   against scripted HTTP doubles, which is what a hermetic suite can honestly do.
@@ -354,6 +368,8 @@ exercise was not to add unfounded claims:
 | D23 socket beats HTTP 202 | F15 | `static/app.js` terminal-run record + 202 reconcile (ended → release with its ending; already active → active mode; else queued mode) | jsdom started-before-202 and cancelled-before-202 cases (deferred 202 body) |
 
 | D24 stale no-queue prose | F13, N3 | PRODUCTION_HARDENING.md (F2, §4 F2/F9/F15 rows, §7, §8 N-para), USER_CENTERED_DESIGN.md queue row, README test tree + jsdom count | `test_docs_are_accurate.py` (hardening-agrees, UCD-agrees, listing-counts cases) |
+
+| D25 retry is rate-limit blind | F16 | `agents/providers.py: parse_retry_after` + `RETRY_AFTER_HEADER` + `_backoff_sleep` + `ProviderError.retry_after`, retry branch of `post_for_json`; `tests/conftest.py: backoffs` (autouse, records every wait) | `test_provider_retry.py` - header-parsing matrix, `Retry-After: 3` → exactly a 3 s wait, HTTP-date counted down against a fixed instant, malformed → exponential budget, a 401's header never honoured, Anthropic parity, one case against a real loopback aiohttp server sending `retry-after` lower-cased, and a source pin that `post_for_json` waits through the seam only |
 
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
 `--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented

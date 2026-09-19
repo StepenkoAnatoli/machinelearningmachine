@@ -75,7 +75,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 422 tests (390 Python + 32 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 442 tests (410 Python + 32 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -603,7 +603,7 @@ machinelearningmachine/
 │   ├── test_netguard.py     # SSRF policy matrix (48 cases, all offline)
 │   ├── test_provider_url_policy.py   # provider base URLs meet the same policy, per bind
 │   ├── test_env_key_isolation.py     # an ambient OPENAI_API_KEY is never used or sent
-│   ├── test_provider_retry.py        # retry budget, backoff, attempt accounting
+│   ├── test_provider_retry.py        # retry budget, Retry-After, backoff, attempt accounting
 │   ├── test_provider_output_bounds.py# long replies and long prompts stay loadable
 │   ├── test_run_serialization.py     # one run at a time, 409, no interleaved history
 │   ├── test_run_cancellation.py      # Stop at agent boundaries, scoped cancel, 404s
