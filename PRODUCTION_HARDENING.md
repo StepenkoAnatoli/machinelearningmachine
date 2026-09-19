@@ -65,6 +65,8 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D30** | Saved session trimming placed `trimmed` flag at document tail instead of header metadata | When an oversized session (>8 MB / 1000+ messages) was trimmed to fit `MAX_SESSION_BYTES`, `trimmed: True` was appended after the messages array and omitted from `save_session`'s return value. The 4 KiB `_head_meta` prefix read missed the flag, causing `list_sessions()` to report `trimmed=False` on the fast path | Medium (a trimmed transcript reads as complete in the session list unless fully parsed) |
 
+| **D31** | Transcript DOM grew unboundedly during streaming and expanded transcripts fully on click | In `static/app.js`, `appendMessageToFeed` appended every WebSocket message directly into `#messagesContainer` without windowing, and clicking "Show earlier messages" dumped all 1000+ messages into the DOM simultaneously, creating an infinite DOM | Medium (browser UI performance degradation and memory bloat on large conversations) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -410,6 +412,7 @@ exercise was not to add unfounded claims:
 
 | D24 stale no-queue prose | F13, N3 | PRODUCTION_HARDENING.md (F2, §4 F2/F9/F15 rows, §7, §8 N-para), USER_CENTERED_DESIGN.md queue row, README test tree + jsdom count | `test_docs_are_accurate.py` (hardening-agrees, UCD-agrees, listing-counts cases) |
 
+| D31 transcript infinite DOM | F12, F14 | `static/app.js` windowed transcript, `btn-show-earlier`, oldest node pruning | `tests/js/client-lifecycle.test.mjs` (windowed load, stream pruning, progressive expansion) |
 | D30 trimmed flag at document tail | F5 | `sessions.py:save_session` header ordering, `_meta(..., trimmed=...)` | `test_session_storage.py::test_large_trimmed_session_stores_trimmed_flag_in_header_and_fast_path_reads_it` |
 | D29 an unpinned count in the copyable block | F13, N3 | README "Running Tests" block (count + sample run) | `test_docs_are_accurate.py::test_readme_running_tests_block_states_todays_count` - every `N tests`/`N passed` in the block must equal what pytest collected |
 | D28 waits were spent in silence | F16 | `agents/providers.py: ProviderError.waited` + the WARNING before `_backoff_sleep` + `_labelled_with_attempts(err, waited=…)`, `agents/base.py: metadata.provider_waited` | `test_provider_retry.py` - two caplog cases on the wait line (delay, `attempt 2/2`, `upstream Retry-After` vs `jittered backoff`), `waited` on the retry-exhausted error and on D26's refusal, no waiting clause after a zero wait or a single attempt, a `save_session`/`get_session` round trip; `tests/js/client-lifecycle.test.mjs` - the degraded badge tooltip carries the wait |

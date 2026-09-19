@@ -831,6 +831,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (data.flags) urlReaderEnabled = data.flags.url_reader_enabled !== false;
       applyReaderAvailability();
       hideAuthPanel();
+      visibleCount = RENDER_WINDOW;
       renderAgentList();
       renderAllMessages();
       requestRedraw(true);
@@ -842,7 +843,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!searchFilter ||
           msg.content.toLowerCase().includes(searchFilter.toLowerCase()) ||
           msg.sender_name.toLowerCase().includes(searchFilter.toLowerCase())) {
-        appendMessageToFeed(msg);
+        appendMessageToFeed(msg, true, true);
       } else {
         // Still update count
         updateMessageCount();
@@ -857,7 +858,7 @@ document.addEventListener("DOMContentLoaded", () => {
       agents = data.agents || [];
       messages = (data.history || []).slice(-maxMessagesClient);
       searchFilter = "";
-      showAllMatching = false;
+      visibleCount = RENDER_WINDOW;
       if (searchInput) searchInput.value = "";
       renderAgentList();
       renderAllMessages();
@@ -869,7 +870,7 @@ document.addEventListener("DOMContentLoaded", () => {
       requestRedraw(true);
     } else if (data.type === "history_cleared") {
       messages = [];
-      showAllMatching = false;
+      visibleCount = RENDER_WINDOW;
       setModeBanner(null);
       renderAllMessages();
       showToast("Session cleared successfully", "success");
@@ -1305,7 +1306,7 @@ document.addEventListener("DOMContentLoaded", () => {
   //  * at most RENDER_WINDOW cards are in the DOM at once, which keeps a long
   //    transcript scrollable without a thousand live nodes.
   const RENDER_WINDOW = 200;
-  let showAllMatching = false;
+  let visibleCount = RENDER_WINDOW;
 
   function trimMessages() {
     const limit = maxMessagesClient || messages.length;
@@ -1323,6 +1324,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function filteredMessages() {
     return messages.filter(messageMatches);
+  }
+
+  function updateEarlierButton(hidden) {
+    let more = messagesContainer.querySelector(".btn-show-earlier");
+    if (hidden <= 0) {
+      if (more) more.remove();
+      return;
+    }
+    const step = Math.min(hidden, RENDER_WINDOW);
+    if (!more) {
+      more = document.createElement("button");
+      more.type = "button";
+      more.className = "btn-show-earlier w-full text-[11px] py-1.5 mb-2 rounded bg-slate-800/70 border border-slate-700 text-slate-400 hover:text-slate-200";
+      more.addEventListener("click", () => {
+        visibleCount += RENDER_WINDOW;
+        renderAllMessages();
+      });
+      messagesContainer.prepend(more);
+    }
+    setText(more, `Show ${step} earlier message${step === 1 ? "" : "s"} (${hidden} not in view)`);
   }
 
   // Render Transcript Messages - with search and accessibility
@@ -1351,6 +1372,7 @@ document.addEventListener("DOMContentLoaded", () => {
       setText(clear, "Clear search");
       clear.addEventListener("click", () => {
         searchFilter = "";
+        visibleCount = RENDER_WINDOW;
         if (searchInput) searchInput.value = "";
         renderAllMessages();
       });
@@ -1362,25 +1384,17 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    let windowed = filtered;
-    if (!showAllMatching && filtered.length > RENDER_WINDOW) {
-      const hidden = filtered.length - RENDER_WINDOW;
-      windowed = filtered.slice(hidden);
-      const more = document.createElement("button");
-      more.type = "button";
-      more.className = "w-full text-[11px] py-1.5 mb-2 rounded bg-slate-800/70 border border-slate-700 text-slate-400 hover:text-slate-200";
-      setText(more, `Show ${Math.min(hidden, RENDER_WINDOW)} earlier message${hidden === 1 ? "" : "s"} (${hidden} not in view)`);
-      more.addEventListener("click", () => {
-        showAllMatching = true;
-        renderAllMessages();
-      });
-      messagesContainer.appendChild(more);
-    } else if (showAllMatching && filtered.length > RENDER_WINDOW) {
-      windowed = filtered;
+    const totalMatching = filtered.length;
+    const windowSize = Math.min(visibleCount, totalMatching);
+    const hidden = totalMatching - windowSize;
+    const windowed = filtered.slice(hidden);
+
+    if (hidden > 0) {
+      updateEarlierButton(hidden);
     }
 
     updateMessageCount(windowed.length);
-    windowed.forEach((msg) => appendMessageToFeed(msg, false));
+    windowed.forEach((msg) => appendMessageToFeed(msg, false, false));
     if (!searchFilter) scrollFeedToBottom();
   }
 
@@ -1502,7 +1516,7 @@ document.addEventListener("DOMContentLoaded", () => {
     return card;
   }
 
-  function appendMessageToFeed(msg, autoScroll = true) {
+  function appendMessageToFeed(msg, autoScroll = true, enforceWindow = true) {
     if (emptyPlaceholder) emptyPlaceholder.style.display = "none";
 
     const card = buildMessageCard(msg);
@@ -1536,6 +1550,17 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     messagesContainer.appendChild(card);
+
+    if (enforceWindow) {
+      const filtered = filteredMessages();
+      const currentCards = messagesContainer.querySelectorAll(".msg-bubble");
+      const maxAllowed = Math.min(visibleCount, filtered.length);
+      if (currentCards.length > maxAllowed && currentCards.length > 0) {
+        currentCards[0].remove();
+      }
+      const hidden = filtered.length - maxAllowed;
+      updateEarlierButton(hidden);
+    }
 
     if (autoScroll) {
       scrollFeedToBottom();
@@ -1640,7 +1665,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (searchInput) {
     searchInput.addEventListener("input", (e) => {
       searchFilter = e.target.value.trim();
-      showAllMatching = false;
+      visibleCount = RENDER_WINDOW;
       renderAllMessages();
     });
   }
