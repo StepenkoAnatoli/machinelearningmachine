@@ -159,5 +159,17 @@ def test_readme_test_listing_counts_are_true():
     claimed_total = re.search(r"(\d+) jsdom browser tests", howto)
     assert claimed_total, "README should state the jsdom total where it shows the command"
     assert int(claimed_total.group(1)) == sum(counts.values())
-    for suite in ("test_run_cancellation.py", "test_run_queue.py", "test_queued_run_validation.py"):
-        assert suite in README, f"README tests/ tree omits {suite}"
+    # Which suites the tree names is pinned by test_readme_test_tree_lists_every_suite.
+
+
+def test_readme_test_tree_lists_every_suite():
+    # D26: the tree omitted test_deps, test_env_config, test_server_url_reader
+    # and this very file. A suite missing from the map rots quietly, so the map
+    # is now checked against the directory, not against a hand-kept list.
+    start = README.index("├── tests/")
+    end = README.index("├── .github/")
+    tree = README[start:end]
+    suites = sorted(path.name for path in (ROOT / "tests").glob("test_*.py"))
+    assert suites, "no Python suites found"
+    missing = [name for name in suites if name not in tree]
+    assert not missing, f"README tests/ tree omits: {', '.join(missing)}"
