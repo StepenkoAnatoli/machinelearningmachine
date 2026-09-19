@@ -64,3 +64,21 @@ def test_cancel_at_agent_boundary(topology, stop_at):
             })
             assert result.json()["status"] == "completed"
     asyncio.run(scenario())
+
+
+def test_reconnecting_socket_receives_active_run_and_stop_state():
+    from fastapi.testclient import TestClient
+
+    app = create_app()
+    with TestClient(app) as client:
+        client.get("/api/agents")
+        state = app.state.registry._states[client.cookies.get("mmm_session")]
+        for active, stopping in [("run-19", False), ("run-19", True), (None, False)]:
+            state.active_run_id = active
+            state.cancel_event = asyncio.Event() if active else None
+            if stopping:
+                state.cancel_event.set()
+            with client.websocket_connect("/ws") as socket:
+                snapshot = socket.receive_json()
+                assert snapshot["active_run_id"] == active
+                assert snapshot["cancel_requested"] is stopping

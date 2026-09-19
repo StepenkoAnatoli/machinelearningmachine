@@ -791,6 +791,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function handleWsEvent(data) {
     if (data.type === "init") {
+      activeRunId = data.active_run_id || null;
+      remoteRunActive = Boolean(activeRunId);
+      stopRequested = Boolean(data.cancel_requested);
+      syncRunActivity();
       agents = data.agents || [];
       messages = (data.history || []).slice(-maxMessagesClient);
       authenticated = data.authenticated !== false;

@@ -1155,6 +1155,8 @@ def _register_routes(
         try:
             feed.publish({
                 "type": "init",
+                "active_run_id": state.active_run_id,
+                "cancel_requested": bool(state.cancel_event and state.cancel_event.is_set()),
                 "agents": state.mesh.list_agents(),
                 "history": [m.to_dict() for m in state.mesh.get_history()],
                 "authenticated": state.authenticated or not config.require_auth,

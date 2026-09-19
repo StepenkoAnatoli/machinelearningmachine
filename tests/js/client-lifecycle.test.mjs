@@ -430,6 +430,23 @@ test("Stop targets the active run and is disabled while idle", async () => {
   assert.match(body(win, "toastContainer"), /cancelled/i);
 });
 
+test("reconnecting during a run restores Stop from the snapshot", async () => {
+  const { win, socket } = await loadClient(okResponder);
+  socket().emit({ type: "init", agents: [], history: [], active_run_id: "run-19", cancel_requested: false });
+  assert.equal(win.document.getElementById("btnStop").disabled, false);
+  assert.equal(win.document.getElementById("btnRun").disabled, true);
+  socket().emit({ type: "init", agents: [], history: [], active_run_id: "run-19", cancel_requested: true });
+  assert.equal(win.document.getElementById("btnStop").disabled, true);
+});
+
+test("reconnecting after a missed completion clears stale busy state", async () => {
+  const { win, socket } = await loadClient(okResponder);
+  socket().emit({ type: "run_started", run_id: "run-19", topology: "pipeline" });
+  socket().emit({ type: "init", agents: [], history: [], active_run_id: null, cancel_requested: false });
+  assert.equal(win.document.getElementById("btnStop").disabled, true);
+  assert.equal(win.document.getElementById("btnRun").disabled, false);
+});
+
 /*
  * A guard on the harness itself, not on the client.
  *
@@ -444,4 +461,3 @@ test("no window outlives its test", () => {
   assert.equal(windowsClosed, windowsOpened,
     "an unclosed jsdom window keeps its timers alive after the last assertion");
 });
-

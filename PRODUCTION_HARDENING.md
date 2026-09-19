@@ -41,6 +41,8 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D18** | Runs cannot be stopped by the user | The cancellation regression received HTTP 404 for an active run in every topology; the browser regression found no Stop control | Medium (unwanted provider turns continue until completion or timeout) |
 
+| **D19** | Reconnect snapshots omit run state | Server snapshot regression raised `KeyError: active_run_id`; browser regressions left Stop disabled during an active run and Execute busy after a missed completion | Medium (run controls cannot recover on reconnect) |
+
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the end-to-end one became `scripts/e2e_server_check.py`, which CI runs against the
 installed wheel). The numbers above - lengths, timings, captured
@@ -222,6 +224,9 @@ exercise was not to add unfounded claims:
 
 ## 6. Residual risks and limits of what was proven
 
+- **Run-control recovery requires connectivity (D19).** Reconnection restores the active
+  run and pending-stop state, but an offline tab cannot deliver a cancellation request.
+
 - **Cancellation is cooperative (D18).** Stop does not abort an in-flight provider request
   or its retry/backoff. It prevents the next agent call; the current reply is kept.
   A provider error or run timeout can still terminate a pending stop as an error.
@@ -295,6 +300,8 @@ exercise was not to add unfounded claims:
 
 | D18 no Stop control | F14 | `run_control.py`, `agents/base.py`, `server/state.py`, `server/app.py`, dashboard Stop | `test_run_cancellation.py`, `tests/js/client-lifecycle.test.mjs` (Stop lifecycle) |
 
+| D19 reconnect loses run controls | F14 | `server/app.py` WebSocket snapshot, `static/app.js` init handling | `test_reconnecting_socket_receives_active_run_and_stop_state`, jsdom reconnect-during-run and missed-completion regressions |
+
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
 `--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented as
 a bounded per-connection outbox and an `asyncio.wait_for` rather than a queue, a worker
@@ -349,3 +356,13 @@ Local D18 validation: `pytest -q` reported **365 passed**;
 passed, and `scripts/e2e_server_check.py` reported `ALL E2E CHECKS PASSED` against
 `serve --port 8799` on its unchanged loopback default. The server was stopped
 following the check. No real-provider or cross-browser validation was performed.
+
+### D19 final review
+
+Failing tests first reproduced missing run state in the WebSocket snapshot and
+stale controls on reconnect. The snapshot now includes the session-scoped active
+run id and pending cancellation flag; init restores Stop and Execute accordingly.
+The existing local-request guard remains active until its HTTP request settles.
+
+D19 local validation: **366 Python tests passed**, **27 jsdom tests passed**;
+full-scope Ruff and the loopback server e2e gate passed. The gate server was stopped.
