@@ -17,7 +17,7 @@ What these tests pin:
 """
 
 
-import time
+import asyncio
 
 import pytest
 
@@ -230,19 +230,31 @@ async def test_the_degraded_message_says_the_provider_was_retried(monkeypatch):
 
 
 async def test_the_wait_between_attempts_actually_happens(monkeypatch):
-    """A retry without a delay is a busy loop against a service that just said 429."""
+    """
+    A retry without a delay is a busy loop against a service that just said 429.
+
+    ``asyncio.sleep`` is patched here rather than the retry loop exposing a hook
+    for this: the only thing awaited inside ``provider.generate`` is the backoff,
+    so the delay can be measured exactly, and the test does not spend it.
+    """
     calls = []
+    waits = []
+
+    async def record(delay):
+        waits.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
     monkeypatch.setattr(
         "machinelearningmachine.agents.providers._aiohttp",
         lambda: fake_aiohttp([429, 200], calls),
     )
-    provider = _provider(retry_backoff=0.2)
-    started = time.monotonic()
+    provider = _provider(retry_backoff=0.5)
     out = await provider.generate(
         system_prompt="s", messages=[{"role": "user", "content": "hi"}],
         agent_role="r", agent_name="GPT",
     )
     assert out == "recovered answer"
-    assert len(calls) == 2
-    assert time.monotonic() - started >= 0.2, "the retry went out immediately"
+    assert len(calls) == 2, "one retry, then success"
+    assert len(waits) == 1, waits
+    assert 0.5 <= waits[0] < 1.5, "the delay scales with the attempt and stays short"
 
