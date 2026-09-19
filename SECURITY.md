@@ -268,8 +268,10 @@ Treat anything marked `simulated` as an unreviewed draft.
   may not exceed `--provider-timeout`, so a hostile or merely busy upstream cannot use
   a long `Retry-After` to hold a client for longer than the operator allowed; an ask
   that does not fit ends the turn with both numbers in the reason. The transcript
-  records how many attempts it took (`metadata.provider_attempts`), but there is no
-  circuit breaker and no budget shared across a run or between agents.
+  records how many attempts it took and what they cost in seconds
+  (`metadata.provider_attempts`, `metadata.provider_waited`), and every wait is logged
+  before it is spent; but there is no circuit breaker and no budget shared across a run
+  or between agents.
 - **SSRF mitigation is an in-process IP check.** It is a mitigation, not a boundary
   (see §4's residual-risk note). Same applies to provider base URLs.
 - **The DNS-rebinding window in §4 is documented, not closed.** Validation and

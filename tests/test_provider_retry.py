@@ -780,3 +780,196 @@ async def test_the_wait_budget_error_also_counts_its_attempts(monkeypatch, backo
     found = _ATTEMPTS_IN_TEXT.search(err.reason)
     assert found and int(found.group(1)) == 3, err.reason
     assert err.reason in str(err)
+
+
+# ------------------------------------------- D28: no wait is spent in silence
+
+
+async def test_a_wait_is_announced_in_the_log_before_it_is_spent(monkeypatch, backoffs, caplog):
+    """
+    Reproduced before the fix: the retry loop awaited its delay with no log line
+    of any kind. A turn that spent 454.1 s waiting (D26's measurement) produced
+    three ``error %s: %s`` lines about the *status* and nothing about the time,
+    so the only record of where the wall clock went was a user staring at a
+    spinner. Honesty rule: a wait is a thing the client did.
+    """
+    import logging
+
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 200], calls, headers={429: {"Retry-After": "3"}}),
+    )
+    provider = _provider(max_attempts=2, retry_backoff=0.5, timeout=120.0)
+    with caplog.at_level(logging.INFO, logger="LLMProviders"):
+        out = await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    assert out == "recovered answer"
+    assert backoffs == [3.0]
+    # Asserted on the *wait* line, not on the whole log: the scripted double's
+    # error body is "upstream said: too many requests", so a whole-log match
+    # would pass for a wait the code attributed to nobody.
+    waits = [r.getMessage() for r in caplog.records if "waiting" in r.getMessage()]
+    assert len(waits) == 1, caplog.records
+    line = waits[0]
+    assert "3.00s" in line, line                 # how long
+    assert "attempt 2/2" in line, line           # which attempt it precedes
+    assert "upstream Retry-After" in line, line  # and whose idea it was
+
+
+async def test_the_log_says_whether_the_wait_was_the_backoff_or_the_upstream(
+    monkeypatch, backoffs, caplog
+):
+    """The two waits have different meanings; the log must not blur them."""
+    import logging
+
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([503, 200], calls),
+    )
+    provider = _provider(max_attempts=2, retry_backoff=0.5, timeout=120.0)
+    with caplog.at_level(logging.INFO, logger="LLMProviders"):
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    assert len(backoffs) == 1
+    waits = [r.getMessage() for r in caplog.records if "waiting" in r.getMessage()]
+    assert len(waits) == 1, caplog.records
+    line = waits[0]
+    assert "backoff" in line.lower(), line
+    assert "upstream" not in line.lower(), f"a wait nobody asked for is not the upstream's: {line}"
+
+
+async def test_the_error_carries_the_time_spent_waiting(monkeypatch, backoffs):
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 429, 200], calls, headers={429: {"Retry-After": "2"}}),
+    )
+    provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=120.0)
+    out = await provider.generate(
+        system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+        agent_role="r", agent_name="GPT",
+    )
+    assert out == "recovered answer"
+    assert backoffs == [2.0, 2.0]
+    assert sum(backoffs) == 4.0
+
+
+async def test_a_failure_says_how_much_of_the_turn_the_waiting_ate(monkeypatch, backoffs):
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 429, 429], calls, headers={429: {"Retry-After": "2"}}),
+    )
+    provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=120.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    err = exc.value
+    assert backoffs == [2.0, 2.0]
+    assert err.waited == pytest.approx(sum(backoffs)), (err.waited, backoffs)
+    assert err.attempts == 3
+    # One sentence, three facts: how many requests, how long the waits took,
+    # and what finally went wrong. ``str(exc)`` carries the same sentence.
+    assert "after 3 attempts" in err.reason, err.reason
+    assert "4s spent waiting" in err.reason, err.reason
+    assert err.reason in str(err)
+
+
+async def test_a_turn_that_waited_zero_seconds_does_not_claim_it_waited(monkeypatch, backoffs):
+    """The record must not grow a wait that never happened."""
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([503, 503], calls),
+    )
+    provider = _provider(max_attempts=2, retry_backoff=0.0, timeout=120.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    err = exc.value
+    assert backoffs == [0.0]
+    assert err.waited == 0.0
+    assert "waiting" not in err.reason, err.reason
+    assert err.reason.endswith("(after 2 attempts)"), err.reason
+
+
+async def test_a_single_attempt_reports_no_wait(monkeypatch, backoffs):
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([401], calls, headers={401: {"Retry-After": "60"}}),
+    )
+    provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=120.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    assert backoffs == []
+    assert exc.value.waited == 0.0
+    assert exc.value.attempts == 1
+    assert "attempts" not in exc.value.reason and "waiting" not in exc.value.reason
+
+
+async def test_the_refused_wait_reports_what_was_already_spent(monkeypatch, backoffs):
+    """D26's refusal is not a zero-cost event: two waits had already been slept."""
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 429, 429, 200], calls, headers={429: {"Retry-After": "4"}}),
+    )
+    provider = _provider(max_attempts=4, retry_backoff=0.5, timeout=10.0)
+    with pytest.raises(ProviderError) as exc:
+        await provider.generate(
+            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
+            agent_role="r", agent_name="GPT",
+        )
+    err = exc.value
+    assert backoffs == [4.0, 4.0]
+    assert err.waited == pytest.approx(8.0), err.waited
+    assert "8s spent waiting" in err.reason, err.reason
+    assert "after 3 attempts" in err.reason, err.reason
+
+
+async def test_the_transcript_records_the_wait_next_to_the_attempt_count(monkeypatch, backoffs):
+    """
+    ``metadata.provider_attempts`` already made the effort part of the record;
+    the time it cost belongs beside it, in the saved session and the export.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "machinelearningmachine.agents.providers._aiohttp",
+        lambda: fake_aiohttp([429, 429, 429], calls, headers={429: {"Retry-After": "2"}}),
+    )
+    mesh = AgentMesh()
+    for agent in mesh.agents.values():
+        agent.provider = _provider(max_attempts=3, retry_backoff=0.5, timeout=120.0)
+    transcript = await mesh.talk_p2p("arena-ai", "copilot", "build a rate limiter", turns=1)
+    meta = transcript[0].metadata
+    assert meta["provider_attempts"] == 3
+    assert meta["provider_waited"] == pytest.approx(4.0), meta
+    assert "4s spent waiting" in meta["provider_error"], meta["provider_error"]
+
+    # The same claim survives the round trip through a saved session file, which
+    # is where a user reads it days later with no log to consult.
+    from machinelearningmachine import sessions
+
+    saved = sessions.save_session(
+        "rate-limit wait", mesh.list_agents(), [m.to_dict() for m in transcript]
+    )
+    loaded = sessions.get_session(saved["id"])
+    assert loaded is not None, "the session was not readable back"
+    reloaded = loaded["messages"][0]["metadata"]
+    assert reloaded["provider_waited"] == pytest.approx(4.0), reloaded
+    assert reloaded["provider_attempts"] == 3, reloaded
+    assert "4s spent waiting" in reloaded["provider_error"], reloaded

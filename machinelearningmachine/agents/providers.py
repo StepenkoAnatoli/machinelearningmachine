@@ -65,6 +65,7 @@ class ProviderError(RuntimeError):
         retryable: bool = False,
         attempts: int = 1,
         retry_after: Optional[float] = None,
+        waited: float = 0.0,
     ) -> None:
         super().__init__(f"{provider}: {reason}" + (f" [{detail}]" if detail else ""))
         self.provider = provider
@@ -82,6 +83,11 @@ class ProviderError(RuntimeError):
         #: Kept on the error so a caller can say *why* the wait was what it was
         #: instead of only that there was one.
         self.retry_after = None if retry_after is None else float(retry_after)
+        #: Seconds this client actually spent waiting between attempts. Recorded
+        #: because a wait is something the client *did*: without it a turn that
+        #: burned four seconds on rate limits is indistinguishable from a slow
+        #: model, in the log and in the saved transcript alike.
+        self.waited = max(0.0, float(waited))
 
 
 def _aiohttp():
@@ -216,6 +222,7 @@ def _wait_does_not_fit(
     *,
     remaining: float,
     budget: float,
+    waited: float,
 ) -> ProviderError:
     """
     Turn "we could wait, but not that long" into the error it deserves.
@@ -249,10 +256,11 @@ def _wait_does_not_fit(
         retryable=True,
         attempts=err.attempts,
         retry_after=err.retry_after,
+        waited=waited,
     )
 
 
-def _labelled_with_attempts(err: ProviderError) -> ProviderError:
+def _labelled_with_attempts(err: ProviderError, *, waited: float = 0.0) -> ProviderError:
     """
     Make ``attempts``, ``reason`` and ``str(exc)`` tell one story, then raise it.
 
@@ -271,8 +279,14 @@ def _labelled_with_attempts(err: ProviderError) -> ProviderError:
     A single attempt is never labelled: "(after 1 attempts)" would be noise, and a
     test pins its absence so the count cannot drift into decoration.
     """
+    err.waited = round(max(0.0, float(waited)), 3)
     if err.attempts > 1:
-        err.reason = f"{err.reason} (after {err.attempts} attempts)"
+        note = f"after {err.attempts} attempts"
+        if err.waited > 0:
+            # Named only when it happened: "(after 2 attempts, 0s spent waiting)"
+            # would be a claim about a wait that never took place.
+            note += f", {err.waited:g}s spent waiting"
+        err.reason = f"{err.reason} ({note})"
         err.args = (
             f"{err.provider}: {err.reason}" + (f" [{err.detail}]" if err.detail else ""),
         )
@@ -410,12 +424,31 @@ async def post_for_json(
                 # and truncating it would retry before the limit resets. Stop,
                 # and say which two numbers collided.
                 raise _labelled_with_attempts(
-                    _wait_does_not_fit(last_error, delay, remaining=remaining, budget=wait_budget)
+                    _wait_does_not_fit(
+                        last_error, delay, remaining=remaining, budget=wait_budget, waited=waited
+                    ),
+                    waited=waited,
                 )
             waited += delay
+            # Announced *before* it is spent and at WARNING, not DEBUG: this is
+            # the only record of where a slow turn's wall clock went, and a wait
+            # the log does not mention is a wait nobody can explain afterwards.
+            logger.warning(
+                "%s: waiting %.2fs before attempt %d/%d (%s)",
+                provider.label,
+                delay,
+                attempt + 1,
+                attempts,
+                # Two different waits with two different meanings, named so a
+                # reader cannot mistake one for the other: this delay came from
+                # the server, or it came from this client's own budget.
+                f"upstream Retry-After: {delay:g}s"
+                if last_error.retry_after is not None
+                else "jittered backoff, no usable Retry-After",
+            )
             await _backoff_sleep(delay)
             continue
-        raise _labelled_with_attempts(last_error)
+        raise _labelled_with_attempts(last_error, waited=waited)
 
 
 class MockLLMProvider(BaseLLMProvider):
