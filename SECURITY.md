@@ -56,7 +56,9 @@ a bounded LRU of `SessionState` objects, each owning:
 
 - its own `AgentMesh` (agents, message bus, history),
 - its own provider configuration and API keys,
-- its own WebSocket set (a run in one browser never streams into another),
+- its own WebSocket set, each connection with a bounded outbox of its own
+  (a run in one browser never streams into another, and one stalled tab cannot
+  hold up the run or any other tab),
 - its own rate-limit bucket and login-failure counter.
 
 Saved transcripts on disk are namespaced by a persistent client id
@@ -64,6 +66,16 @@ Saved transcripts on disk are namespaced by a persistent client id
 list, load, or delete another browser's files. Idle sessions are released after
 `--session-ttl` minutes (default 360) and at most `--max-sessions` (default 32)
 live meshes are kept; eviction drops the key material with the state.
+
+Those two limits are enforced by a sweeper that the server starts in its own
+lifespan task (`SessionRegistry.sweep_expired`), not only when a request happens to
+arrive: a tab that goes quiet for six hours is reclaimed even if nobody ever calls
+it again, and the reclaim path closes its WebSocket feeds with code `4408` and a
+`session_released` frame explaining what happened, so the client shows "Session
+released - Reload" instead of reconnecting into a brand-new empty session that
+looks like the old one. Capacity eviction prefers the ephemeral entries and closes
+their sockets the same way. Sweep interval is a quarter of the idle TTL, floored at
+5 s and capped at 60 s; it is disabled when the TTL is unset.
 
 Limits: state lives in process memory, so a restart logs everyone out and drops
 in-memory keys; a client that deletes its cookies gets a fresh (empty) session
@@ -94,17 +106,32 @@ Three consequences worth knowing:
 - Saving a key performs a **shape check only**. It does not prove the key works.
   `{"verify": true}` (the "Verify the OpenAI key now" checkbox) makes one
   `GET {base_url}/models` request to actually test it.
+- **A key in your environment is never used by the dashboard.** Provider objects built
+  for a browser session are constructed with `allow_env_key=False`, so an ambient
+  `OPENAI_API_KEY` cannot be picked up by a run started from a dashboard you only meant
+  to demo. `run --live openai` is the deliberate, terminal-only opt-in, and it prints
+  the endpoint, model and key source before the first request.
+- A session with no key sends **no** `Authorization`/`x-api-key` header at all (an
+  earlier release sent the literal string `None`, which both broke anonymous local
+  backends and was a header-shaped surprise on the wire).
 - `openai_base_url` is operator-supplied and gets sent your key. Treat it like a
   shell command: only point it at an endpoint you control, and remember that
-  local backends (`http://localhost:11434/v1`) are deliberately allowed.
+  local backends (`http://localhost:11434/v1`) are deliberately allowed *on a loopback
+  bind* - see §4, because that URL is now checked against the outbound policy too.
 - Provider calls send the conversation text to that endpoint. Do not paste
   secrets or personal data into prompts if a live provider is configured.
+- A run is serialised per session (`409` while one is in flight) and bounded by
+  `--run-timeout`, so a live provider cannot hold a session open forever or have two
+  runs rewriting the same transcript at once.
 
 ## 4. Outbound requests (SSRF)
 
-`POST /api/read/url` is the one endpoint that talks to a user-supplied address,
-so it is **off unless you pass `--enable-url-reader`**, and even then it is
-mediated by `machinelearningmachine/netguard.py`:
+Two things in this project dial out to an address a caller chose: the page reader
+(`POST /api/read/url`) and the provider base URL (`POST /api/config`'s
+`openai_base_url` / `anthropic_base_url`, used by `{"verify": true}` and by every live
+run). Both are mediated by `machinelearningmachine/netguard.py`.
+
+The page reader is **off unless you pass `--enable-url-reader`**, and even then:
 
 - schemes limited to `http`/`https`; ports limited to `80`/`443`;
 - no credentials in the URL;
@@ -118,6 +145,18 @@ mediated by `machinelearningmachine/netguard.py`:
   proxies, so neither a redirect nor `HTTP_PROXY` can route around the checks;
 - response bodies are capped at 1 MB and only text-ish `Content-Type`s are
   accepted; the fetched text is never echoed back with headers.
+
+The provider base URL is checked by the same code path
+(`netguard.validate_provider_target`) with one deliberate difference: **any port is
+allowed**, because Ollama, LM Studio and vLLM do not live on 80/443. On a loopback
+bind the caller is the operator, so local and private addresses stay reachable - that
+is the whole point of the setting. On a bind another machine can reach, private,
+loopback and link-local targets are refused (400, with the reason) unless the operator
+opts in with `--allow-insecure-provider-urls`, and an operator-set
+`MACHINELEARNINGMACHINE_URL_ALLOWLIST` is honoured there too. Before this, a
+token holder on a public bind could point the dashboard at
+`http://169.254.169.254/latest/meta-data/` and read the status codes back - and
+`{"verify": true}` made that an explicit probe with an oracle.
 
 Operators who want a hard boundary instead of a blocklist can set
 `MACHINELEARNINGMACHINE_URL_ALLOWLIST=docs.example.com,example.org` (alias
@@ -167,8 +206,12 @@ input. Rules the frontend follows (`static/markdown.js`):
   first DOMPurify version vendored here (3.1.6) had 20 open advisories.
 
 The XSS payload corpus that the regex filter used to miss is now an executable
-test: `node --test tests/js/sanitize.test.mjs` (jsdom, 15 tests, including the
-invariant that the app itself never interpolates data into HTML).
+test, and so is the client's reaction to a server that admits it lost data:
+`node --test "tests/js/*.test.mjs"` (jsdom) covers the sanitizer payloads *and* the tab's
+behaviour on `stream_gap` / `session_released` / a refused run, including the
+invariant that a server-supplied detail string is rendered as text and can never
+execute - which is why `/api/run`'s error text is passed through `_safe_reason`
+before it reaches the client at all.
 
 `'unsafe-inline'` in `style-src` is deliberate (agent chips set colours via the
 CSSOM); `script-src` has no inline allowance, which is why `index.html` contains
@@ -196,18 +239,33 @@ Treat anything marked `simulated` as an unreviewed draft.
 
 ## 7. Known limitations (accept these before deploying)
 
-1. No per-user authorisation beyond the shared token; no roles, no audit log.
-2. Rate limiting is a per-session cooldown (1s/run, 2s/page read) plus a login
-   lockout keyed per client/address. It is not a quota: a fresh cookie jar gets a
-   fresh cooldown bucket (the *login* counter does survive discarding cookies).
-3. In-memory state: one process restart loses transcripts and keys by design.
-4. Transcripts are stored **unencrypted** on disk under `~/.module_mesh/sessions`
-   — do not save secrets in prompts if that machine is shared.
-5. TLS is not handled by this app: terminate it in a proxy you control.
-6. The DNS-rebinding window in §4 is documented, not closed.
-7. `uvicorn` single-worker assumption: the session registry is per-process. Do
-   not run multiple workers behind a round-robin load balancer without sticky
-   sessions; state will appear to reset.
+- **One shared token, no roles.** Everyone who can present it can read and clear
+  everyone else's saved sessions if they also hold that browser's cookie, and can
+  change server-wide settings.
+- **No TLS.** Cookies and the token travel in clear text. Terminate TLS in front of
+  this server, or use an SSH tunnel.
+- **Single process, in-memory state.** The bounded LRU, the per-connection outboxes
+  and the rate-limit buckets live in one process: no scale-out, and a restart drops
+  every session and every key.
+- **No mid-run cancellation.** A run is bounded by `--run-timeout` (default 180 s),
+  not by a cancel button; a second run in the same session is refused with `409`
+  rather than queued. A provider that streams slowly can therefore occupy its
+  session's single run slot for the whole timeout.
+- **Frame loss is designed in, recovery is best-effort.** Each connection's outbox
+  holds 128 frames and drops the oldest under pressure, then tells the client
+  (`stream_gap`), which re-fetches the transcript from the server. A tab that is
+  closed, or a run whose history has already left the bus buffer, keeps its hole.
+- **Provider retries are per-request, not per-run.** A provider that answers 429/5xx
+  is retried up to `max_attempts` times with jittered backoff; the transcript records
+  how many attempts it took (`metadata.provider_attempts`) but there is no circuit
+  breaker and no budget across a run.
+- **SSRF mitigation is an in-process IP check.** It is a mitigation, not a boundary
+  (see §4's residual-risk note). Same applies to provider base URLs.
+- **The DNS-rebinding window in §4 is documented, not closed.** Validation and
+  connection are separate steps; closing it needs a proxy or a network namespace.
+- **Sessions are as private as the cookie.** Anything with the browser's cookie jar -
+  a local process, an XSS bug in some other extension - is inside that session.
+- **Nothing here is an audit.** No external penetration test has been performed.
 
 ## 8. Checklist for a non-local deployment
 

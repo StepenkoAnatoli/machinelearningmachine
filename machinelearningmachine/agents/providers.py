@@ -20,7 +20,8 @@ examples that help without API keys - it just says what it is.
 import asyncio
 import logging
 import os
-from typing import ClassVar, Dict, List, Optional
+import random
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from .._deps import install_hint
 
@@ -58,6 +59,7 @@ class ProviderError(RuntimeError):
         detail: str = "",
         status_code: Optional[int] = None,
         retryable: bool = False,
+        attempts: int = 1,
     ) -> None:
         super().__init__(f"{provider}: {reason}" + (f" [{detail}]" if detail else ""))
         self.provider = provider
@@ -65,6 +67,27 @@ class ProviderError(RuntimeError):
         self.detail = detail
         self.status_code = status_code
         self.retryable = retryable
+        #: How many HTTP attempts were made before this error was given up on.
+        #: ``retryable`` used to be computed and then ignored, which meant one
+        #: transient 429 or 503 cost the whole turn (and, with
+        #: ``--strict-provider-errors``, the whole run).
+        self.attempts = max(1, int(attempts))
+
+    def exhausted_retries(self) -> "ProviderError":
+        """
+        Record that the retry budget was spent, in the message as well as in
+        ``reason``.
+
+        Two separate strings describing one failure is how a user ends up with
+        "timed out" in the transcript and "timed out (after 2 attempts)" in the log,
+        so both are rewritten here, once, at the point where the number is known.
+        """
+        if self.attempts > 1 and self.retryable:
+            self.reason = f"{self.reason} (after {self.attempts} attempts)"
+            self.args = (
+                f"{self.provider}: {self.reason}" + (f" [{self.detail}]" if self.detail else ""),
+            )
+        return self
 
 
 def _aiohttp():
@@ -79,6 +102,23 @@ def _aiohttp():
     return aiohttp
 
 
+#: HTTP statuses worth another attempt: transient on the provider's side.
+RETRYABLE_STATUSES: Tuple[int, ...] = (408, 409, 425, 429, 500, 502, 503, 504)
+#: How many times a request may be sent in total (1 = no retry).
+DEFAULT_MAX_ATTEMPTS = 2
+#: Base delay for the wait between attempts (scaled by the attempt number and
+#: jittered, so parallel agents do not retry in lockstep).
+DEFAULT_RETRY_BACKOFF = 0.5
+#: Seconds an HTTP call may take before the provider is considered unreachable.
+DEFAULT_REQUEST_TIMEOUT = 60.0
+
+
+async def _backoff_sleep(delay: float) -> None:
+    """The single await between attempts. A seam for tests, and nothing more."""
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
 class BaseLLMProvider:
     #: True only for the deterministic simulator. The UI, the transcript and
     #: ``/api/run`` all surface this, so simulated text can never be mistaken
@@ -86,6 +126,10 @@ class BaseLLMProvider:
     is_simulated = False
     #: Short label used in message metadata and error notices.
     label = "provider"
+    #: Total HTTP attempts per turn (1 disables retrying). Transient failures only.
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    retry_backoff: float = DEFAULT_RETRY_BACKOFF
+    timeout: float = DEFAULT_REQUEST_TIMEOUT
 
     async def generate(
         self,
@@ -96,6 +140,103 @@ class BaseLLMProvider:
         task_context: Optional[str] = None,
     ) -> str:
         raise NotImplementedError
+
+
+async def post_for_json(
+    *,
+    provider: Any,
+    url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    host_label: str,
+) -> Dict[str, Any]:
+    """
+    POST ``payload`` as JSON and hand back the parsed body, retrying transient failures.
+
+    One place owns the policy the two live providers share, so a retry, a timeout or
+    a "this is why it failed" message cannot drift between them:
+
+    * only statuses in :data:`RETRYABLE_STATUSES` (and transport errors/timeouts) are
+      retried, at most ``provider.max_attempts`` times in total, with a short jittered
+      backoff - a flaky 429 should cost a second, not the run;
+    * the failure that ends the loop is raised as :class:`ProviderError` carrying
+      ``attempts``, so the transcript can say how hard it tried;
+    * response bodies are truncated before they reach a log line or an error, and an
+      API key is never part of either.
+    """
+    aiohttp = _aiohttp()
+    attempts = max(1, int(getattr(provider, "max_attempts", DEFAULT_MAX_ATTEMPTS) or 1))
+    backoff = float(getattr(provider, "retry_backoff", DEFAULT_RETRY_BACKOFF) or 0.0)
+    timeout = float(getattr(provider, "timeout", DEFAULT_REQUEST_TIMEOUT) or DEFAULT_REQUEST_TIMEOUT)
+    last_error: Optional[ProviderError] = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    status = resp.status
+                    if status != 200:
+                        err_txt = (await resp.text())[:400]
+                        logger.error("%s error %s: %s", provider.label, status, err_txt)
+                        raise ProviderError(
+                            provider.label,
+                            f"the API answered HTTP {status}",
+                            detail=err_txt,
+                            status_code=status,
+                            retryable=status in RETRYABLE_STATUSES,
+                            attempts=attempt,
+                        )
+                    try:
+                        data = await resp.json()
+                    except Exception as exc:
+                        raise ProviderError(
+                            provider.label, "the API answered with something that is not JSON",
+                            attempts=attempt,
+                        ) from exc
+            if not isinstance(data, dict):
+                raise ProviderError(
+                    provider.label, "the API response was not a JSON object", attempts=attempt
+                )
+            return data
+        except ProviderError as exc:
+            last_error = exc
+        except aiohttp.ClientError as exc:
+            logger.error("%s request failed: %s", provider.label, exc)
+            last_error = ProviderError(
+                provider.label,
+                f"could not reach {host_label}",
+                detail=str(exc)[:200],
+                retryable=True,
+                attempts=attempt,
+            )
+        except asyncio.TimeoutError:
+            last_error = ProviderError(
+                provider.label,
+                f"timed out after {timeout:g}s",
+                retryable=True,
+                attempts=attempt,
+            )
+        except Exception as exc:  # the turn must be labelled, never raw
+            # Anything unexpected (proxy/auth/SSL weirdness from aiohttp internals)
+            # still has to arrive as a ProviderError, or the caller would treat it as
+            # an internal failure with no provider attached.
+            logger.error("%s request raised %s", provider.label, exc.__class__.__name__)
+            last_error = ProviderError(
+                provider.label,
+                f"the request failed ({exc.__class__.__name__})",
+                detail=str(exc)[:200],
+                retryable=isinstance(exc, OSError),
+                attempts=attempt,
+            )
+        if last_error is not None and last_error.retryable and attempt < attempts:
+            # Jitter so parallel agents do not retry in lockstep. Not a
+            # security-relevant use of random(): a fixed delay would be a
+            # worse request, not an unsafe one.
+            await _backoff_sleep(backoff * attempt + random.uniform(0, backoff))  # noqa: S311
+            continue
+        if last_error is not None:
+            raise last_error.exhausted_retries()
+        raise AssertionError("post_for_json exited without a result or an error")  # pragma: no cover
 
 
 class MockLLMProvider(BaseLLMProvider):
@@ -629,13 +770,35 @@ class OpenAIProvider(BaseLLMProvider):
         base_url: Optional[str] = None,
         model: str = "gpt-4o",
         fallback_to_mock: bool = True,
+        allow_env_key: bool = True,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        retry_backoff: float = DEFAULT_RETRY_BACKOFF,
     ):
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        # ``allow_env_key`` is the boundary the dashboard needs: a browser-supplied
+        # base URL must never pick up the operator's ambient credential, or pointing
+        # the config at an attacker host turns into stealing that key.
+        self.allow_env_key = bool(allow_env_key)
+        self.api_key = (api_key or (self._env_key() if self.allow_env_key else "") or "").strip()
         self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
         self.model = model
         #: When False, provider problems raise :class:`ProviderError` instead of
         #: quietly answering with the simulator.
         self.fallback_to_mock = fallback_to_mock
+        self.timeout = float(timeout)
+        self.max_attempts = max(1, int(max_attempts))
+        self.retry_backoff = max(0.0, float(retry_backoff))
+
+    @staticmethod
+    def _env_key() -> str:
+        return os.environ.get("OPENAI_API_KEY", "")
+
+    @staticmethod
+    def _host_label(base_url: str) -> str:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(base_url)
+        return f"{parsed.netloc or base_url}"
 
     async def _simulate(self, system_prompt, messages, agent_role, agent_name, task_context, reason: str) -> str:
         """Simulator answer, explicitly labelled as *not* an OpenAI answer."""
@@ -662,10 +825,12 @@ class OpenAIProvider(BaseLLMProvider):
             )
 
         url = f"{self.base_url}/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            # Sent only when this session actually supplied a key: an empty
+            # "Bearer " header is both a broken credential and a signal that the
+            # server has one to lose.
+            headers["Authorization"] = f"Bearer {self.api_key}"
         formatted_msgs = [{"role": "system", "content": system_prompt}, *messages]
 
         payload = {
@@ -674,37 +839,11 @@ class OpenAIProvider(BaseLLMProvider):
             "temperature": 0.7,
         }
 
-        aiohttp = _aiohttp()
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
-                    status = resp.status
-                    if status != 200:
-                        err_txt = (await resp.text())[:400]
-                        # Log a truncated copy for the operator, never the key.
-                        logger.error(f"OpenAI error {status}: {err_txt}")
-                        raise ProviderError(
-                            self.label,
-                            f"the API answered HTTP {status}",
-                            detail=err_txt,
-                            status_code=status,
-                            retryable=status in (408, 409, 425, 429, 500, 502, 503, 504),
-                        )
-                    try:
-                        data = await resp.json()
-                    except Exception as exc:
-                        raise ProviderError(
-                            self.label, "the API answered with something that is not JSON"
-                        ) from exc
-        except ProviderError:
-            raise
-        except aiohttp.ClientError as exc:
-            logger.error(f"OpenAI request failed: {exc}")
-            raise ProviderError(
-                self.label, f"could not reach {self.base_url}", detail=str(exc)[:200], retryable=True
-            ) from exc
-        except asyncio.TimeoutError as exc:
-            raise ProviderError(self.label, "timed out after 60s", retryable=True) from exc
+        # A truncated answer is still an answer, but it must never *look* complete.
+        data = await post_for_json(
+            provider=self, url=url, headers=headers, payload=payload,
+            host_label=self._host_label(self.base_url),
+        )
 
         try:
             content = data["choices"][0]["message"]["content"]
@@ -722,15 +861,37 @@ class AnthropicProvider(BaseLLMProvider):
 
     label = "Anthropic"
 
+    ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
+
     def __init__(
         self,
         api_key: Optional[str] = None,
         model: str = "claude-3-5-sonnet-20241022",
         fallback_to_mock: bool = True,
+        allow_env_key: bool = True,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+        base_url: Optional[str] = None,
     ):
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self.allow_env_key = bool(allow_env_key)
+        self.api_key = (
+            api_key
+            or (os.environ.get("ANTHROPIC_API_KEY", "") if self.allow_env_key else "")
+            or ""
+        ).strip()
         self.model = model
         self.fallback_to_mock = fallback_to_mock
+        self.timeout = float(timeout)
+        self.max_attempts = max(1, int(max_attempts))
+        self.retry_backoff = max(0.0, float(retry_backoff))
+        self.base_url = (base_url or self.ANTHROPIC_BASE_URL).rstrip("/")
+
+    @property
+    def host_label(self) -> str:
+        from urllib.parse import urlparse
+
+        return urlparse(self.base_url).netloc or self.base_url
 
     async def _simulate(self, system_prompt, messages, agent_role, agent_name, task_context, reason: str) -> str:
         if not self.fallback_to_mock:
@@ -753,12 +914,10 @@ class AnthropicProvider(BaseLLMProvider):
                 reason="no API key is configured, so this is not an Anthropic answer",
             )
 
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
+        url = f"{self.base_url}/messages"
+        headers = {"anthropic-version": "2023-06-01", "content-type": "application/json"}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
 
         # Filter out system message and format for Anthropic
         anthropic_msgs = []
@@ -776,36 +935,10 @@ class AnthropicProvider(BaseLLMProvider):
             "max_tokens": 2048,
         }
 
-        aiohttp = _aiohttp()
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
-                    status = resp.status
-                    if status != 200:
-                        err_txt = (await resp.text())[:400]
-                        logger.error(f"Anthropic error {status}: {err_txt}")
-                        raise ProviderError(
-                            self.label,
-                            f"the API answered HTTP {status}",
-                            detail=err_txt,
-                            status_code=status,
-                            retryable=status in (408, 409, 425, 429, 500, 502, 503, 504),
-                        )
-                    try:
-                        data = await resp.json()
-                    except Exception as exc:
-                        raise ProviderError(
-                            self.label, "the API answered with something that is not JSON"
-                        ) from exc
-        except ProviderError:
-            raise
-        except aiohttp.ClientError as exc:
-            logger.error(f"Anthropic request failed: {exc}")
-            raise ProviderError(
-                self.label, "could not reach api.anthropic.com", detail=str(exc)[:200], retryable=True
-            ) from exc
-        except asyncio.TimeoutError as exc:
-            raise ProviderError(self.label, "timed out after 60s", retryable=True) from exc
+        data = await post_for_json(
+            provider=self, url=url, headers=headers, payload=payload,
+            host_label=self.host_label,
+        )
 
         blocks = data.get("content") or [] if isinstance(data, dict) else []
         texts = [b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"]

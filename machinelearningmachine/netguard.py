@@ -278,6 +278,126 @@ def validate_target(url: str, *, resolver: Optional[Callable[[str], Sequence[str
     return Target(url=safe_url, scheme=scheme, host=host, port=port, addresses=tuple(addresses))
 
 
+def validate_provider_target(
+    url: str,
+    *,
+    resolver: Optional[Callable[[str], Sequence[str]]] = None,
+    allow_private: bool = False,
+    extra_allowed_hosts: Sequence[str] = (),
+) -> "Target":
+    """
+    Validate the base URL of an LLM provider endpoint.
+
+    Different policy from the page reader, because it is a different job: an
+    OpenAI-compatible backend legitimately runs on a port like ``11434`` and under a
+    path like ``/v1``, and it is *usually* on this very machine. What must not be
+    negotiable is who gets to choose the address:
+
+    * ``allow_private=True`` - the caller is the operator (a loopback bind, or the
+      library API). Local and private targets are fine; that is the whole point of
+      Ollama and vLLM.
+    * ``allow_private=False`` - the address arrived from a *browser*. Then the same
+      server-side-request-forgery rules as the page reader apply: the host is
+      resolved and every answer must be publicly routable, so the dashboard cannot
+      be aimed at the cloud metadata service, at CGNAT, or at an internal port.
+
+    ``extra_allowed_hosts`` is an operator allowlist of hostnames that bypasses the
+    address rule (e.g. ``ollama.internal``); the ambient
+    ``MACHINELEARNINGMACHINE_URL_ALLOWLIST`` is honoured as well.
+
+    Raises :class:`UnsafeURL` with a reason that is safe to show to a user.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        raise UnsafeURL("Please enter a base URL first.")
+    if len(raw) > 500:
+        raise UnsafeURL("That base URL is too long (max 500 characters).")
+
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ALLOWED_SCHEMES:
+        raise UnsafeURL("A provider base URL must start with http:// or https://.")
+    if not parsed.hostname:
+        raise UnsafeURL("That base URL has no hostname - it cannot be reached.")
+    if parsed.username or parsed.password:
+        raise UnsafeURL("A provider base URL must not embed credentials.")
+
+    host = parsed.hostname.lower().strip(".")
+    try:
+        port = parsed.port
+    except ValueError as exc:  # e.g. "http://host:abc/"
+        raise UnsafeURL("That base URL has an invalid port.", detail=str(exc)) from exc
+    port = port if port is not None else (443 if scheme == "https" else 80)
+    if not (1 <= port <= 65535):  # pragma: no cover - urlparse already bounds it
+        raise UnsafeURL("That base URL has an invalid port.")
+
+    allowed_hosts = {h.strip().lower().lstrip(".") for h in extra_allowed_hosts if h and h.strip()}
+
+    def _operator_listed(name: str) -> bool:
+        """
+        Did the *operator* name this host? (Not: is the host unblocked?)
+
+        ``allowed_by_operator`` answers the second question and returns True when no
+        allowlist is configured at all, so it cannot be used here: that would turn
+        "the operator listed nothing" into "every address is a local backend".
+        """
+        if any(name == entry or name.endswith("." + entry) for entry in allowed_hosts if entry):
+            return True
+        ambient = operator_allowlist()
+        if ambient is None:
+            return False
+        return any(name == entry or name.endswith("." + entry) for entry in ambient)
+
+    try:
+        literal = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        literal = None
+
+    if literal is not None:
+        addresses = [str(literal)]
+    else:
+        resolve = resolver or default_resolver
+        try:
+            addresses = sorted(set(resolve(host)))
+        except UnsafeURL:
+            raise
+        except Exception as exc:  # a resolver hook may raise anything
+            raise UnsafeURL(
+                "Could not resolve that host - check the base URL.",
+                detail=str(exc.__class__.__name__),
+            ) from exc
+        if host in _LOCAL_HOSTNAMES:
+            # "localhost" resolves to loopback on every normal machine, so treat
+            # the name as the address it stands for rather than resolving blindly.
+            if not allow_private and not _operator_listed(host):
+                raise UnsafeURL(_PRIVATE_TARGET_REASON)
+            addresses = addresses or ["127.0.0.1"]
+
+    if not addresses:
+        raise UnsafeURL("That host does not resolve to an address.")
+
+    if not allow_private and not _operator_listed(host):
+        blocked = [a for a in addresses if is_blocked_ip(a)]
+        if blocked:
+            raise UnsafeURL(_PRIVATE_TARGET_REASON)
+
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    safe_url = urlunparse((scheme, netloc, parsed.path or "", "", parsed.query, ""))
+    return Target(
+        url=safe_url.rstrip("/"), scheme=scheme, host=host, port=port,
+        addresses=tuple(addresses),
+    )
+
+
+_PRIVATE_TARGET_REASON = (
+    "That provider address points at a private or local network. On a server that "
+    "is reachable from other machines, a browser is not allowed to choose such a "
+    "target (server-side request forgery protection). Start the server with "
+    "--allow-insecure-provider-urls if this machine's own backends should be usable "
+    "from the dashboard."
+)
+
+
 @dataclass(frozen=True)
 class Target:
     """A URL that passed validation, plus the addresses it resolved to."""

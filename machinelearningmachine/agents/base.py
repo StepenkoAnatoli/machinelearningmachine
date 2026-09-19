@@ -13,10 +13,10 @@ answers *and says so*, or the error is raised for the caller to handle.
 import asyncio
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..protocol.bus import MessageBus
-from ..protocol.message import Message, MessageType
+from ..protocol.message import Message, MessageType, clamp_content
 from .providers import FALLBACK_NOTICE_TEMPLATE, BaseLLMProvider, MockLLMProvider, ProviderError
 
 logger = logging.getLogger("BaseAgent")
@@ -25,6 +25,39 @@ logger = logging.getLogger("BaseAgent")
 COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 #: Emoji-ish avatars: a few characters, no markup, no quotes.
 MAX_AVATAR_CHARS = 8
+
+#: How much of a peer's last answer a single agent may be handed as context.
+#: Topologies compose their prompts out of previous messages, so with a real
+#: provider those grow far past what the simulator ever produced; the budget has
+#: to be enforced by *shrinking the input*, never by refusing the turn.
+MAX_INJECTED_PROMPT = 10_000
+MAX_CONTEXT_MESSAGE = 2_000
+MAX_CONTEXT_MESSAGES = 6
+
+#: Marker kept at both ends of a clamped context so the transcript says what
+#: happened instead of quietly reading like a complete message.
+_CONTEXT_CUT = "\n… [… trimmed to fit the context budget] …\n"
+
+
+def fit_context(prompt: str, limit: int = MAX_INJECTED_PROMPT) -> Tuple[str, int]:
+    """
+    Fit a composed prompt into ``limit`` characters, keeping the head and the tail.
+
+    The first lines carry the instruction and the last lines carry the thing the
+    peer was actually asked to react to, so a middle-out cut preserves far more
+    of the meaning than a plain tail truncation.
+
+    Returns ``(text, dropped_characters)``.
+    """
+    text = prompt if isinstance(prompt, str) else str(prompt)
+    if len(text) <= limit:
+        return text, 0
+    dropped = len(text) - limit
+    budget = max(0, limit - len(_CONTEXT_CUT))
+    head = budget - (budget // 3)
+    tail = budget // 3
+    return text[:head].rstrip() + _CONTEXT_CUT + text[-tail:].lstrip(), dropped
+
 
 
 def safe_color(value: Any, default: str = "#6366f1") -> str:
@@ -137,16 +170,25 @@ class BaseAgent:
           answer. Either the simulator answers *and says which provider failed*,
           or the error propagates so the run can be reported as failed.
         """
-        if prompt is not None and len(prompt) > 10000:
-            raise ValueError("Prompt too long (max 10000 chars)")
-
         self.status = "thinking"
+
+        # The incoming context is a *budget*, not a precondition. A real provider
+        # answer is routinely longer than the 10k this code used to reject, and the
+        # run is nobody's better for dying on turn 3 of a four-turn dialogue.
+        context_dropped = 0
+        if prompt is not None:
+            prompt, context_dropped = fit_context(prompt)
+
         # Build prompt context from memory - limit for performance
         recent_messages = []
-        for m in self.memory[-6:]:
+        for m in self.memory[-MAX_CONTEXT_MESSAGES:]:
             role = "assistant" if m.sender_id == self.agent_id else "user"
             # Truncate very long messages for context window
-            content = m.content[:2000] + "..." if len(m.content) > 2000 else m.content
+            content = (
+                m.content[:MAX_CONTEXT_MESSAGE] + "..."
+                if len(m.content) > MAX_CONTEXT_MESSAGE
+                else m.content
+            )
             recent_messages.append({"role": role, "content": f"[{m.sender_name}]: {content}"})
 
         if prompt:
@@ -155,6 +197,9 @@ class BaseAgent:
         provider_label = self.provider.__class__.__name__
         simulated = bool(getattr(self.provider, "is_simulated", False))
         metadata: Dict[str, Any] = {"provider": provider_label, "simulated": simulated}
+        if context_dropped:
+            # Visible in the transcript and in the export, not just in a log line.
+            metadata["context_truncated"] = context_dropped
 
         try:
             content = await self.provider.generate(
@@ -190,6 +235,8 @@ class BaseAgent:
                     "simulated": True,
                     "provider_error": e.reason,
                     "provider_status_code": e.status_code,
+                    # Honest about how hard the provider was tried before giving up.
+                    "provider_attempts": int(getattr(e, "attempts", 1) or 1),
                 }
             )
             self.status = "degraded"
@@ -215,6 +262,13 @@ class BaseAgent:
             self.status = "degraded"
             # Brief pause before returning to idle
             await asyncio.sleep(0.1)
+
+        # A provider is free to answer with more text than the protocol can carry.
+        # Clamping here (instead of letting Message reject it) is what keeps a long
+        # code answer from turning into a failed run and a lost transcript.
+        content, content_dropped = clamp_content(content if isinstance(content, str) else str(content))
+        if content_dropped:
+            metadata["content_truncated"] = content_dropped
 
         msg = Message(
             sender_id=self.agent_id,

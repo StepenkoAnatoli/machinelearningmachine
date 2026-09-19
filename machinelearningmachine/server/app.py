@@ -24,13 +24,14 @@ working; ``create_app(config)`` is what the CLI uses.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import logging
 import re
 import secrets
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -51,6 +52,7 @@ from .config import (
     SESSION_COOKIE_NAME,
     ServerConfig,
 )
+from .feed import ClientFeed
 from .state import LoginThrottle, SessionRegistry, SessionState
 
 logger = logging.getLogger("server")
@@ -67,6 +69,10 @@ MAX_AGENTS_PER_SESSION = 20
 MAX_CUSTOM_AGENTS_PER_SESSION = 16
 RUN_COOLDOWN_SECONDS = 1.0  # Prevent accidental double-clicks / spam
 URL_READ_COOLDOWN_SECONDS = 2.0
+#: Longest a WebSocket client may make the server hold a text frame before the
+#: connection is closed. The handler understands one frame ("ping"); anything
+#: bigger is either a bug or an attempt to spend the server's memory.
+MAX_WS_INBOUND_CHARS = 4096
 #: Wrong tokens an attacker may try before this client is locked out, and for how long.
 LOGIN_MAX_FAILURES = 5
 LOGIN_LOCKOUT_SECONDS = 60.0
@@ -80,6 +86,10 @@ PUBLIC_PREFIXES = ("/static/", "/api/auth/")
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+
+#: Fire-and-forget tasks that must be kept referenced until they finish (closing a
+#: socket is best-effort, but an unreferenced task can be garbage-collected first).
+_DETACHED_TASKS: "set[asyncio.Task[None]]" = set()
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +270,17 @@ def page_text_from_body(body: str, content_type: str) -> Dict[str, Any]:
 def create_app(config: Optional[ServerConfig] = None) -> FastAPI:
     """Build the dashboard app. ``config`` controls auth and the URL reader."""
     config = config or ServerConfig()
+    registry = _build_registry(config)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Own the reaper task, so it starts and stops with the server."""
+        reaper = _start_reaper(registry)
+        app.state.reaper = reaper
+        try:
+            yield
+        finally:
+            await _stop_reaper(reaper)
 
     app = FastAPI(
         title="MachineLearningMachine - Inter-Module Communication Mesh",
@@ -269,9 +290,9 @@ def create_app(config: Optional[ServerConfig] = None) -> FastAPI:
             "no third-party assets."
         ),
         version="0.1.0",
+        lifespan=lifespan,
     )
     app.state.config = config
-    registry = _build_registry(config)
     app.state.registry = registry
     # Failed sign-ins are counted per client, not per session, and the counter
     # survives a discarded cookie jar (see state.LoginThrottle).
@@ -296,6 +317,45 @@ def create_app(config: Optional[ServerConfig] = None) -> FastAPI:
     return app
 
 
+def _start_reaper(registry: SessionRegistry) -> Optional["asyncio.Task[None]"]:
+    """
+    Reap idle sessions on the interval the registry advertises.
+
+    Idle-timeout enforcement cannot be left to the requests of the sessions it is
+    meant to expire: an abandoned tab with a live WebSocket stops making requests,
+    and would keep its mesh, transcript and key material until the registry
+    happened to fill up. This task is what makes ``--session-ttl`` real.
+    """
+    interval = registry.sweep_interval_seconds()
+    if interval <= 0:
+        return None  # TTL disabled on purpose: nothing to sweep for
+
+    async def loop() -> None:
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                swept = registry.sweep_expired("idle_timeout")
+                if swept:
+                    logger.info("Reaped %d idle mesh session(s)", len(swept))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # a bad sweep must not kill the server
+                logger.warning("Session sweep failed; retrying next interval", exc_info=True)
+
+    try:
+        return asyncio.create_task(loop(), name="mesh-session-reaper")
+    except RuntimeError:  # no running loop (app built outside a server)
+        return None
+
+
+async def _stop_reaper(task: Optional["asyncio.Task[None]"]) -> None:
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+
+
 def _build_registry(config: ServerConfig) -> SessionRegistry:
     def make_mesh(cfg: ServerConfig) -> AgentMesh:
         return AgentMesh(max_history=CLIENT_HISTORY_LIMIT)
@@ -313,41 +373,42 @@ def _register_routes(
     app: FastAPI, config: ServerConfig, registry: SessionRegistry, throttle: LoginThrottle
 ) -> None:
     # -- helpers ----------------------------------------------------------
-    async def broadcast_ws(state: SessionState, payload: Dict[str, Any]) -> None:
-        """Send to this session's sockets only - never to a stranger's tab."""
-        dead = []
-        for ws in list(state.websockets):
-            try:
-                await ws.send_json(payload)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            state.websockets.discard(ws)
+    async def broadcast_ws(state: SessionState, payload: Dict[str, Any]) -> int:
+        """
+        Queue a frame on this session's sockets only - never a stranger's tab.
 
-    def attach_listener(state: SessionState) -> None:
-        async def on_bus_message(msg: Message) -> None:
-            await broadcast_ws(state, {"type": "new_message", "message": msg.to_dict()})
+        Queued, not awaited: a browser is a display, not a dependency of the run.
+        See :mod:`machinelearningmachine.server.feed` for why this was the single
+        most dangerous await in the request path.
+        """
+        return state.publish(payload)
 
-        state.mesh.on_message(on_bus_message)
-        state.provider_config.setdefault("_listener", id(on_bus_message))
-
-    registry.on_evict = lambda state: _schedule_close_all(state)
-
-    def _schedule_close_all(state: SessionState) -> None:
-        for ws in list(state.websockets):
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-            if loop is not None:
-                loop.create_task(_close_ws(ws))
-            state.websockets.discard(ws)
-
-    async def _close_ws(ws: WebSocket) -> None:
+    def _schedule_feed_close(state: SessionState) -> None:
+        """Release a disposed session's sockets, saying why when we know why."""
+        reason, state.evict_reason = state.evict_reason, None
         try:
-            await ws.close(code=1000)
-        except Exception:
-            pass
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # disposed outside an event loop (CLI, unit tests): nothing to close
+        expired = reason == "idle_timeout"
+        payload = None
+        if reason:
+            payload = {
+                "type": "session_released",
+                "reason": reason,
+                "detail": (
+                    "This browser session was idle for longer than the configured "
+                    "session lifetime, so its mesh was released. Reload the page for "
+                    "a fresh one; saved sessions are untouched."
+                    if expired
+                    else "This browser session's mesh was released by the server."
+                ),
+            }
+        task = loop.create_task(state.close_feeds(final=payload, code=4408 if expired else 1000))
+        _DETACHED_TASKS.add(task)
+        task.add_done_callback(_DETACHED_TASKS.discard)
+
+    registry.on_evict = _schedule_feed_close
 
     def token_from_request(request: Request) -> Optional[str]:
         header = request.headers.get("authorization", "")
@@ -464,8 +525,18 @@ def _register_routes(
         return state
 
     def _attach_listener(state: SessionState) -> None:
+        """
+        Mirror every bus message onto this session's sockets.
+
+        ``run_id`` lets the browser attribute a message to the run it started;
+        runs are serialised per session, so the session has at most one active.
+        """
         async def on_bus_message(msg: Message) -> None:
-            await broadcast_ws(state, {"type": "new_message", "message": msg.to_dict()})
+            state.publish({
+                "type": "new_message",
+                "message": msg.to_dict(),
+                "run_id": state.active_run_id,
+            })
 
         state.mesh.on_message(on_bus_message)
 
@@ -676,10 +747,16 @@ def _register_routes(
                             status_code=400,
                             detail="That does not look like an OpenAI-style key (expected 'sk-...' or a local backend).",
                         )
+                if req.openai_base_url:
+                    _guard_provider_url(config, req.openai_base_url)
                 provider = OpenAIProvider(
                     api_key=req.openai_api_key or state.api_keys.get("openai", ""),
                     base_url=req.openai_base_url,
                     fallback_to_mock=config.fallback_to_mock,
+                    # The single most important line in this endpoint: a key that
+                    # happens to live in the *server's* environment must never be
+                    # attached to an endpoint a browser chose.
+                    allow_env_key=False,
                 )
                 if req.openai_api_key:
                     state.api_keys["openai"] = req.openai_api_key
@@ -701,6 +778,7 @@ def _register_routes(
                 provider = AnthropicProvider(
                     api_key=req.anthropic_api_key,
                     fallback_to_mock=config.fallback_to_mock,
+                    allow_env_key=False,
                 )
                 state.api_keys["anthropic"] = req.anthropic_api_key
                 for agent in (mesh.claude, mesh.arena_ai):
@@ -772,6 +850,15 @@ def _register_routes(
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+        except OSError as exc:
+            # A full or read-only disk is the operator's problem to read about, so
+            # the reason is passed through; the directory it happened in is not.
+            reason = str(getattr(exc, "reason_detail", "") or "").strip()
+            logger.error("Failed to save session: %s", exc)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not save the session{' (' + reason + ')' if reason else ''}. Please try again.",
+            ) from exc
         except Exception as exc:
             logger.error("Failed to save session", exc_info=True)
             raise HTTPException(status_code=500, detail="Could not save the session. Please try again.") from exc
@@ -877,15 +964,22 @@ def _register_routes(
     # -- runs -------------------------------------------------------------
     @app.post("/api/run")
     async def run_dialogue(req: RunTaskRequest, request: Request, state: SessionState = Depends(current_state)):
-        """Execute a multi-agent dialogue for this session, with rate limiting."""
+        """
+        Execute one multi-agent dialogue for this session.
+
+        Three promises this endpoint did not used to make, and now does:
+
+        * **Nothing is stamped as "recent" for a request that never ran.** The
+          cooldown used to be spent by invalid prompts, so a typo cost the next
+          legitimate run a second of waiting.
+        * **One run at a time.** Agents, transcript, export and provider memory
+          are shared per session; two overlapping runs produced a history that
+          belonged to neither and showed each run's text in the other's context.
+          The second caller is refused, not queued.
+        * **No unbounded wait.** A provider that accepts a connection and never
+          answers is cut off after ``--run-timeout`` with a 504 that says so.
+        """
         mesh = state.mesh
-        now = time.time()
-        if now - state.last_run_time < RUN_COOLDOWN_SECONDS:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Please wait {RUN_COOLDOWN_SECONDS:.0f}s between runs",
-            )
-        state.last_run_time = now
 
         if req.topology == "p2p":
             if req.from_agent not in mesh.agents:
@@ -900,67 +994,145 @@ def _register_routes(
             missing = [aid for aid in req.agent_ids if aid not in mesh.agents]
             if missing:
                 raise HTTPException(status_code=400, detail=f"Agents not found: {', '.join(missing)}")
+        # No agent ids for pipeline/debate/hub is not an error: the mesh has a
+        # documented default roster, and inventing a requirement here would break
+        # every caller that relies on it (the dashboard included).
+
+        # Refuse for the most specific reason first. "another run is in progress"
+        # outranks "you clicked twice", because waiting out the one-second
+        # cooldown would not make the second request runnable.
+        #
+        # Checked and acquired with no await in between, so two requests arriving
+        # in the same loop iteration cannot both be accepted.
+        if state.run_lock.locked():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "A run is already in progress in this browser session"
+                    + (f" ({state.active_run_id})" if state.active_run_id else "")
+                    + ". Wait for it to finish - the transcript, the agents' memory "
+                    "and the export are shared, so a second run would mix into the first."
+                ),
+                headers={"Retry-After": str(int(config.run_timeout) + 1)},
+            )
+
+        # Rate limiting only *after* the request is known to be runnable, so a
+        # rejected prompt cannot spend the session's cooldown for everybody.
+        now = time.time()
+        if now - state.last_run_time < RUN_COOLDOWN_SECONDS:
+            wait = max(0.1, RUN_COOLDOWN_SECONDS - (now - state.last_run_time))
+            raise HTTPException(
+                status_code=429,
+                detail=f"Please wait {wait:.1f}s between runs",
+                headers={"Retry-After": str(int(wait) + 1)},
+            )
+        state.last_run_time = now
+        await state.run_lock.acquire()
+        run_id = state.next_run_id()
 
         await broadcast_ws(state, {
             "type": "run_started",
+            "run_id": run_id,
             "topology": req.topology,
             "prompt": req.prompt[:200],  # Don't broadcast full prompt for privacy
         })
 
-        try:
+        async def _execute() -> List[Message]:
+            """One topology call, kept separate so the timeout can wrap exactly it."""
             if req.topology == "p2p":
-                transcript = await mesh.talk_p2p(
+                return await mesh.talk_p2p(
                     from_agent_id=req.from_agent or "arena-ai",
                     to_agent_id=req.to_agent or "copilot",
                     prompt=req.prompt,
                     turns=req.turns or 4,
                 )
-            elif req.topology == "pipeline":
-                transcript = await mesh.run_pipeline(prompt=req.prompt, agent_ids=req.agent_ids)
-            elif req.topology == "debate":
-                transcript = await mesh.run_debate(prompt=req.prompt, agent_ids=req.agent_ids)
-            elif req.topology == "hub":
-                transcript = await mesh.run_hub_and_spoke(
+            if req.topology == "pipeline":
+                return await mesh.run_pipeline(prompt=req.prompt, agent_ids=req.agent_ids)
+            if req.topology == "debate":
+                return await mesh.run_debate(prompt=req.prompt, agent_ids=req.agent_ids)
+            if req.topology == "hub":
+                return await mesh.run_hub_and_spoke(
                     prompt=req.prompt,
                     hub_id=req.from_agent or "arena-ai",
                     spoke_ids=req.agent_ids,
                 )
-            else:  # pragma: no cover - validated by the model
-                raise HTTPException(status_code=400, detail=f"Unknown topology '{req.topology}'")
+            raise HTTPException(  # pragma: no cover - validated by the model
+                status_code=400, detail=f"Unknown topology '{req.topology}'"
+            )
+
+        try:
+            try:
+                transcript = await asyncio.wait_for(_execute(), timeout=config.run_timeout)
+            except asyncio.TimeoutError as exc:
+                reason = (
+                    f"the run was stopped after {config.run_timeout:.0f}s: a provider accepted "
+                    "the request and never answered. Check the endpoint in Settings, then try a "
+                    "shorter prompt or a longer --run-timeout."
+                )
+                await broadcast_ws(state, {"type": "run_error", "run_id": run_id, "error": reason})
+                raise HTTPException(status_code=504, detail=reason) from exc
         except HTTPException:
             raise
         except ProviderError as e:
             # fallback_to_mock=False: report the provider failure instead of
             # pretending the stage produced an answer.
-            await broadcast_ws(state, {"type": "run_error", "error": f"{e.provider}: {e.reason}"})
+            await broadcast_ws(state, {
+                "type": "run_error", "run_id": run_id, "error": f"{e.provider}: {e.reason}",
+            })
             raise HTTPException(status_code=502, detail=f"{e.provider} failed: {e.reason}") from e
         except ValueError as e:
-            await broadcast_ws(state, {"type": "run_error", "error": str(e)})
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            reason = _safe_reason(e)
+            await broadcast_ws(state, {"type": "run_error", "run_id": run_id, "error": reason})
+            raise HTTPException(status_code=400, detail=reason) from e
         except Exception as exc:
             logger.error("Dialogue execution failed", exc_info=True)
-            await broadcast_ws(state, {"type": "run_error", "error": "Internal error during dialogue execution"})
+            await broadcast_ws(state, {
+                "type": "run_error", "run_id": run_id, "error": "Internal error during dialogue execution",
+            })
             raise HTTPException(status_code=500, detail="Failed to execute dialogue. Please try again.") from exc
+        finally:
+            state.active_run_id = None
+            state.run_lock.release()
 
         messages = [m.to_dict() for m in transcript]
-        simulated = [m for m in messages if m.get("metadata", {}).get("simulated")]
-        degraded = [m for m in messages if m.get("metadata", {}).get("provider_error")]
-        warnings = sorted({str(m["metadata"]["provider_error"]) for m in degraded})
+        meta = [m.metadata or {} for m in transcript]
+        simulated = [md for md in meta if md.get("simulated")]
+        clamped = [md for md in meta if md.get("content_truncated")]
+        warnings = sorted({str(md["provider_error"]) for md in meta if md.get("provider_error")})
         state.last_run_warnings = warnings
-        await broadcast_ws(state, {"type": "run_completed", "simulated_count": len(simulated)})
+        await broadcast_ws(state, {
+            "type": "run_completed",
+            "run_id": run_id,
+            "simulated_count": len(simulated),
+            "truncated_count": len(clamped),
+        })
         return {
             "status": "completed",
+            "run_id": run_id,
             "messages": messages,
             # Tell the client what it is looking at; the transcript is never
             # silently "verified" output.
             "simulated": bool(simulated) and len(simulated) == len(messages),
             "partially_simulated": bool(simulated) and len(simulated) != len(messages),
             "provider_warnings": warnings,
+            # A long answer that had to be cut is a property of the result the
+            # caller is about to trust, so it is reported next to it.
+            "truncated_messages": len(clamped),
         }
 
     # -- websocket --------------------------------------------------------
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
+        """
+        Live feed for one browser tab.
+
+        The handler never writes to the socket itself: everything (``init``, the
+        pong, and every mesh event) goes through the session's
+        :class:`~machinelearningmachine.server.feed.ClientFeed`, so there is exactly
+        one writer per connection and a stalled client can neither block a run nor
+        be blocked by one. Inbound traffic is capped, because the only thing the
+        server understands from a browser here is a four-letter keepalive.
+        """
         state = _ws_state(websocket, config, registry)
         if state is None:
             # Refuse before accepting: an unauthenticated socket must not even
@@ -969,9 +1141,10 @@ def _register_routes(
             return
 
         await websocket.accept()
-        state.websockets.add(websocket)
+        feed = ClientFeed(websocket).start()
+        state.feeds.add(feed)
         try:
-            await websocket.send_json({
+            feed.publish({
                 "type": "init",
                 "agents": state.mesh.list_agents(),
                 "history": [m.to_dict() for m in state.mesh.get_history()],
@@ -982,18 +1155,26 @@ def _register_routes(
                     "max_messages_client": state.mesh.bus._max_history,
                     "max_agents": MAX_AGENTS_PER_SESSION,
                 },
-                "flags": {"url_reader_enabled": config.enable_url_reader},
+                "flags": {
+                    "url_reader_enabled": config.enable_url_reader,
+                    "run_timeout_seconds": config.run_timeout,
+                },
             })
             while True:
                 data = await websocket.receive_text()
+                if len(data) > MAX_WS_INBOUND_CHARS:
+                    # Unbounded inbound frames are a memory offer, not a protocol.
+                    await feed.aclose(code=1009)
+                    return
                 if data == "ping":
-                    await websocket.send_text("pong")
+                    feed.publish({"type": "pong"})
         except WebSocketDisconnect:
             pass
         except Exception as e:
             logger.warning("WebSocket error: %s", e)
         finally:
-            state.websockets.discard(websocket)
+            state.feeds.discard(feed)
+            feed.abort()
 
     def _ws_state(websocket: WebSocket, cfg: ServerConfig, reg: SessionRegistry) -> Optional[SessionState]:
         """Resolve (and authorise) the session for a WebSocket handshake."""
@@ -1047,7 +1228,10 @@ def _register_routes(
         return {
             "agents": len(state.mesh.agents),
             "messages": len(state.mesh.get_history()),
-            "connections": len(state.websockets),
+            "connections": len(state.feeds),
+            # Visible so a user can tell "the server is slow" from "my tab is
+            # not keeping up", and so tests can assert frames were never lost.
+            "dropped_frames": sum(feed.dropped for feed in state.feeds),
             "provider_mode": state.provider_config.get("mode", "simulated"),
             "last_run_warnings": state.last_run_warnings,
             "url_reader_enabled": config.enable_url_reader,
@@ -1066,10 +1250,62 @@ def _register_routes(
         return stamp + markdown
 
 
+def _safe_reason(exc: Exception) -> str:
+    """
+    A plain-language reason for a rejected run, with no payload in it.
+
+    ``str(exc)`` is tempting and wrong: a pydantic ``ValidationError`` interpolates
+    the offending *value*, which here is the model's answer. Echoing that into an
+    API response and into every open WebSocket of the session is how a robustness
+    limit turns into an information leak, so unrecognised value errors are named by
+    class and shortened instead.
+    """
+    text = str(exc).strip()
+    if exc.__class__.__name__ == "ValidationError" or "\n" in text or len(text) > 300:
+        return (
+            "The dialogue could not be assembled into a valid message. The run was "
+            "stopped and nothing was added to the transcript."
+        )
+    return text[:300]
+
+
 def _is_public_path(path: str) -> bool:
     if path in PUBLIC_PATHS:
         return True
     return any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES)
+
+
+def _guard_provider_url(config: ServerConfig, base_url: str) -> None:
+    """
+    Refuse a provider base URL the mesh must not dial out to.
+
+    ``/api/config`` takes an arbitrary URL and ``/api/run`` then POSTs the
+    conversation to it, so on any bind another machine can reach, a browser picking
+    ``http://169.254.169.254/`` is an outbound-request primitive with a
+    status-code oracle (``{"verify": true}`` makes that oracle explicit). The page
+    reader has had the netguard policy from the start; this is the same policy,
+    with the one difference the use case requires - any port is fine, because
+    Ollama and vLLM do not live on 80/443.
+
+    On a loopback bind the operator *is* the caller, so local backends stay
+    working, which is the entire point of the setting.
+    """
+    allow_private = config.on_loopback or config.allow_insecure_provider_urls
+    if allow_private:
+        return
+    try:
+        netguard.validate_provider_target(
+            base_url,
+            allow_private=False,
+            extra_allowed_hosts=config.url_allowlist,
+        )
+    except netguard.UnsafeURL as e:
+        raise HTTPException(status_code=400, detail=e.reason) from e
+    except Exception as exc:  # resolver blowups must not look like a 500
+        raise HTTPException(
+            status_code=400,
+            detail="That provider address could not be checked. Use a full http(s):// URL.",
+        ) from exc
 
 
 def _looks_like_key(key: str) -> bool:

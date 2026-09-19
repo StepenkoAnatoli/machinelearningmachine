@@ -16,7 +16,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 SECURITY = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
-JS_SUITE = ROOT / "tests" / "js" / "sanitize.test.mjs"
+JS_DIR = ROOT / "tests" / "js"
+
+#: One top-level `test("...")` per browser test, counted the same way in every file.
+_JS_TEST = re.compile(r'^test\("', re.M)
+
+
+def _jsdom_counts():
+    return {path.name: len(_JS_TEST.findall(path.read_text(encoding="utf-8"))) for path in sorted(JS_DIR.glob("*.test.mjs"))}
 
 
 def test_readme_python_test_count_is_true(request):
@@ -36,10 +43,31 @@ def test_readme_python_test_count_is_true(request):
 
 
 def test_readme_jsdom_test_count_is_true():
+    """The jsdom half of the claim, counted from the files CI actually runs."""
     claimed = re.search(r"\(\d+ Python \+ (\d+) jsdom", README)
     assert claimed, "README should state the jsdom test count"
-    actual = len(re.findall(r'^test\("', JS_SUITE.read_text(encoding="utf-8"), flags=re.M))
-    assert int(claimed.group(1)) == actual, f"README claims {claimed.group(1)} jsdom tests, file defines {actual}"
+    counts = _jsdom_counts()
+    assert counts, f"no jsdom suites found in {JS_DIR}"
+    actual = sum(counts.values())
+    assert int(claimed.group(1)) == actual, f"README claims {claimed.group(1)} jsdom tests, {counts} sums to {actual}"
+
+
+def test_ci_runs_every_jsdom_suite():
+    """
+    A browser test file CI never executes is a file that rots quietly - which is how
+    three of this repo's own examples ended up lint-broken while CI reported green.
+    """
+    counts = _jsdom_counts()
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    package = (ROOT / "package.json").read_text(encoding="utf-8")
+    assert 'node --test "tests/js/*.test.mjs"' in workflow, (
+        "CI should glob the jsdom directory so a new suite is picked up automatically"
+    )
+    assert "tests/js/*.test.mjs" in package, "npm run test:js must run the same set"
+    assert "node --test tests/js/sanitize.test.mjs" not in workflow, (
+        "naming one file silently excludes the others"
+    )
+    assert len(counts) >= 2, f"expected a sanitizer suite and a client suite, found {counts}"
 
 
 def test_readme_and_security_document_the_loopback_default():

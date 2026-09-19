@@ -14,11 +14,13 @@ import argparse
 import asyncio
 import sys
 import textwrap
+from typing import List
 
 from . import _deps
 from .mesh import AgentMesh
 from .server.config import AUTH_TOKEN_ENV_VAR
 from .server.config import DEFAULT_MAX_SESSIONS as DEFAULT_MAX_SESSIONS_CLI
+from .server.config import DEFAULT_RUN_TIMEOUT as DEFAULT_RUN_TIMEOUT_CLI
 from .server.config import DEFAULT_SESSION_IDLE_TTL as DEFAULT_SESSION_TTL_CLI
 
 
@@ -106,14 +108,43 @@ def main():
     serve_parser.add_argument(
         "--max-sessions",
         type=int,
-        default=DEFAULT_MAX_SESSIONS_CLI,
-        help="How many browser sessions keep a live mesh at once (default: %(default)s)",
+        default=None,
+        metavar="N",
+        help=(
+            f"How many browser sessions keep a live mesh at once (default: {DEFAULT_MAX_SESSIONS_CLI}; "
+            "or MACHINELEARNINGMACHINE_MAX_SESSIONS)"
+        ),
     )
     serve_parser.add_argument(
         "--session-ttl",
         type=int,
-        default=DEFAULT_SESSION_TTL_CLI // 60,
-        help="Minutes an idle browser session keeps its mesh (default: %(default)s)",
+        default=None,
+        metavar="MINUTES",
+        help=(
+            f"Minutes an idle browser session keeps its mesh (default: {DEFAULT_SESSION_TTL_CLI // 60}; "
+            "or MACHINELEARNINGMACHINE_SESSION_TTL). Idle sessions are swept, not just counted."
+        ),
+    )
+    serve_parser.add_argument(
+        "--run-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            f"Longest a single dialogue may run before it is reported as failed (default: "
+            f"{DEFAULT_RUN_TIMEOUT_CLI:g}; or MACHINELEARNINGMACHINE_RUN_TIMEOUT). Bounds a provider "
+            "that accepts the connection and never answers."
+        ),
+    )
+    serve_parser.add_argument(
+        "--allow-insecure-provider-urls",
+        action="store_true",
+        help=(
+            "Let the dashboard dial out to private/loopback provider base URLs even when the "
+            "server is bound to a network-reachable interface. Only for a machine whose own "
+            "Ollama/vLLM must be usable from that dashboard. Also readable from "
+            "MACHINELEARNINGMACHINE_ALLOW_INSECURE_PROVIDER_URLS=1"
+        ),
     )
     serve_parser.add_argument(
         "--strict-provider-errors",
@@ -177,6 +208,32 @@ def main():
         help="Disable inter-turn delays for faster execution (useful for testing)",
     )
     run_parser.add_argument(
+        "--live",
+        choices=["openai", "anthropic", "both"],
+        default=None,
+        help=(
+            "Answer from a real provider instead of the simulator. Keys are read from the "
+            "environment (OPENAI_API_KEY / ANTHROPIC_API_KEY) *only* when you pass this: "
+            "no flag, no outbound call, no spend. Requires the 'aiohttp' extra."
+        ),
+    )
+    run_parser.add_argument(
+        "--base-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "OpenAI-compatible endpoint for --live openai (e.g. http://localhost:11434/v1 "
+            "for Ollama/LMStudio/vLLM). Overrides OPENAI_BASE_URL."
+        ),
+    )
+    run_parser.add_argument(
+        "--provider-timeout",
+        type=float,
+        default=60.0,
+        metavar="SECONDS",
+        help="Per-request provider timeout for --live runs (default: %(default)s)",
+    )
+    run_parser.add_argument(
         "--speak",
         action="store_true",
         help="Read the dialogue aloud with your computer's built-in text-to-speech "
@@ -186,9 +243,15 @@ def main():
     args = parser.parse_args()
 
     if args.command == "serve" or len(sys.argv) == 1:
+        from .env import EnvValueError, resolve_number
+        from .env import flag as env_flag
         from .env import get as env_get
         from .server.config import (
             AUTH_TOKEN_SUFFIX,
+            INSECURE_PROVIDER_URLS_SUFFIX,
+            MAX_SESSIONS_SUFFIX,
+            RUN_TIMEOUT_SUFFIX,
+            SESSION_TTL_SUFFIX,
             ServerConfig,
             normalize_origins,
             origins_from_env,
@@ -224,13 +287,41 @@ def main():
             raise SystemExit(2)
 
         token = (auth_token or "").strip() or None
+        # Every switch below accepts the flag first, then the environment, then the
+        # default - and a value that is not a number stops startup instead of quietly
+        # running with a different limit than the operator asked for.
+        try:
+            run_timeout = resolve_number(
+                getattr(args, "run_timeout", None), RUN_TIMEOUT_SUFFIX,
+                label="--run-timeout", default=DEFAULT_RUN_TIMEOUT_CLI,
+                minimum=5.0, maximum=3600.0,
+            )
+            max_sessions = resolve_number(
+                getattr(args, "max_sessions", None), MAX_SESSIONS_SUFFIX,
+                label="--max-sessions", default=DEFAULT_MAX_SESSIONS_CLI,
+                minimum=1.0, maximum=10000.0,
+            )
+            session_ttl_minutes = resolve_number(
+                getattr(args, "session_ttl", None), SESSION_TTL_SUFFIX,
+                label="--session-ttl", default=DEFAULT_SESSION_TTL_CLI // 60,
+                minimum=1.0, maximum=43200.0,
+            )
+        except EnvValueError as exc:
+            _print_error(str(exc))
+            raise SystemExit(2) from exc
+
         server_config = ServerConfig(
             auth_token=token,
             enable_url_reader=enable_url_reader,
             allow_public=allow_public,
             fallback_to_mock=not getattr(args, "strict_provider_errors", False),
-            max_sessions=max(1, int(getattr(args, "max_sessions", DEFAULT_MAX_SESSIONS_CLI))),
-            session_idle_ttl=max(60, int(getattr(args, "session_ttl", DEFAULT_SESSION_TTL_CLI // 60)) * 60),
+            run_timeout=run_timeout,
+            allow_insecure_provider_urls=(
+                bool(getattr(args, "allow_insecure_provider_urls", False))
+                or env_flag(INSECURE_PROVIDER_URLS_SUFFIX)
+            ),
+            max_sessions=int(max_sessions),
+            session_idle_ttl=session_ttl_minutes * 60,
             allow_origins=normalize_origins(
                 list(getattr(args, "allow_origin", None) or []) + list(origins_from_env())
             ),
@@ -255,13 +346,19 @@ def main():
             f"[*] Page reader:    {'enabled (SSRF-guarded)' if enable_url_reader else 'disabled (use --enable-url-reader)'}",
             f"[*] Provider errors: {'fail the run' if not server_config.fallback_to_mock else 'labelled simulator fallback'}",
             f"[*] Sessions:       up to {server_config.max_sessions} live meshes, "
-            f"idle for {int(server_config.session_idle_ttl // 60)} min then released",
+            f"idle for {int(server_config.session_idle_ttl // 60)} min then released by the reaper",
+            f"[*] Run limit:      {server_config.run_timeout:.0f}s per dialogue; one run at a time per browser session",
         ]
         if not server_config.on_loopback:
             banner.append(
                 "[!] This port is reachable from other machines. Anyone with the token can "
                 "drive this mesh; there is no per-user authorisation beyond that shared token."
             )
+            if server_config.allow_insecure_provider_urls:
+                banner.append(
+                    "[!] --allow-insecure-provider-urls is ON: a token holder can point the "
+                    "mesh at any address this machine can reach, including internal services."
+                )
         banner.append("[*] Press Ctrl+C to stop\n")
         print("\n".join(banner))
         try:
@@ -302,6 +399,76 @@ def main():
             raise SystemExit(1) from e
 
 
+async def _apply_live_providers(mesh, args) -> None:
+    """
+    Point the mesh's agents at real providers, if - and only if - asked to.
+
+    The rule this exists to enforce: an ambient ``OPENAI_API_KEY`` in someone's
+    shell must never turn a local demo into a paid API call. Reading the
+    environment is allowed only behind an explicit ``--live``.
+    """
+    which = getattr(args, "live", None)
+    if not which:
+        return ""
+
+    import os
+
+    from .agents.providers import AnthropicProvider, OpenAIProvider
+
+    # ``or 60.0`` would be the lazy way and is wrong: 0 is a value the user typed,
+    # and silently turning it into the default is how a mistake becomes a surprise.
+    raw_timeout = getattr(args, "provider_timeout", None)
+    try:
+        timeout = 60.0 if raw_timeout is None else float(raw_timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"--provider-timeout must be a number of seconds, got {raw_timeout!r}") from exc
+    if not (1.0 <= timeout <= 900.0):
+        raise ValueError("--provider-timeout must be between 1 and 900 seconds")
+    base_url = (getattr(args, "base_url", None) or "").strip() or os.environ.get("OPENAI_BASE_URL", "")
+
+    # Read explicitly, then handed over with allow_env_key=False: the provider must
+    # not go looking in the environment behind this decision.
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    local_backend = bool(base_url) and any(
+        marker in base_url for marker in ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+    )
+
+    lines: List[str] = []
+    if which in ("openai", "both"):
+        if not openai_key and not local_backend:
+            raise ValueError(
+                "--live openai needs OPENAI_API_KEY in the environment, or --base-url pointing "
+                "at a local OpenAI-compatible backend (e.g. http://localhost:11434/v1)."
+            )
+        provider = OpenAIProvider(
+            api_key=openai_key or None, base_url=base_url, timeout=timeout, allow_env_key=False
+        )
+        for agent in (mesh.gpt, mesh.copilot):
+            if agent is not None:
+                agent.provider = provider
+        lines.append(
+            f"🌐 --live openai: @{', @'.join(a.agent_id for a in (mesh.gpt, mesh.copilot) if a)} "
+            f"will POST to {provider.base_url}/chat/completions "
+            f"(model {provider.model}, key {'from OPENAI_API_KEY' if openai_key else 'not set - local backend'})"
+        )
+    if which in ("anthropic", "both"):
+        if not anthropic_key:
+            raise ValueError("--live anthropic needs ANTHROPIC_API_KEY in the environment.")
+        provider = AnthropicProvider(api_key=anthropic_key, timeout=timeout, allow_env_key=False)
+        for agent in (mesh.claude, mesh.arena_ai):
+            if agent is not None:
+                agent.provider = provider
+        lines.append(
+            f"🌐 --live anthropic: @{', @'.join(a.agent_id for a in (mesh.claude, mesh.arena_ai) if a)} "
+            f"will POST to {provider.base_url}/messages (model {provider.model}, key from ANTHROPIC_API_KEY)"
+        )
+
+    for line in lines:
+        print(line)
+    print("   The conversation text you are about to send leaves this machine.")
+
+
 async def execute_cli_run(args):
     mesh = AgentMesh()
 
@@ -314,6 +481,10 @@ async def execute_cli_run(args):
         if missing:
             raise ValueError(f"Agents not found: {', '.join(missing)}. Available: {', '.join(mesh.agents.keys())}")
 
+    # Validated before anything is printed: a bad --live setup should fail with the
+    # reason, not after a banner that implies the run has begun.
+    await _apply_live_providers(mesh, args)
+
     print(f"\n{'='*60}")
     print(f"🤖 MachineLearningMachine - {args.topology.upper()} Topology")
     print(f"{'='*60}")
@@ -321,41 +492,33 @@ async def execute_cli_run(args):
     print(f"🔧 Agents: {', '.join(agent_ids) if agent_ids else f'{args.agent_a} <-> {args.agent_b}'}")
     print(f"{'='*60}\n")
 
+    # One place builds every run: the delay is a mesh argument like everywhere else,
+    # so --no-delay applies to all four topologies (it used to be honoured for p2p
+    # and pipeline only, silently ignored for debate and hub).
+    delay = 0.0 if args.no_delay else None
+
     transcript = []
     try:
         if args.topology == "p2p":
             print(f"💬 Initiating direct dialogue: {args.agent_a} <---> {args.agent_b} ({args.turns} turns)")
-            # Monkey-patch delay if needed
-            from .topologies.p2p import P2PTopology
-            if args.no_delay:
-                # Create topology directly with no delay
-                agent_a = mesh.get_agent(args.agent_a)
-                agent_b = mesh.get_agent(args.agent_b)
-                if not agent_a or not agent_b:
-                    raise ValueError(f"Agents not found: {args.agent_a}, {args.agent_b}")
-                topo = P2PTopology(agent_a, agent_b, mesh.bus, max_turns=args.turns, inter_turn_delay=0)
-                transcript = await topo.execute(args.prompt)
-            else:
-                transcript = await mesh.talk_p2p(args.agent_a, args.agent_b, args.prompt, turns=args.turns)
+            transcript = await mesh.talk_p2p(
+                args.agent_a, args.agent_b, args.prompt, turns=args.turns, inter_turn_delay=delay
+            )
         elif args.topology == "pipeline":
             ids = agent_ids or ["arena-ai", "claude", "copilot", "gpt"]
             print(f"🔗 Initiating pipeline: {' -> '.join(ids)}")
-            if args.no_delay:
-                from .topologies.pipeline import PipelineTopology
-                seq = [mesh.get_agent(aid) for aid in ids if mesh.get_agent(aid)]
-                topo = PipelineTopology(seq, mesh.bus, inter_step_delay=0)
-                transcript = await topo.execute(args.prompt)
-            else:
-                transcript = await mesh.run_pipeline(args.prompt, agent_ids=ids)
+            transcript = await mesh.run_pipeline(args.prompt, agent_ids=ids, inter_step_delay=delay)
         elif args.topology == "debate":
             ids = agent_ids or ["copilot", "claude", "gpt"]
             print(f"🗣️  Initiating debate among: {', '.join(ids)}")
-            transcript = await mesh.run_debate(args.prompt, agent_ids=ids)
+            transcript = await mesh.run_debate(args.prompt, agent_ids=ids, inter_turn_delay=delay)
         elif args.topology == "hub":
             hub_id = args.agent_a
             spoke_ids = agent_ids or [aid for aid in mesh.agents.keys() if aid != hub_id]
             print(f"🎯 Hub: {hub_id} coordinating spokes: {', '.join(spoke_ids)}")
-            transcript = await mesh.run_hub_and_spoke(args.prompt, hub_id=hub_id, spoke_ids=spoke_ids)
+            transcript = await mesh.run_hub_and_spoke(
+                args.prompt, hub_id=hub_id, spoke_ids=spoke_ids, inter_step_delay=delay
+            )
     except ValueError:
         raise
     except Exception as e:
@@ -368,7 +531,14 @@ async def execute_cli_run(args):
             f"\n⚠️  {simulated}/{len(transcript)} answers came from the built-in simulator: "
             "no model API was called and no code was executed or tested."
         )
-        print("   Configure OPENAI_API_KEY / ANTHROPIC_API_KEY (or the dashboard's ⚙️ Settings) for real answers.\n")
+        if getattr(args, "live", None):
+            print("   Those replies are labelled fallbacks: the configured provider failed.\n")
+        else:
+            print(
+                "   For real answers pass --live openai / --live anthropic (keys are then read "
+                "from\n"
+                "   OPENAI_API_KEY / ANTHROPIC_API_KEY), or use ⚙️ Settings in the dashboard.\n"
+            )
     print(f"\n✅ Dialogue completed - {len(transcript)} messages\n")
 
     for i, msg in enumerate(transcript, 1):

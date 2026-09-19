@@ -381,17 +381,66 @@ The second user-centered pass focused on three things users repeatedly hit: **ge
 
 ---
 
+## 🛡️ Round 3: the promises the code had stopped keeping
+
+The audit standard used in rounds 1 and 2 - "does this make the user's job easier,
+safer, more pleasant?" - was applied to the project's own claims. Fourteen findings
+came back, and every one of them was a case of documentation, a test, or a user-facing
+promise that had quietly detached from the code. The full record (reproductions,
+reasoning, rejected options) is [PRODUCTION_HARDENING.md](PRODUCTION_HARDENING.md).
+
+The ones users feel:
+
+| What a user would have experienced | What actually happened | What it is now |
+| --- | --- | --- |
+| A run fails with a 500 after a provider answers with a long code block | `Message` rejects content past 50,000 characters, so the *answer* was the thing that broke the run - and the transcript was lost | Answers are clamped with an in-text "Truncated" notice, a `clipped` badge, a toast, and a count in the run result (`truncated_messages`). A 200,000-character answer now saves and reloads fine |
+| Two tabs open, garbled transcript, agents replying to the wrong conversation | Concurrent runs shared one mesh and one history; both runs interleaved and both poisoned provider memory | One run per browser session. A second request is refused with a `409` that names the run in flight |
+| "My session expires" in the docs, sessions that never expired | The idle TTL was only checked when a request arrived, so a quiet tab held a mesh (and its keys) until the process restarted or the LRU evicted it | A background sweeper expires sessions, closes their sockets with a `session_released` frame, and the client says "Session released - Reload" instead of silently landing in a new empty session |
+| A phone tab on a bad network stalls everyone's run | The bus awaited each socket write: one unread TCP buffer blocked the producer, the run, and every other tab | Each connection gets a bounded outbox (128 frames, drop-oldest). A stalled tab loses frames, never the run; and when it does, it is told (`stream_gap`) and re-pulls the transcript |
+| My dashboard run used the API key from my shell | `OpenAIProvider()` falls back to `OPENAI_API_KEY`, and `/api/config` built providers without a key - so an ambient key rode along on a session that never supplied one (and, with no key anywhere, the literal string `None` was sent as `Authorization`) | Dashboard providers are constructed with `allow_env_key=False`; a keyless session sends no auth header at all. The only opt-out of the simulator in the terminal is `run --live`, which prints endpoint, model and key source first |
+| Typing a base URL of `http://169.254.169.254/` in Settings | `/api/read/url` had an SSRF policy; the provider base URL had none, and `{"verify": true}` was a status-code oracle | `netguard.validate_provider_target` guards it, with local backends still allowed on a loopback bind and an explicit `--allow-insecure-provider-urls` opt-in |
+| My saved transcript disappeared, or a session list took 154 ms | Saves truncated the file before writing (a crash left an unreadable file, silently skipped by the listing) and listing re-parsed every transcript on disk | Atomic writes through a temp file, a metadata header with the message count, stale-temp pruning, and a "trimmed" flag when a transcript had to be shortened to fit |
+| `--no-delay` did nothing for debate and hub | The CLI built those two topologies by hand and the mesh methods had no delay parameter | The delay is an argument on all four; measured 0.45 s → 0.00 s |
+| A typo cost me a second of waiting | The run cooldown was stamped before validation, so a rejected 400 request still spent the session's rate-limit budget | Validation first, cooldown only for runs that actually start (and `Retry-After` on both refusals) |
+
+**The user-facing principle that came out of this**: an error the user can act on is a
+feature. Every refusal in this codebase now names the thing it is refusing (the run id,
+the seconds to wait, the limit that was hit, the flag that would change it), and no
+failure is reported as a bare 500.
+
+### Validation (round 3)
+
+```
+$ pytest -q
+365 passed in 21.9s
+$ node --test "tests/js/*.test.mjs"
+# pass 23
+$ python scripts/e2e_server_check.py --base http://127.0.0.1:8799
+ALL E2E CHECKS PASSED (33 checks, real uvicorn + real WebSocket, two browser sessions)
+$ python scripts/bench_sessions.py               # 50 transcripts, 73.9 MB on disk
+  list_sessions (header index) :    1.3 ms   -> 50 rows
+  read + parse every file     :  213.4 ms
+  ratio                           : 167.5x
+```
+
+---
+
 ## 🔮 Future User-Centered Improvements (Not Yet Done)
 
-1. **Session isolation**: Add optional session ID header for multi-user
-2. **Export with proper headers**: Currently returns JSON wrapped, should support `?download=true` with Content-Disposition (partially done)
-3. **Pagination**: For 1000+ messages, virtual scrolling
-4. **Dark/light toggle**: Currently dark only, some users prefer light
-5. **Copy prompt button**: Quick duplicate last prompt
-6. **Agent presets**: "Security Auditor", "DB Expert" templates
-7. **Offline support**: Service worker for PWA
+1. **Mid-run cancellation**: a run is bounded by `--run-timeout`, not by a stop button;
+   and a second run is refused rather than queued. Queueing is the natural next step.
+2. **Pagination / virtual scrolling**: for 1000+ messages the transcript array is capped
+   and the feed says so, but there is no windowed scroll.
+3. **Dark/light toggle**: currently dark only, some users prefer light.
+4. **Copy prompt button**: quick duplicate of the last prompt.
+5. **Agent presets**: "Security Auditor", "DB Expert" templates.
+6. **Offline support**: service worker for PWA.
+7. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
 
 These are noted but not implemented to keep scope focused on highest user value fixes.
+(An earlier version of this list proposed *session isolation* and *export
+`Content-Disposition`* as future work; both shipped since, so they have been removed
+rather than left as stale claims.)
 
 ---
 
