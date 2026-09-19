@@ -59,7 +59,8 @@ We audited the system from a real user's perspective: a developer who wants to q
 allow_origins=["*"], allow_credentials=True
 
 # Then: a wildcard with credentials is a cross-site read of a local service.
-# Now: origins are operator-configured (--allow-origin / MMM_ALLOW_ORIGINS),
+# Now: origins are operator-configured (--allow-origin, or the
+# MACHINELEARNINGMACHINE_ALLOW_ORIGINS env var for containers),
 # the default allows none beyond same-origin, and mutating requests with a
 # non-JSON body are refused so a cross-origin form cannot write state.
 allow_origins=normalize_origins(config.allow_origins), allow_credentials=False

@@ -176,6 +176,22 @@ python -m machinelearningmachine
 
 Open `http://localhost:8000` in your browser to access the real-time visual dashboard.
 
+#### Environment variables
+
+Every setting accepts the canonical `MACHINELEARNINGMACHINE_*` name or the short
+`MODULE_MESH_*` alias (the long name wins if both are set). Booleans are `1`,
+`true`, `yes` or `on` - anything else, including a typo, leaves the default in
+place, so a misspelled value never silently enables a feature.
+
+| Variable | Effect |
+| --- | --- |
+| `MACHINELEARNINGMACHINE_AUTH_TOKEN` | The token clients must present (required for any non-loopback bind) |
+| `MACHINELEARNINGMACHINE_ENABLE_URL_READER` | Turns on `/api/read/url`; off unless this or `--enable-url-reader` |
+| `MACHINELEARNINGMACHINE_ALLOW_ORIGINS` | Comma-separated CORS origins to add (avoid unless needed) |
+| `MACHINELEARNINGMACHINE_SESSIONS_DIR` | Where saved transcripts live (default `~/.module_mesh/sessions`) |
+| `MACHINELEARNINGMACHINE_URL_ALLOWLIST` | Hosts the page reader may fetch - *replaces* the private-address blocklist |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Used by `run` mode; the dashboard never reads these |
+
 <details>
 <summary><strong>Running it on a network (read SECURITY.md first)</strong></summary>
 
@@ -192,7 +208,10 @@ python -m machinelearningmachine serve \
 - Every `/api/*` call and the `/ws` handshake then needs that token; the dashboard
   shows a sign-in field and stores it in an HttpOnly, SameSite=Lax cookie.
 - One token = one trust domain. It is *not* per-user access control, and there is
-  still no TLS, no roles, and no real rate limiting. Prefer an SSH tunnel:
+  still no TLS, no roles, and no real rate limiting. Signing in is refused on a
+  loopback server (there is no token to check there), and a script that authenticates
+  by header but keeps no cookies gets an *ephemeral* session: short idle lifetime,
+  evicted before a real browser's. Prefer an SSH tunnel:
   `ssh -L 8000:localhost:8000 host` and keep binding loopback.
 - `--enable-url-reader` stays off unless you truly want the "read a web page aloud"
   fetcher; `--strict-provider-errors` makes live-provider failures fail the run

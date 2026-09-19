@@ -17,13 +17,16 @@ is just as important.
 | --- | --- |
 | `module-mesh serve` (default) | Binds `127.0.0.1:8000`. No authentication. Reachable only from the machine it runs on. |
 | `--host 0.0.0.0` / a LAN address without `--allow-public` | **Refused at startup** with an explanation (`machinelearningmachine/server/config.py:validate_bind_policy`). |
-| `--allow-public` without `--auth-token` (or `MACHINELEARNINGMACHINE_AUTH_TOKEN`) | **Refused at startup.** |
+| `--allow-public` without `--auth-token` (or the `MACHINELEARNINGMACHINE_AUTH_TOKEN` / `MODULE_MESH_AUTH_TOKEN` env var) | **Refused at startup.** |
 | `--allow-public --auth-token <token>` | Starts; every `/api/*` route and the `/ws` handshake requires the token; `<16` character tokens are rejected. |
 
 The token is compared with `hmac.compare_digest`, is never written to logs, is
 never echoed by any endpoint, and is only ever sent by the browser as an
 HttpOnly, `SameSite=Lax` cookie after the dashboard's sign-in form posts it.
-Five wrong attempts lock that client out for 60 seconds. The counter is keyed by the
+Five wrong attempts lock that client out for 60 seconds. On a loopback server,
+where no token is configured, `POST /api/auth/login` answers 400 ("this server does
+not require an access token") rather than accepting any string and implying a
+protection that is not switched on. The counter is keyed by the
 client cookie it *presented* (or its peer address when it presents none) rather than
 by the session, so throwing cookies away does not reset it.
 
@@ -66,11 +69,16 @@ Limits: state lives in process memory, so a restart logs everyone out and drops
 in-memory keys; a client that deletes its cookies gets a fresh (empty) session
 rather than an escape hatch into someone else's.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
 - On a token-protected server, **unauthenticated requests allocate no session at
   all** (a drive-by visitor cannot fill the bounded registry and evict other
   people's state); the session is created when the token is proven.
+- A caller that proves the token by header but keeps **no cookies** is marked
+  *ephemeral*: it gets `EPHEMERAL_SESSION_TTL` (120 s) of idle life instead of the
+  full TTL and is the first thing evicted when the registry is full, so a script
+  cannot crowd real browsers out. It is promoted to a normal session as soon as
+  the client starts sending the session cookie back.
 - Because state is attached to the session cookie, an API client that sends
   `Authorization: Bearer` but keeps no cookies gets a **fresh, empty mesh per
   request**. Bearer-only clients that want a conversation must persist the
@@ -112,8 +120,9 @@ mediated by `machinelearningmachine/netguard.py`:
   accepted; the fetched text is never echoed back with headers.
 
 Operators who want a hard boundary instead of a blocklist can set
-`MODULE_MESH_URL_ALLOWLIST=docs.example.com,example.org`, which replaces "block
-the bad addresses" with "allow only these hosts".
+`MACHINELEARNINGMACHINE_URL_ALLOWLIST=docs.example.com,example.org` (alias
+`MODULE_MESH_URL_ALLOWLIST`), which replaces "block the bad addresses" with
+"allow only these hosts".
 
 **Residual risk, in plain terms:** validation and connection are two steps, so
 an attacker-controlled DNS server with a sub-second TTL can still rebind
