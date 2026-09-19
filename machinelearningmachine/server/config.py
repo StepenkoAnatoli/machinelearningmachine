@@ -96,10 +96,6 @@ class ServerConfig:
     #: Upper bound on one /api/run, so a provider that accepts the connection and
     #: never answers cannot hold a session (and its run lock) forever.
     run_timeout: float = DEFAULT_RUN_TIMEOUT
-    #: How often the reaper looks for idle sessions. ``None`` = derive it from
-    #: ``session_idle_ttl`` (see :meth:`SessionRegistry.sweep_interval_seconds`);
-    #: tests and embedding apps set it explicitly.
-    session_sweep_interval: Optional[float] = None
     #: Opt out of the SSRF rule applied to a *browser-supplied* provider base URL.
     #: Only ever useful on a machine whose own backends (Ollama, vLLM) should be
     #: reachable from a dashboard that other machines can also open.

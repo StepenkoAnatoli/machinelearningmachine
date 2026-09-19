@@ -98,11 +98,6 @@ class SessionState:
     def idle_seconds(self, now: Optional[float] = None) -> float:
         return (now if now is not None else time.time()) - self.last_access
 
-    @property
-    def busy(self) -> bool:
-        """True while a run owns this session's mesh."""
-        return self.run_lock.locked()
-
     def next_run_id(self) -> str:
         self.run_seq += 1
         self.active_run_id = f"run-{self.run_seq}"
@@ -296,9 +291,6 @@ class SessionRegistry:
         to reclaim, and it would never be looked at again. So the app runs a
         reaper on this interval.
         """
-        override = getattr(self.config, "session_sweep_interval", None)
-        if override is not None:
-            return float(override)
         if self.idle_ttl <= 0:
             return 0.0
         # At least four checks per TTL (so a session is not kept alive for twice

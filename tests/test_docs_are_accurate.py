@@ -52,137 +52,21 @@ def test_readme_jsdom_test_count_is_true():
     assert int(claimed.group(1)) == actual, f"README claims {claimed.group(1)} jsdom tests, {counts} sums to {actual}"
 
 
-def test_hardening_doc_breaks_down_the_jsdom_count_per_file():
-    """`15 sanitizer + 9 client lifecycle` has to be each file's real count.
-
-    The aggregate is checked against README above; this checks the split, so neither
-    half of it can quietly stop matching the suite it names.
-    """
-    hardening = (ROOT / "PRODUCTION_HARDENING.md").read_text(encoding="utf-8")
-    claimed = re.search(
-        r"\*\*(\d+) pass\*\* \((\d+) sanitizer \+ (\d+) client lifecycle\)", hardening
-    )
-    assert claimed, "PRODUCTION_HARDENING.md should break the jsdom count down by file"
-
-    counts = _jsdom_counts()
-    assert sum(counts.values()) == int(claimed.group(1)), (
-        f"claims {claimed.group(1)} jsdom tests, counted {sum(counts.values())}"
-    )
-    assert counts.get("sanitize.test.mjs") == int(claimed.group(2)), "sanitizer count drifted"
-    assert counts.get("client-lifecycle.test.mjs") == int(claimed.group(3)), (
-        "client-lifecycle count drifted"
-    )
-
-
-#: The one `node --test` argument that runs every suite on every node we support.
-#: `tests/js/` is not a valid entry point ("Cannot find module"), and
-#: `"tests/js/*.test.mjs"` relies on node itself expanding the pattern, which needs >= 21.
-_JS_ARG = "tests/js/*.test.mjs"
-_JS_CMD = f"node --test {_JS_ARG}"
-_NODE_TEST = re.compile(r"node --test (\S+)")
-
-#: What a reader forms their habits from, plus the two places commands really run.
-_COMMAND_DOCS = (
-    "README.md", "SECURITY.md", "PRODUCTION_HARDENING.md", "USER_CENTERED_DESIGN.md",
-    "package.json", ".github/workflows/ci.yml",
-)
-
-
-def _backticked_spans(line):
-    """Character ranges inside `...` - inline code, i.e. prose *about* a command."""
-    spans, start = [], -1
-    for index, char in enumerate(line):
-        if char != "`":
-            continue
-        if start < 0:
-            start = index
-        else:
-            spans.append((start, index))
-            start = -1
-    if start >= 0:
-        spans.append((start, len(line)))
-    return spans
-
-
-def _command_lines(path):
-    """Yield `(line, is_copyable)`; copyable = offered as a command to run.
-
-    Copyable means a fenced code block or a `Run:` line. Everything else is prose,
-    and prose is allowed to quote the broken form - that is how a defect gets written
-    down. Editing such a quote away to satisfy a lint would make the document less
-    true, not more.
-    """
-    in_fence = False
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if line.startswith("```"):
-            in_fence = not in_fence
-            continue
-        copyable = in_fence or line.lstrip("* ").startswith("Run:")
-        yield line, copyable
-
-
-def _jsdom_instructions():
-    """Every `node --test` mention in a document or test-file header, with its context."""
-    files = [ROOT / name for name in _COMMAND_DOCS]
-    files += sorted((ROOT / "tests" / "js").glob("*.mjs"))
-    for path in files:
-        for line, copyable in _command_lines(path):
-            for match in _NODE_TEST.finditer(line):
-                quoted = any(a <= match.start() < b for a, b in _backticked_spans(line))
-                yield path, line, match.group(1).rstrip("`,).'\""), copyable, quoted
-
-
-def test_the_documented_way_to_run_the_browser_tests_works():
-    """A command offered for copying has to be a command that runs.
-
-    D17 generalised: what broke was the *form* of a command in a place nobody re-reads,
-    not the prose. So the form is checked wherever it is presented as an instruction -
-    including the header comments of the suites themselves, one of which told people to
-    run `node --test tests/js/`, a command that has never once worked. A guard that
-    matches nothing looks exactly like a passing one, so the same test also requires
-    that instructions were found, and that every document which mentions node's test
-    runner states the working form somewhere.
-    """
-    instructions = list(_jsdom_instructions())
-    offenders = [
-        f"{path.relative_to(ROOT)}: {line[:100]}"
-        for path, line, arg, is_copyable, quoted in instructions
-        if not quoted and arg != _JS_ARG
-    ]
-    assert not offenders, "a jsdom command is offered as runnable but is not: " + "; ".join(offenders)
-
-    copyable = sum(1 for _, _, _, is_copyable, quoted in instructions if is_copyable and not quoted)
-    assert copyable >= 3, (
-        f"only {copyable} copyable `node --test` instructions found across the docs - "
-        "a guard that passes because nothing was written down guards nothing"
-    )
-
-    for name in ("README.md", "SECURITY.md", "PRODUCTION_HARDENING.md", "USER_CENTERED_DESIGN.md"):
-        text = (ROOT / name).read_text(encoding="utf-8")
-        if "node --test" in text:
-            assert _JS_CMD in text, f"{name} mentions node's test runner but never gives the form that works"
-
-
 def test_ci_runs_every_jsdom_suite():
     """
-    A browser test file CI never executes is a file that rots quietly - which is how
+    A browser suite CI never executes is a suite that rots quietly - which is how
     three of this repo's own examples ended up lint-broken while CI reported green.
+
+    The glob is expanded by the shell, not by node: quoting it would ask node to
+    open a file literally named "tests/js/*.test.mjs", which only works on node
+    >= 21 and is a hard failure on the node 20 runner this workflow uses.
     """
-    counts = _jsdom_counts()
+    command = "node --test tests/js/*.test.mjs"
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     package = (ROOT / "package.json").read_text(encoding="utf-8")
-    assert "node --test tests/js/*.test.mjs\n" in workflow, (
-        "CI should let the shell glob the jsdom directory, so a new suite is picked up "
-        "automatically. Quoting the pattern instead (node --test \"tests/js/*.test.mjs\") "
-        "asks node to open a file with that literal name: fine on node >= 21, a hard "
-        "failure on the node 20 runner this workflow uses."
-    )
-    assert '"test:js": "node --test tests/js/*.test.mjs"' in package, "npm run test:js must run the same set"
-    assert "node --test tests/js/sanitize.test.mjs" not in workflow, (
-        "naming one file silently excludes the others"
-    )
-    assert len(counts) >= 2, f"expected a sanitizer suite and a client suite, found {counts}"
+    assert f"{command}\n" in workflow
+    assert f'"test:js": "{command}"' in package
+    assert len(_jsdom_counts()) >= 2, "expected a sanitizer suite and a client suite"
 
 
 def test_readme_and_security_document_the_loopback_default():

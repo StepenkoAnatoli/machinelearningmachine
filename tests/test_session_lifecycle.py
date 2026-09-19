@@ -14,6 +14,7 @@ sockets it closes, and the reason it tells the browser.
 
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from machinelearningmachine.server.app import create_app
@@ -36,26 +37,21 @@ class RecordingSocket:
 
 # ------------------------------------------------------------------ the interval
 
-def test_sweep_interval_is_derived_from_the_ttl():
-    # A six-hour TTL does not need a check every five seconds...
-    assert SessionRegistry(max_sessions=4, idle_ttl=6 * 3600, config=ServerConfig()).sweep_interval_seconds() == 60.0
-    # ...but a one-minute one must not wait a whole minute.
-    assert SessionRegistry(max_sessions=4, idle_ttl=60, config=ServerConfig()).sweep_interval_seconds() == 15.0
+@pytest.mark.parametrize("ttl, expected", [
+    (6 * 3600, 60.0),   # a six-hour TTL does not need a check every five seconds
+    (60, 15.0),         # ...but a one-minute one must not wait a whole minute
+    (1.0, 5.0),         # never a hot loop
+    (0, 0.0),           # TTL disabled on purpose: no reaper at all
+])
+def test_sweep_interval_is_derived_from_the_ttl(ttl, expected):
+    registry = SessionRegistry(max_sessions=4, idle_ttl=ttl, config=ServerConfig(session_idle_ttl=ttl))
+    assert registry.sweep_interval_seconds() == expected
 
 
-def test_sweep_interval_never_becomes_a_hot_loop():
-    registry = SessionRegistry(max_sessions=4, idle_ttl=1.0, config=ServerConfig(session_idle_ttl=1.0))
-    assert registry.sweep_interval_seconds() == 5.0
-
-
-def test_disabled_ttl_means_no_reaper():
-    registry = SessionRegistry(max_sessions=4, idle_ttl=0, config=ServerConfig(session_idle_ttl=0))
-    assert registry.sweep_interval_seconds() == 0.0
-
-
-def test_sweep_interval_can_be_overridden_for_tests():
-    config = ServerConfig(session_idle_ttl=3600, session_sweep_interval=0.05)
-    assert SessionRegistry(max_sessions=4, idle_ttl=config.session_idle_ttl, config=config).sweep_interval_seconds() == 0.05
+@pytest.fixture
+def fast_sweep(monkeypatch):
+    """The interval is derived from the TTL, whose floor is far slower than a test."""
+    monkeypatch.setattr(SessionRegistry, "sweep_interval_seconds", lambda self: 0.05)
 
 
 # ------------------------------------------------------------------- the sweep
@@ -119,12 +115,12 @@ async def test_feeds_are_closed_when_a_session_is_disposed():
     assert await state.close_feeds() == 0
 
 
-def test_the_reaper_task_reclaims_a_quiet_browser_with_a_live_socket():
+def test_the_reaper_task_reclaims_a_quiet_browser_with_a_live_socket(fast_sweep):
     """
     End-to-end through the real app: a tab that connects and then says nothing is
     released by the background reaper, and its socket is told why.
     """
-    config = ServerConfig(host="127.0.0.1", session_idle_ttl=0.2, session_sweep_interval=0.05)
+    config = ServerConfig(host="127.0.0.1", session_idle_ttl=0.2)
     app = create_app(config)
     with TestClient(app) as client:
         # The session cookie comes from an HTTP response (a WebSocket handshake
@@ -155,8 +151,8 @@ def test_the_reaper_task_reclaims_a_quiet_browser_with_a_live_socket():
         assert client.get("/api/history").json() == []
 
 
-def test_the_reaper_is_stopped_with_the_app():
-    app = create_app(ServerConfig(host="127.0.0.1", session_sweep_interval=0.05))
+def test_the_reaper_is_stopped_with_the_app(fast_sweep):
+    app = create_app(ServerConfig(host="127.0.0.1"))
     with TestClient(app):
         task = app.state.reaper
         assert task is not None and not task.done()

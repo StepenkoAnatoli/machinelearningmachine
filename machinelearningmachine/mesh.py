@@ -29,13 +29,8 @@ logger = logging.getLogger("AgentMesh")
 
 
 def _delay_kwargs(name: str, value: Optional[float]) -> Dict[str, float]:
-    """
-    ``{name: value}`` when the caller named a delay, otherwise nothing at all.
-
-    Passing nothing leaves the default on the topology, which is the only place
-    that knows what "the demo pace" is. Re-declaring it here is how a default
-    drifts into two different values.
-    """
+    """``{name: value}`` when the caller named a delay, else nothing: the default
+    stays on the topology, which is the only place that knows the demo pace."""
     return {} if value is None else {name: float(value)}
 
 

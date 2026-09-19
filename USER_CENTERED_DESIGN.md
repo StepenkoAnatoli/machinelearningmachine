@@ -413,17 +413,13 @@ failure is reported as a bare 500.
 
 ```
 $ pytest -q
-367 passed in 22.6s
+357 passed in 21.3s
 $ node --test tests/js/*.test.mjs
 # tests 24
 # pass 24
 # fail 0
 $ python scripts/e2e_server_check.py --base http://127.0.0.1:8799
 ALL E2E CHECKS PASSED (33 checks, real uvicorn + real WebSocket, two browser sessions)
-$ python scripts/bench_sessions.py               # 50 transcripts, 73.9 MB on disk
-  list_sessions (header index) :    1.3 ms   -> 50 rows
-  read + parse every file     :  213.4 ms
-  ratio                           : 167.5x
 ```
 
 ---

@@ -129,7 +129,7 @@ def test_run_lock_is_released_after_a_failure(paced_app):
     for agent in state.mesh.agents.values():
         agent.provider = Broken()
     assert client.post("/api/run", json={"topology": "p2p", "prompt": "design a cache"}).status_code == 500
-    assert state.busy is False, "a failed run must not leave the session locked"
+    assert state.run_lock.locked() is False, "a failed run must not leave the session locked"
 
     _use_paced_provider(state, delay=0.0)
     state.last_run_time = 0.0

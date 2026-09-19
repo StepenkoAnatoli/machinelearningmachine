@@ -280,7 +280,10 @@ def create_app(config: Optional[ServerConfig] = None) -> FastAPI:
         try:
             yield
         finally:
-            await _stop_reaper(reaper)
+            if reaper is not None:
+                reaper.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await reaper
 
     app = FastAPI(
         title="MachineLearningMachine - Inter-Module Communication Mesh",
@@ -348,14 +351,6 @@ def _start_reaper(registry: SessionRegistry) -> Optional["asyncio.Task[None]"]:
         return None
 
 
-async def _stop_reaper(task: Optional["asyncio.Task[None]"]) -> None:
-    if task is None:
-        return
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError, Exception):
-        await task
-
-
 def _build_registry(config: ServerConfig) -> SessionRegistry:
     def make_mesh(cfg: ServerConfig) -> AgentMesh:
         return AgentMesh(max_history=CLIENT_HISTORY_LIMIT)
@@ -373,16 +368,6 @@ def _register_routes(
     app: FastAPI, config: ServerConfig, registry: SessionRegistry, throttle: LoginThrottle
 ) -> None:
     # -- helpers ----------------------------------------------------------
-    async def broadcast_ws(state: SessionState, payload: Dict[str, Any]) -> int:
-        """
-        Queue a frame on this session's sockets only - never a stranger's tab.
-
-        Queued, not awaited: a browser is a display, not a dependency of the run.
-        See :mod:`machinelearningmachine.server.feed` for why this was the single
-        most dangerous await in the request path.
-        """
-        return state.publish(payload)
-
     def _schedule_feed_close(state: SessionState) -> None:
         """Release a disposed session's sockets, saying why when we know why."""
         reason, state.evict_reason = state.evict_reason, None
@@ -660,7 +645,7 @@ def _register_routes(
                 bus=mesh.bus,
             )
             mesh.register_agent(agent)
-            await broadcast_ws(state, {"type": "agents_updated", "agents": mesh.list_agents()})
+            state.publish({"type": "agents_updated", "agents": mesh.list_agents()})
             logger.info("Custom agent registered: %s", req.agent_id)
             return {"status": "success", "agent": agent.to_dict()}
         except ValueError as e:
@@ -683,7 +668,7 @@ def _register_routes(
         """Clear *this session's* message history and module memory."""
         state.mesh.clear_history()
         state.last_run_warnings = []
-        await broadcast_ws(state, {"type": "history_cleared"})
+        state.publish({"type": "history_cleared"})
         return {"status": "cleared"}
 
     @app.get("/api/export/markdown")
@@ -734,7 +719,7 @@ def _register_routes(
                     agent.provider = _simulator_for(config)
             state.api_keys = {}
             state.provider_config = {"mode": "simulated", "configured": []}
-            await broadcast_ws(state, {"type": "agents_updated", "agents": mesh.list_agents()})
+            state.publish({"type": "agents_updated", "agents": mesh.list_agents()})
             return {"status": "success", "message": "Back to the built-in simulator for this session."}
 
         configured: List[str] = []
@@ -801,7 +786,7 @@ def _register_routes(
                 # Honest about what we did and did not check.
                 "note": "Keys are shape-checked only, kept in memory, and never sent back to the browser.",
             }
-            await broadcast_ws(state, {"type": "agents_updated", "agents": mesh.list_agents()})
+            state.publish({"type": "agents_updated", "agents": mesh.list_agents()})
             message = (
                 f"Configured: {', '.join(configured)} for this session only. "
                 "Keys stay in memory and are never saved or logged."
@@ -904,7 +889,7 @@ def _register_routes(
             logger.error("Failed to load session %s", req.session_id, exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to load the session. Please try again.") from exc
 
-        await broadcast_ws(state, {
+        state.publish({
             "type": "session_loaded",
             "name": data.get("name"),
             "agents": mesh.list_agents(),
@@ -1030,7 +1015,7 @@ def _register_routes(
         await state.run_lock.acquire()
         run_id = state.next_run_id()
 
-        await broadcast_ws(state, {
+        state.publish({
             "type": "run_started",
             "run_id": run_id,
             "topology": req.topology,
@@ -1069,24 +1054,24 @@ def _register_routes(
                     "the request and never answered. Check the endpoint in Settings, then try a "
                     "shorter prompt or a longer --run-timeout."
                 )
-                await broadcast_ws(state, {"type": "run_error", "run_id": run_id, "error": reason})
+                state.publish({"type": "run_error", "run_id": run_id, "error": reason})
                 raise HTTPException(status_code=504, detail=reason) from exc
         except HTTPException:
             raise
         except ProviderError as e:
             # fallback_to_mock=False: report the provider failure instead of
             # pretending the stage produced an answer.
-            await broadcast_ws(state, {
+            state.publish({
                 "type": "run_error", "run_id": run_id, "error": f"{e.provider}: {e.reason}",
             })
             raise HTTPException(status_code=502, detail=f"{e.provider} failed: {e.reason}") from e
         except ValueError as e:
             reason = _safe_reason(e)
-            await broadcast_ws(state, {"type": "run_error", "run_id": run_id, "error": reason})
+            state.publish({"type": "run_error", "run_id": run_id, "error": reason})
             raise HTTPException(status_code=400, detail=reason) from e
         except Exception as exc:
             logger.error("Dialogue execution failed", exc_info=True)
-            await broadcast_ws(state, {
+            state.publish({
                 "type": "run_error", "run_id": run_id, "error": "Internal error during dialogue execution",
             })
             raise HTTPException(status_code=500, detail="Failed to execute dialogue. Please try again.") from exc
@@ -1100,7 +1085,7 @@ def _register_routes(
         clamped = [md for md in meta if md.get("content_truncated")]
         warnings = sorted({str(md["provider_error"]) for md in meta if md.get("provider_error")})
         state.last_run_warnings = warnings
-        await broadcast_ws(state, {
+        state.publish({
             "type": "run_completed",
             "run_id": run_id,
             "simulated_count": len(simulated),
