@@ -527,5 +527,5 @@ Measured on this machine:
 - Large trimmed session (>8 MB / 1000 messages) retains `trimmed: True` in header and returns in 1.3 ms without reading the body.
 - Transcript client DOM stays strictly bounded to `RENDER_WINDOW` (200 cards) on load, stream, and progressive expansion without infinite DOM.
 
-D30-D32 local validation: **434 Python tests passed**, **36 jsdom tests passed**, `ruff check machinelearningmachine tests scripts examples` clean over the full scope, `scripts/bench_sessions.py` passed, and `scripts/e2e_server_check.py` reported `ALL E2E CHECKS PASSED` against `serve --port 8799` on its unchanged loopback default. The gate server was stopped afterwards and the port was verified closed.
+D30-D32 local validation: **434 Python tests passed**, **37 jsdom tests passed**, `ruff check machinelearningmachine tests scripts examples` clean over the full scope, `scripts/bench_sessions.py` passed, and `scripts/e2e_server_check.py` reported `ALL E2E CHECKS PASSED` against `serve --port 8799` on its unchanged loopback default. The gate server was stopped afterwards and the port was verified closed.
 

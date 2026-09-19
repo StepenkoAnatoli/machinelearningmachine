@@ -755,6 +755,56 @@ test("clicking show earlier messages expands window progressively without dumpin
   assert.match(body(win, "msgCountBadge"), /Showing last 400 of 1000 messages/);
 });
 
+test("an incoming message matching active search filter dismisses empty search notice and renders", async () => {
+  const { win, socket } = await loadClient(() => okResponder());
+
+  socket().emit({
+    type: "new_message",
+    message: {
+      id: "m-first",
+      sender_id: "copilot",
+      sender_name: "GitHub Copilot",
+      recipient_id: "*",
+      topic: "general",
+      message_type: "proposal",
+      content: "Unrelated topic content",
+      artifacts: {},
+      metadata: { simulated: true },
+      timestamp: 1700000000,
+    },
+  });
+  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  const searchInput = win.document.getElementById("searchMessages");
+  searchInput.value = "needle";
+  searchInput.dispatchEvent(new win.Event("input"));
+  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  assert.match(body(win, "messagesContainer"), /No messages match "needle"/);
+
+  socket().emit({
+    type: "new_message",
+    message: {
+      id: "m-match",
+      sender_id: "copilot",
+      sender_name: "GitHub Copilot",
+      recipient_id: "*",
+      topic: "general",
+      message_type: "proposal",
+      content: "Found the needle in the haystack",
+      artifacts: {},
+      metadata: { simulated: true },
+      timestamp: 1700000001,
+    },
+  });
+  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  assert.ok(!body(win, "messagesContainer").includes("No messages match"),
+    "empty search message should be replaced by matching message card");
+  assert.equal(win.document.querySelectorAll("#messagesContainer .msg-bubble").length, 1);
+  assert.match(body(win, "msgCountBadge"), /1 \/ 2 messages/);
+});
+
 /*
  * A guard on the harness itself, not on the client.
  *

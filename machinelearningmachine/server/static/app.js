@@ -840,9 +840,7 @@ document.addEventListener("DOMContentLoaded", () => {
       messages.push(msg);
       trimMessages();
       // Only append if passes search filter
-      if (!searchFilter ||
-          msg.content.toLowerCase().includes(searchFilter.toLowerCase()) ||
-          msg.sender_name.toLowerCase().includes(searchFilter.toLowerCase())) {
+      if (messageMatches(msg)) {
         appendMessageToFeed(msg, true, true);
       } else {
         // Still update count
@@ -1025,6 +1023,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const history = await resp.json();
       if (!Array.isArray(history)) return;
       messages = history.slice(-maxMessagesClient);
+      visibleCount = RENDER_WINDOW;
       renderAllMessages();
       requestRedraw(true);
       if (note) showToast(note, "info", 5000);
@@ -1359,7 +1358,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const filtered = filteredMessages();
     if (filtered.length === 0 && searchFilter) {
       const noResults = document.createElement("div");
-      noResults.className = "text-center py-8 text-slate-400";
+      noResults.className = "text-center py-8 text-slate-400 no-results-msg";
       const icon = document.createElement("i");
       icon.className = "fa-solid fa-search text-2xl mb-2 opacity-50";
       icon.setAttribute("aria-hidden", "true");
@@ -1518,6 +1517,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function appendMessageToFeed(msg, autoScroll = true, enforceWindow = true) {
     if (emptyPlaceholder) emptyPlaceholder.style.display = "none";
+    const noRes = messagesContainer.querySelector(".no-results-msg");
+    if (noRes) noRes.remove();
 
     const card = buildMessageCard(msg);
 
