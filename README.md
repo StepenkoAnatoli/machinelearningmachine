@@ -10,6 +10,12 @@
 
 A modular orchestration system that enables AI modules to talk directly to each other — connecting **Arena AI**, **GitHub Copilot**, **Claude**, **GPT-4o**, and custom user-defined modules across standardized inter-agent communication topologies.
 
+> **Never installed anything from a download before? Start here:**
+> **[INSTALL-WINDOWS.md](INSTALL-WINDOWS.md)** is a step-by-step guide written for
+> complete beginners on Windows — no command line, no jargon, with what to click
+> and what to do when Windows or antivirus asks a question. The short version is
+> two clicks: install Python once, then double-click `launch-windows.bat`.
+
 > **What the name does and does not mean:** despite the name, this is **not** a
 > machine-learning system. It is an *inter-agent orchestration demo*: a message bus,
 > four scripted agent roles, four topologies, and a dashboard. By default nothing is
@@ -62,7 +68,9 @@ A modular orchestration system that enables AI modules to talk directly to each 
 - 📱 Responsive, respects `prefers-reduced-motion`, and the network canvas draws **on demand** - it repaints when something changes and then stops (no permanent animation loop, idle tab costs nothing)
 
 **Practical & Pleasant:**
-- 🚀 **One-click install & launch** — double-click `launch-windows.bat` / `launch-macos.command` / `launch-linux.sh` and the app sets itself up (Python check → venv → dependencies → dashboard → browser) and runs
+- 🚀 **One-click install & launch** — double-click `launch-windows.bat` / `launch-macos.command` / `launch-linux.sh` and the app sets itself up (Python check → venv → dependencies → dashboard → browser) and runs. It refuses to start on a Python older than 3.10 with a message naming the download page, and if port 8000 is already taken it uses the next free port instead of exiting — both of which used to look like "the app is broken"
+- 📖 **[INSTALL-WINDOWS.md](INSTALL-WINDOWS.md)** — the same procedure written for someone who has never installed software from a download: what to click, what the warnings mean, and a troubleshooting table
+- 🧭 **First screen explains itself** — an empty transcript shows three numbered steps (say what you want → Execute Dialogue → read the answers), a **How to use** button reopens them any time, and the simulator-labelling is explained where the answers appear
 - 💾 **Saved sessions** — store any conversation (modules + full transcript) on your computer and reload it later from the *Sessions* panel
 - 🔊 **Reads what you write** — your prompt, every agent reply, any message, any text file, or (if the operator enabled it) a web page is read aloud with your computer's own voices (no API keys); plus 🎙️ voice dictation
 - 🔌 **Genuinely offline UI**: nothing in the dashboard is fetched from a third party, so it renders with the network unplugged
@@ -75,7 +83,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 495 tests (458 Python + 37 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 513 tests (474 Python + 39 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -156,6 +164,10 @@ A modular orchestration system that enables AI modules to talk directly to each 
 
 ### 1. One-Click Launch (recommended)
 
+> ❓ **Using Windows and never done this before?** Read
+> **[INSTALL-WINDOWS.md](INSTALL-WINDOWS.md)** instead of this section — it walks
+> through installing Python and unzipping the download, with no commands at all.
+
 Clone the repository, then **double-click the launcher for your computer**:
 
 | Your OS    | File to double-click      |
@@ -166,13 +178,17 @@ Clone the repository, then **double-click the launcher for your computer**:
 
 That single file does everything for you:
 
-1. 🔍 Finds your Python (install [python.org](https://www.python.org/downloads/) first if you don't have it)
+1. 🔍 Finds your Python and checks it is 3.10 or newer (install [python.org](https://www.python.org/downloads/) first if you don't have it — the launcher tells you if it is too old or is the Microsoft Store placeholder)
 2. 📦 Creates a private `.venv` environment (first run only)
 3. ⬇️ Installs the dependencies once — a few minutes the first time, instant afterwards
-4. 🚀 Starts the dashboard at `http://127.0.0.1:8000`
-5. 🌐 Opens your browser automatically
+4. 🚀 Starts the dashboard on `127.0.0.1` — port 8000, or the next free port if 8000 is busy
+5. 🌐 Opens your browser at that address automatically
 
 Close the terminal window (or press `Ctrl+C`) to stop the app.
+
+The launcher checks that your Python is 3.10 or newer (and says what to install if
+it is not), and starts on the first free port if 8000 is already taken, so a copy
+of the app left running from an earlier session cannot stop the next launch.
 
 > **macOS note:** if your Mac blocks the script the first time, right-click it → *Open* → *Open*.
 > **Linux note:** if the file isn't executable, run `chmod +x launch-linux.sh` once.
@@ -497,15 +513,15 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 458 tests, all offline
-node --test tests/js/*.test.mjs          # 37 jsdom browser tests (needs: npm ci)
+pytest -q                                    # 474 tests, all offline
+node --test tests/js/*.test.mjs          # 39 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 ```
 
 ```
 $ pytest -q
-458 passed in 31.59s   # the count is asserted by CI; the seconds (and any warnings) are your machine's
+474 passed in 33.0s   # the count is asserted by CI; the seconds (and any warnings) are your machine's
 ```
 
 Coverage by area: protocol/bus bounds, agents and topologies, provider provenance,
@@ -551,6 +567,7 @@ machinelearningmachine/
 ├── launch-windows.bat       # One-click launcher (Windows: double-click)
 ├── launch-macos.command     # One-click launcher (macOS: double-click)
 ├── launch-linux.sh          # One-click launcher (Linux: ./launch-linux.sh)
+├── INSTALL-WINDOWS.md       # Step-by-step install guide for complete beginners (Windows)
 ├── machinelearningmachine/
 │   ├── protocol/
 │   │   ├── message.py       # InterAgentMessage, MessageType, ContentPayload
@@ -593,6 +610,7 @@ machinelearningmachine/
 │   └── 03_four_agent_pipeline.py
 ├── scripts/
 │   ├── build_vendor.py      # Regenerate static/vendor/ from pinned npm deps
+│   ├── pick_port.py         # First free local port, so a busy 8000 cannot stop a launch
 │   └── e2e_server_check.py  # End-to-end pass against a running server (HTTP + WS)
 ├── tests/
 │   ├── test_protocol.py     # message + bus bounds
@@ -617,9 +635,10 @@ machinelearningmachine/
 │   ├── test_server_isolation.py  # two browsers cannot touch each other's state
 │   ├── test_provider_provenance.py  # simulated vs live vs failed-provider labelling
 │   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
+│   ├── test_launchers.py            # the install path: line endings, Python check, free port, the guide
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
-│       └── client-lifecycle.test.mjs  # 22 tests: gap refetch, released session, 409/queue lifecycle, badges, retry-wait wording, reconnect recovery, windowed transcript
+│       └── client-lifecycle.test.mjs  # 24 tests: the first-screen three steps + how-to dialog, gap refetch, released session, 409/queue lifecycle, badges, retry-wait wording, reconnect recovery, windowed transcript
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,
 │                            #   vendor integrity, jsdom, pip-audit, npm audit, secret scan
 ├── .github/dependabot.yml   # pip + npm + actions
