@@ -60,22 +60,19 @@ include = ["machinelearningmachine*"]
 # stylesheet and the vendored browser assets are not Python files.
 [tool.setuptools.package-data]
 machinelearningmachine = [
-    "server/static/*.html",
-    "server/static/*.css",
-    "server/static/*.js",
-    "server/static/vendor/*.css",
-    "server/static/vendor/*.json",
-    "server/static/vendor/**/*.js",
-    "server/static/vendor/**/*.css",
-    "server/static/vendor/**/*.woff2",
-    "server/static/vendor/licenses/*.txt",
+    "server/static/*",
+    "server/static/**/*",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
 testpaths = ["tests"]
-filterwarnings = ["error::DeprecationWarning:machinelearningmachine.*"]
+filterwarnings = [
+    "error",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated.*:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 120

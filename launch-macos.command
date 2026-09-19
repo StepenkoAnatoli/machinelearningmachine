@@ -26,8 +26,9 @@ fi
 echo "[*] Using Python: $PY"
 
 # ---------- 2. Create the private environment (first run only) ----------
-if [ ! -x ".venv/bin/python" ]; then
-  echo "[*] First run: creating a private Python environment (.venv) ..."
+if [ ! -x ".venv/bin/python" ] || ! ./.venv/bin/python -m pip --version >/dev/null 2>&1; then
+  rm -rf .venv
+  echo "[*] Creating a private Python environment (.venv) ..."
   if ! "$PY" -m venv .venv; then
     echo "[ERROR] Could not create the .venv environment."
     echo "        Try running manually:  $PY -m venv .venv"
@@ -38,10 +39,10 @@ fi
 # ---------- 3. Install dependencies (first run only) ----------
 if [ ! -f ".venv/.deps_installed" ]; then
   echo "[*] First run: installing dependencies (one-time, a few minutes) ..."
-  ./.venv/bin/python -m pip install --upgrade pip >/dev/null
+  ./.venv/bin/python -m pip install --upgrade pip >/dev/null 2>&1 || true
   if ! ./.venv/bin/python -m pip install -e .; then
-    echo "[!] Editable install failed - falling back to requirements.txt ..."
-    if ! ./.venv/bin/python -m pip install -r requirements.txt; then
+    echo "[!] Editable install failed - falling back to standard install ..."
+    if ! ./.venv/bin/python -m pip install .; then
       echo "[ERROR] The dependency install failed."
       echo "        Check your internet connection and run this launcher again."
       exit 1

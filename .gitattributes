@@ -1,0 +1,18 @@
+# Default to LF line endings for text files
+* text=auto eol=lf
+
+# Force LF on frontend and vendored assets
+machinelearningmachine/server/static/vendor/** -text
+*.json text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.mjs text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.command text eol=lf
+
+# Binary webfonts
+*.woff2 binary
