@@ -38,6 +38,7 @@ fixed, and each fix has a regression test named after it.
 | **D14** | `save_session`'s size-trim loop cannot terminate | A transcript whose *single* last message exceeds `MAX_SESSION_BYTES` halves a one-element list forever: `[len//2:]` == `[0:]`. Reached in tests with a small cap; in production reachable via a large `agents` blob. The pre-existing code had the same shape | Medium (wedge inside the request thread) |
 | **D15** | Session pruning ordered by `mtime` and broke ties with the filename's random suffix | Several saves inside one second (or a filesystem with one-second granularity: FAT, some NFS) can evict **the session you just saved** | Medium (silent data loss, filesystem-dependent) |
 | **D16** | `metadata.content_truncated` was written by the agent and rendered by nobody, while `app.js` carried a comment asserting "the badge on the message says it too" | The only visible sign of a clipped answer was inside the Markdown body; the comment was a lie about the UI | Low (documentation-in-code) |
+| **D17** | A CI step that only worked on the maintainer's Node | The jsdom step added in this milestone ran `node --test "tests/js/*.test.mjs"`. Node >= 21 expands that pattern itself; the workflow's node 20 does not, so node tried to open a file literally named `tests/js/*.test.mjs` and the job died 15 seconds in - green locally, red on the runner. Found by CI, not by review | Medium (a job that can never pass is worse than a missing one: it trains people to ignore red) |
 
 Reproduction scripts were written first, and each one became a test under `tests/`
 (the two that were benchmarks became `scripts/bench_sessions.py` and
@@ -158,8 +159,9 @@ server-side tests cannot prove a browser does anything with the frames it is sen
 
 | Result | |
 |---|---|
+| CI (GitHub) | green on `3.10 / 3.11 / 3.12`, vendor integrity, `npm audit`, `pip-audit`, secret scan, and the wheel-served end-to-end pass |
 | `pytest -q` | **365 passed** (was 220 at `9cffbd3`), 0 failures, 2 warnings (both starlette/httpx deprecations) |
-| `node --test tests/js/*.test.mjs` | **23 pass** (15 sanitizer + 8 client lifecycle) |
+| `node --test tests/js/*.test.mjs` | **23 pass** (15 sanitizer + 8 client lifecycle), on node 20 in CI and node 22 locally |
 | `ruff check machinelearningmachine tests scripts examples` | clean (examples were broken at baseline and are now in CI's scope) |
 | `scripts/e2e_server_check.py` | **33/33 PASS** against a live server |
 | `python scripts/bench_sessions.py` | 50 transcripts, 73.9 MB: `list_sessions` **1.3 ms** vs **213.4 ms** for read+parse-every-file (167×); the script exits non-zero if the header index ever stops paying for itself |
@@ -185,7 +187,11 @@ their place, they did not merely decorate the change:
    rejection test I wrote *for* that flag.
 5. **"2 replys were longer than…"** - the pluralisation in the truncation toast, caught
    by a jsdom assertion on user-visible text.
-6. **A test harness that double-initialised the client.** Manually dispatching
+6. **CI caught a defect in this milestone's own tooling** (D17): the new jsdom step used a
+   quoted glob node 20 cannot expand - green locally, red on the runner in 15 s. Fixed by
+   letting the shell expand it, plus a test that refuses both the single-file form and the
+   quoted form, because a step that only works on the author's machine is a claim, not a check.
+7. **A test harness that double-initialised the client.** Manually dispatching
    `DOMContentLoaded` after `win.eval(app.js)` made jsdom's own event fire a second
    init: two sockets, two toasts, and assertions that would have passed for the wrong
    reason. Fixed by installing the client in `beforeParse` - and the test now asserts
@@ -223,6 +229,10 @@ exercise was not to add unfounded claims:
 - **Simulator-mode tests cannot exercise real provider quirks** (streamed partials,
   chunked encoding, 401 mid-conversation). The retry/timeout/attempt paths are tested
   against scripted HTTP doubles, which is what a hermetic suite can honestly do.
+- **The browser tests depend on the runner's Node version** (D17). They are executed
+  by the shell-expanded file list, which works on node 18/20/22; `test_ci_runs_every_jsdom_suite`
+  pins that form so neither a single named file nor a quoted glob can come back. There is
+  no Node-version matrix - if a future suite needs node >= 21 APIs, the workflow has to say so.
 - **The jsdom client tests stub `fetch` and `WebSocket`.** They prove the client reacts
   correctly to frames; the real socket is covered by the e2e script, and browser-specific
   rendering (canvas, Web Speech) is not asserted anywhere.
@@ -262,6 +272,7 @@ exercise was not to add unfounded claims:
 | D14 trim loop could not terminate | F5 | `sessions.py` bounded loop + explicit refusal | `test_session_storage.py::test_a_single_huge_message_does_not_loop_forever` |
 | D15 prune order tie | F5 | `sessions.py:_prune_sort_key`, sub-second `new_session_id` | `test_session_storage.py` (2 prune cases) |
 | D16 badge claimed but absent | F12, F1 | `static/app.js`, `static/style.css` | `tests/js/client-lifecycle.test.mjs` ("clamped reply is badged") |
+| D17 CI step assumed node ≥ 21 | N3 | `.github/workflows/ci.yml` (shell-expanded glob) | `tests/test_docs_are_accurate.py::test_ci_runs_every_jsdom_suite` |
 
 Requirements **N1/N2/N4** (no new runtime dependency; every await bounded; runs bounded by
 `--run-timeout`) are cross-cutting: they are the reason the fixes above are implemented as

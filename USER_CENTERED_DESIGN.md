@@ -384,7 +384,7 @@ The second user-centered pass focused on three things users repeatedly hit: **ge
 ## 🛡️ Round 3: the promises the code had stopped keeping
 
 The audit standard used in rounds 1 and 2 - "does this make the user's job easier,
-safer, more pleasant?" - was applied to the project's own claims. Fourteen findings
+safer, more pleasant?" - was applied to the project's own claims. Seventeen findings
 came back, and every one of them was a case of documentation, a test, or a user-facing
 promise that had quietly detached from the code. The full record (reproductions,
 reasoning, rejected options) is [PRODUCTION_HARDENING.md](PRODUCTION_HARDENING.md).
