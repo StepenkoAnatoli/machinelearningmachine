@@ -161,3 +161,28 @@ def test_readme_test_listing_counts_are_true():
     assert int(claimed_total.group(1)) == sum(counts.values())
     for suite in ("test_run_cancellation.py", "test_run_queue.py", "test_queued_run_validation.py"):
         assert suite in README, f"README tests/ tree omits {suite}"
+
+
+def test_readme_running_tests_block_states_todays_count(request):
+    """
+    D29: the headline count is pinned by the test above, and the copyable block
+    400 lines below it was not.
+
+    It said ``pytest -q  # 357 tests, all offline`` and showed a sample run
+    ending ``357 passed in 21.3s`` while the suite collected 432 - two numbers in
+    one document, one of them enforced. A reader who copies the command and gets
+    a different count than the document promised stops trusting the rest of it,
+    which is the same failure as a badge that says "30 tests passing" with no CI
+    behind it. The duration is not pinned and is marked as the machine's own: a
+    wall clock is not a claim this repo can keep.
+    """
+    collected = request.session.testscollected
+    if collected < 100:
+        pytest.skip(f"not a full-suite run (collected {collected})")
+    start = README.index("## 🧪 Running Tests")
+    block = README[start:README.index("Coverage by area", start)]
+    counts = [int(n) for n in re.findall(r"(\d+)\s+(?:tests\b|passed\b)", block)]
+    assert counts, f"the Running Tests block should state a pytest count: {block!r}"
+    assert all(n == collected for n in counts), (
+        f"the Running Tests block claims {counts} but pytest collected {collected}"
+    )

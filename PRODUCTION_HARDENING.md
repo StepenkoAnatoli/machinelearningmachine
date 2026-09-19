@@ -55,6 +55,8 @@ reproduced against the parent of the cancellation change before being fixed, and
 
 | **D25** | Retry is rate-limit blind: `post_for_json` never read a response header, so an upstream `Retry-After` was discarded | A 429 carrying `Retry-After: 3` was retried after the jittered `backoff × attempt` - measured 0.54 s, 0.79 s, 0.85 s and 0.96 s over four runs, never 3 s - so the retry landed *inside* the window the server had just named, was answered with a second 429, and the turn was lost with `attempts=2` | Medium (the client argues with the one party that knows when the limit resets) |
 
+| **D29** | The README's copyable test block stated a count nothing enforced | `pytest -q  # 357 tests, all offline` and a sample run ending `357 passed in 21.3s`, four hundred lines below a headline that said 433 Python tests and *was* enforced by `test_readme_python_test_count_is_true`. Reproduced by matching the block against a full-suite run: the pinned claim said 433, the copyable one said 357, and the `21.3s` had not been measured by anyone in the record | Low (documentation-in-record; the code was already correct) |
+
 | **D28** | Every retry wait was spent in silence: no log line, no field, nothing in the transcript | The loop awaited its delay with no record of any kind. D26's 454.1 s of sleeping produced three `error <label>: <status>` lines about the *status* and nothing about the time, so a turn that burned four seconds on rate limits was indistinguishable from a slow model - in the log, in `metadata`, and in the exported Markdown. `metadata.provider_attempts` said how many tries; nothing anywhere said what they cost | Medium (an unexplained hang cannot be told apart from a broken one) |
 
 | **D27** | `ProviderError.attempts` counted requests the error text never mentioned | The "(after N attempts)" suffix was gated on `retryable` as well as `attempts > 1`. With `[429, 401]` and `max_attempts=3`: two requests were really sent and `err.attempts` said 2, but `err.reason` was `"the API answered HTTP 401"` and `str(err)` was `"OpenAI: the API answered HTTP 401 [upstream said: too many requests]"` - no mention of 2 in either. The transcript therefore carried `metadata.provider_attempts = 2` beside a sentence describing one request, and the two were read together in the UI and in an exported Markdown file | Medium (a record that contradicts itself is worse than one that says less) |
@@ -326,6 +328,13 @@ exercise was not to add unfounded claims:
   line. It is per message, so a pipeline records four numbers and no total, and an
   HTTP-date `Retry-After` is measured against this machine's clock - a provider whose
   clock is a minute fast asks for a wait a minute long.
+
+- **A sample duration in the README is a machine's, not a guarantee (D29).** The
+  Running Tests block now states a count the suite enforces
+  (`test_readme_running_tests_block_states_todays_count`, alongside the headline's
+  `test_readme_python_test_count_is_true`), and its sample run keeps a wall clock
+  that nothing pins - marked in the line itself as the reader's own. A test cannot
+  honestly assert a duration, so the document says which half is a claim.
 - **Simulator-mode tests cannot exercise real provider quirks** (streamed partials,
   chunked encoding, 401 mid-conversation). The retry/timeout/attempt paths are tested
   against scripted HTTP doubles, which is what a hermetic suite can honestly do.
@@ -399,6 +408,7 @@ exercise was not to add unfounded claims:
 
 | D24 stale no-queue prose | F13, N3 | PRODUCTION_HARDENING.md (F2, §4 F2/F9/F15 rows, §7, §8 N-para), USER_CENTERED_DESIGN.md queue row, README test tree + jsdom count | `test_docs_are_accurate.py` (hardening-agrees, UCD-agrees, listing-counts cases) |
 
+| D29 an unpinned count in the copyable block | F13, N3 | README "Running Tests" block (count + sample run) | `test_docs_are_accurate.py::test_readme_running_tests_block_states_todays_count` - every `N tests`/`N passed` in the block must equal what pytest collected |
 | D28 waits were spent in silence | F16 | `agents/providers.py: ProviderError.waited` + the WARNING before `_backoff_sleep` + `_labelled_with_attempts(err, waited=…)`, `agents/base.py: metadata.provider_waited` | `test_provider_retry.py` - two caplog cases on the wait line (delay, `attempt 2/2`, `upstream Retry-After` vs `jittered backoff`), `waited` on the retry-exhausted error and on D26's refusal, no waiting clause after a zero wait or a single attempt, a `save_session`/`get_session` round trip; `tests/js/client-lifecycle.test.mjs` - the degraded badge tooltip carries the wait |
 | D27 the count and the sentence disagreed | F16 | `agents/providers.py: _labelled_with_attempts`, applied on both raise paths of `post_for_json` (the retry-exhausted tail and D26's `_wait_does_not_fit`) | `test_provider_retry.py` - five parametrised status sequences asserting `attempts == len(requests)` and the same number in `reason` and in `str(exc)`, no retry language after one attempt, a transcript where the retried agent says `after 2 attempts` and its peer says nothing, and the wait-budget refusal obeying the same rule |
 | D26 waiting was charged to nobody | F16 | `agents/providers.py: _wait_does_not_fit`, the `wait_budget`/`waited` accounting in `post_for_json` | `test_provider_retry.py` - `Retry-After: 600` vs `timeout=60` sleeps nothing and names both numbers, the exponential path refused the same way, repeated waits charged against one budget (`[4, 4]` then stop, `attempts=3`), a wait that fits is still slept and still recovers, the bound scales with the timeout (parametrised 60 s → slept / 10 s → refused), Anthropic parity |
@@ -470,3 +480,28 @@ D19 local validation: **366 Python tests passed**, **27 jsdom tests passed**;
 full-scope Ruff and the loopback server e2e gate passed. The gate server was stopped.
 D19 local validation: **366 Python tests passed**, **27 jsdom tests passed**;
 full-scope Ruff and the loopback server e2e gate passed. The gate server was stopped.
+
+### D25-D29 rate-limit-aware retry
+
+Failing tests first, one commit per finding, each driven by a scripted HTTP double
+(the stub `aiohttp` in `test_provider_retry.py`, plus one real loopback `aiohttp`
+server for the case a stub cannot prove: header case-insensitivity). No real
+provider was called and no vendor was contacted; the waits were measured through
+the `_backoff_sleep` seam, never by patching `asyncio.sleep`, and the autouse
+`backoffs` fixture means no test slept for real.
+
+Measured before the fixes, on this machine: a 429 carrying `Retry-After: 3` was
+retried after 0.54 s, 0.79 s, 0.85 s and 0.96 s over four runs (D25);
+`timeout=2.0` with `retry_backoff=100` and `max_attempts=3` slept 454.1 s, and
+389.9 s / 410.3 s / 424.8 s in three others (D26); `[429, 401]` reported
+`attempts=2` with `str(exc)` = `"OpenAI: the API answered HTTP 401 [upstream said:
+too many requests]"` and no mention of 2 (D27); and the 454.1 s produced no log
+line about waiting at all (D28).
+
+D25-D29 local validation: **433 Python tests passed** (390 at the start of this
+stage), **33 jsdom tests passed** (32), `ruff check machinelearningmachine tests
+scripts examples` clean over the full scope, and `scripts/e2e_server_check.py`
+reported `ALL E2E CHECKS PASSED` - 33 checks, 0 failures - against
+`serve --port 8799` on its unchanged loopback default. The gate server was
+stopped afterwards and the port was verified closed. No real-provider, load, or
+cross-browser validation was performed; the browser half of D28 is jsdom.
