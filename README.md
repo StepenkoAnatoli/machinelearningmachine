@@ -83,7 +83,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 513 tests (474 Python + 39 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 514 tests (475 Python + 39 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -513,7 +513,7 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 474 tests, all offline
+pytest -q                                    # 475 tests, all offline
 node --test tests/js/*.test.mjs          # 39 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
@@ -521,7 +521,7 @@ python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a ru
 
 ```
 $ pytest -q
-474 passed in 33.0s   # the count is asserted by CI; the seconds (and any warnings) are your machine's
+475 passed in 32.5s   # the count is asserted by CI; the seconds (and any warnings) are your machine's
 ```
 
 Coverage by area: protocol/bus bounds, agents and topologies, provider provenance,
@@ -634,7 +634,7 @@ machinelearningmachine/
 │   ├── test_server_auth.py  # bind policy, token gate, WS auth, lockout
 │   ├── test_server_isolation.py  # two browsers cannot touch each other's state
 │   ├── test_provider_provenance.py  # simulated vs live vs failed-provider labelling
-│   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
+│   ├── test_frontend_security.py    # headers, SRI manifest, no CDN refs, stylesheets cover the markup
 │   ├── test_launchers.py            # the install path: line endings, Python check, free port, the guide
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer

@@ -437,6 +437,7 @@ going. Three defects, all of them invisible on the machine that wrote them:
 | A copy of the app left running from yesterday: the window printed "port already in use" and stopped, which reads as "this program is broken" | Every launcher bound port 8000 unconditionally, and the browser opened at 8000 regardless | `scripts/pick_port.py` returns the first free port (8000, 8001, … and an OS-assigned port if the whole range is busy); the launcher prints that address, opens the browser there, and says plainly that 8000 was taken |
 | "How do I install Python?" - the guide assumed you already had a terminal workflow | The README's install section is written for developers (clone, venv, `pip install -e .`) | [`INSTALL-WINDOWS.md`](INSTALL-WINDOWS.md): numbered steps for a complete beginner, the two dialogs Windows actually shows (SmartScreen, "Unblock"), a troubleshooting table keyed on the exact messages the launcher prints, and where the data lives |
 | An empty dashboard, a wall of panels, no idea which button starts anything | The empty state was one sentence and three feature badges | The empty transcript is now three numbered steps (say what you want → click *Execute Dialogue* → read the answers), states that no API key is needed and what "simulated" means, and a **How to use** button reopens the same three steps at any time - both asserted in `tests/js/client-lifecycle.test.mjs` |
+| The new three-step block and How-to-use dialog arrived with none of their layout | The shipped `tailwind.css` is a *build product* committed into the tree, and it was one build behind: `index.html` gained `.max-w-xl`/`.mt-5`/`.sm\:flex`/`.text-left` while the stylesheet kept the previous output. No test compared the stylesheet with the markup it is built from - CI's "vendor integrity" job (rebuild and require a clean tree) was the only thing that noticed, and only after a push | Assets rebuilt and committed, and `tests/test_frontend_security.py` now fails locally - naming the exact missing classes - if the shipped stylesheets do not cover the markup |
 
 **The principle that came out of this round**: the install path is part of the product.
 A file nobody edits is a file that rots silently, so the launchers, the guide and the
@@ -447,7 +448,7 @@ A file nobody edits is a file that rots silently, so the launchers, the guide an
 
 ```
 $ pytest -q
-474 passed in 33.0s
+475 passed in 32.5s
 $ node --test tests/js/*.test.mjs
 # tests 39
 # pass 39
