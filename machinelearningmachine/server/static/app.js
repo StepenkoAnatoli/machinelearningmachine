@@ -28,6 +28,8 @@ document.addEventListener("DOMContentLoaded", () => {
    * only ever match the run it records. Bounded: old runs are forgotten.
    */
   let terminalRuns = new Map();
+  /** When this tab's pending run request started (0 when none is in flight). */
+  let pendingRequestAt = 0;
   /** True when this tab's run was queued (its HTTP already returned 202). */
   let localQueued = false;
   /** The server released this session's mesh; reconnecting would only re-allocate. */
@@ -908,7 +910,7 @@ document.addEventListener("DOMContentLoaded", () => {
       showToast(`Starting ${data.topology} dialogue${data.run_id ? " (" + data.run_id + ")" : ""}...`, "info", 2000);
     } else if (data.type === "run_completed" || data.type === "run_error" || data.type === "run_cancelled") {
       if (data.run_id) {
-        terminalRuns.set(data.run_id, { type: data.type, error: data.error || null });
+        terminalRuns.set(data.run_id, { type: data.type, error: data.error || null, at: Date.now() });
         while (terminalRuns.size > 20) {
           terminalRuns.delete(terminalRuns.keys().next().value);
         }
@@ -1738,6 +1740,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     localRun = true;
+    // The reconcile window for a late 202: only terminal frames inside this
+    // request may speak for it. Run ids restart in every session, so a record
+    // older than this click belongs to a dead session and must not match.
+    pendingRequestAt = Date.now();
     syncRunActivity();
     let ownStarted = false;
     let ownQueued = false;
@@ -1755,7 +1761,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const queued = await resp.json().catch(() => ({}));
         if (queued && queued.status === "queued" && queued.run_id) {
           const terminal = terminalRuns.get(queued.run_id);
-          if (terminal) {
+          if (terminal && terminal.at >= pendingRequestAt) {
             // The socket beat the HTTP response: this run already ended (another
             // tab cancelled it while queued, or it ran to completion first) and
             // its frame stayed silent for want of an identity to attach to. Say

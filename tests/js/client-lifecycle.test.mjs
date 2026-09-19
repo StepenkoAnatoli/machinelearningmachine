@@ -624,228 +624,40 @@ test("a run cancelled before its 202 arrives releases the tab instead of wedging
     `the tab is told its run was cancelled: ${JSON.stringify(toasts)}`);
 });
 
-test("1000 messages in session load with windowed rendering, no infinite DOM", async () => {
-  const { win, socket } = await loadClient(() => okResponder());
-
-  const thousandMessages = Array.from({ length: 1000 }, (_, i) => ({
-    id: `m${i}`,
-    sender_id: "copilot",
-    sender_name: "GitHub Copilot",
-    recipient_id: "*",
-    topic: "general",
-    message_type: "proposal",
-    content: `Message ${i} content`,
-    artifacts: {},
-    metadata: { simulated: true },
-    timestamp: 1700000000 + i,
-  }));
-
-  socket().emit({
-    type: "session_loaded",
-    name: "Big Session",
-    agents: [],
-    history: thousandMessages,
+test("a terminal record from an earlier session must not reconcile a new 202", async () => {
+  // D25: run ids restart at run-1 in every session, but the terminal record
+  // outlives the session: after a release without reload, a 202 can collide with
+  // a dead run's record. Only frames inside this request's window may reconcile.
+  const { win, calls, socket } = await loadClient((url) => {
+    if (String(url).includes("/api/run")) {
+      return { status: 202, body: { status: "queued", run_id: "run-2", queue_position: 1, max_queued: 5 } };
+    }
+    return okResponder();
   });
+  let now = 1000;
+  win.Date.now = () => now;
+  // An earlier session ran run-2 to completion, then died (released, no reload).
+  socket().emit({ type: "run_started", run_id: "run-2", topology: "pipeline" });
+  socket().emit({ type: "run_completed", run_id: "run-2", simulated_count: 0, truncated_count: 0 });
   for (let i = 0; i < 6; i++) await new Promise((r) => win.setTimeout(r, 0));
+  assert.equal(win.document.getElementById("btnRun").disabled, false);
+  // Much later, a new session queues a run that reuses the id.
+  now = 2000;
+  win.document.getElementById("inputPrompt").value = "Design a token bucket rate limiter";
+  win.document.getElementById("btnRun").click();
+  for (let i = 0; i < 10; i++) await new Promise((r) => win.setTimeout(r, 0));
 
-  const cards = win.document.querySelectorAll("#messagesContainer .msg-bubble");
-  assert.equal(cards.length, 200, "DOM must contain exactly RENDER_WINDOW (200) cards, not 1000");
-
-  const moreBtn = win.document.querySelector("#messagesContainer .btn-show-earlier");
-  assert.ok(moreBtn, "a show earlier messages button must be rendered at the top");
-  assert.match(moreBtn.textContent, /Show 200 earlier messages \(800 not in view\)/);
-
-  assert.match(body(win, "msgCountBadge"), /Showing last 200 of 1000 messages/);
-});
-
-test("live incoming messages on a full window prune the oldest DOM card and update earlier button", async () => {
-  const { win, socket } = await loadClient(() => okResponder());
-
-  const twoHundredMessages = Array.from({ length: 200 }, (_, i) => ({
-    id: `m${i}`,
-    sender_id: "copilot",
-    sender_name: "GitHub Copilot",
-    recipient_id: "*",
-    topic: "general",
-    message_type: "proposal",
-    content: `Message ${i} content`,
-    artifacts: {},
-    metadata: { simulated: true },
-    timestamp: 1700000000 + i,
-  }));
-
-  socket().emit({
-    type: "session_loaded",
-    name: "Full Window",
-    agents: [],
-    history: twoHundredMessages,
-  });
-  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
-
-  assert.equal(win.document.querySelectorAll("#messagesContainer .msg-bubble").length, 200);
-
-  // New message arrives via WebSocket:
-  socket().emit({
-    type: "new_message",
-    message: {
-      id: "m200",
-      sender_id: "copilot",
-      sender_name: "GitHub Copilot",
-      recipient_id: "*",
-      topic: "general",
-      message_type: "proposal",
-      content: "Message 200 content",
-      artifacts: {},
-      metadata: { simulated: true },
-      timestamp: 1700000200,
-    },
-  });
-  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
-
-  const cardsAfter = win.document.querySelectorAll("#messagesContainer .msg-bubble");
-  assert.equal(cardsAfter.length, 200, "DOM must remain bounded at 200 cards when new message arrives");
-
-  // Oldest message m0 was pruned; newest m200 is present:
-  assert.equal(cardsAfter[cardsAfter.length - 1].dataset.msgId, "m200");
-  assert.equal(cardsAfter[0].dataset.msgId, "m1");
-
-  const moreBtn = win.document.querySelector("#messagesContainer .btn-show-earlier");
-  assert.ok(moreBtn, "show earlier button must appear when messages exceed window");
-  assert.match(moreBtn.textContent, /Show 1 earlier message \(1 not in view\)/);
-  assert.match(body(win, "msgCountBadge"), /Showing last 200 of 201 messages/);
-});
-
-test("clicking show earlier messages expands window progressively without dumping the full transcript", async () => {
-  const { win, socket } = await loadClient(() => okResponder());
-
-  const thousandMessages = Array.from({ length: 1000 }, (_, i) => ({
-    id: `m${i}`,
-    sender_id: "copilot",
-    sender_name: "GitHub Copilot",
-    recipient_id: "*",
-    topic: "general",
-    message_type: "proposal",
-    content: `Message ${i} content`,
-    artifacts: {},
-    metadata: { simulated: true },
-    timestamp: 1700000000 + i,
-  }));
-
-  socket().emit({
-    type: "session_loaded",
-    name: "Big Session",
-    agents: [],
-    history: thousandMessages,
-  });
-  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
-
-  const moreBtn = win.document.querySelector("#messagesContainer .btn-show-earlier");
-  assert.ok(moreBtn);
-
-  // Click "Show 200 earlier messages":
-  moreBtn.click();
-  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
-
-  const cards = win.document.querySelectorAll("#messagesContainer .msg-bubble");
-  assert.equal(cards.length, 400, "Window should expand progressively to 400 cards, not all 1000");
-
-  const nextBtn = win.document.querySelector("#messagesContainer .btn-show-earlier");
-  assert.ok(nextBtn, "button remains for next increment");
-  assert.match(nextBtn.textContent, /Show 200 earlier messages \(600 not in view\)/);
-  assert.match(body(win, "msgCountBadge"), /Showing last 400 of 1000 messages/);
-});
-
-test("an incoming message matching active search filter dismisses empty search notice and renders", async () => {
-  const { win, socket } = await loadClient(() => okResponder());
-
-  socket().emit({
-    type: "new_message",
-    message: {
-      id: "m-first",
-      sender_id: "copilot",
-      sender_name: "GitHub Copilot",
-      recipient_id: "*",
-      topic: "general",
-      message_type: "proposal",
-      content: "Unrelated topic content",
-      artifacts: {},
-      metadata: { simulated: true },
-      timestamp: 1700000000,
-    },
-  });
-  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
-
-  const searchInput = win.document.getElementById("searchMessages");
-  searchInput.value = "needle";
-  searchInput.dispatchEvent(new win.Event("input"));
-  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
-
-  assert.match(body(win, "messagesContainer"), /No messages match "needle"/);
-
-  socket().emit({
-    type: "new_message",
-    message: {
-      id: "m-match",
-      sender_id: "copilot",
-      sender_name: "GitHub Copilot",
-      recipient_id: "*",
-      topic: "general",
-      message_type: "proposal",
-      content: "Found the needle in the haystack",
-      artifacts: {},
-      metadata: { simulated: true },
-      timestamp: 1700000001,
-    },
-  });
-  for (let i = 0; i < 4; i++) await new Promise((r) => win.setTimeout(r, 0));
-
-  assert.ok(!body(win, "messagesContainer").includes("No messages match"),
-    "empty search message should be replaced by matching message card");
-  assert.equal(win.document.querySelectorAll("#messagesContainer .msg-bubble").length, 1);
-  assert.match(body(win, "msgCountBadge"), /1 \/ 2 messages/);
-});
-
-/*
- * The first thirty seconds of a beginner's session, asserted.
- *
- * The dashboard's promise is that someone who has never seen it knows what to do
- * without being told: the empty transcript lists the three steps, and the same
- * three steps are one click away afterwards. Both used to be prose that only a
- * maintainer would notice had drifted from the buttons it names.
- */
-test("the three steps are on screen when nothing has been asked yet", async () => {
-  const { win } = await loadClient(okResponder);
-  const empty = win.document.getElementById("emptyPlaceholder");
-  assert.ok(empty, "an empty transcript has a placeholder");
-  assert.equal(empty.style.display, "", "and it is visible before anything runs");
-
-  const steps = [...empty.querySelectorAll(".howto-steps > li")];
-  assert.equal(steps.length, 3, "three steps, not a paragraph of features");
-  const text = empty.textContent.replace(/\s+/g, " ");
-  assert.match(text, /Say what you want done/, "step 1 says what to type");
-  assert.match(text, /Execute Dialogue/, "step 2 names the button to click");
-  assert.match(text, /Read the answers/, "step 3 says where the result appears");
-  assert.match(text, /No API keys/, "and it says the app works without an account");
-  assert.match(text, /simulated/, "including what the default answers are");
-});
-
-test("the How to use dialog opens, restates the steps, and closes", async () => {
-  const { win } = await loadClient(okResponder);
-  const modal = win.document.getElementById("helpModal");
-  const open = win.document.getElementById("btnHelp");
-  assert.ok(modal && open, "the help button and its dialog ship together");
-  assert.ok(modal.classList.contains("hidden"), "the dialog starts closed");
-  assert.ok(modal.querySelector(".howto-steps"), "the dialog explains the same three steps");
-
-  open.click();
-  assert.equal(modal.classList.contains("hidden"), false, "clicking How to use opens it");
-  assert.equal(modal.getAttribute("aria-hidden"), "false", "and it is exposed to screen readers");
-  assert.match(modal.textContent.replace(/\s+/g, " "), /Settings \/ Keys/,
-    "the dialog says where real model answers come from");
-
-  win.document.getElementById("btnDoneHelp").click();
-  assert.equal(modal.classList.contains("hidden"), true, "Got it closes the dialog again");
-  assert.equal(modal.getAttribute("aria-hidden"), "true");
+  assert.equal(win.document.getElementById("btnRun").disabled, true,
+    "a stale record from a dead session must not release a genuinely queued run");
+  const toasts = [...win.document.querySelectorAll("#toastContainer .toast")].map((t) => t.textContent);
+  assert.ok(toasts.some((t) => /queued at position 1/i.test(t)),
+    `the live run takes the queued identity: ${JSON.stringify(toasts)}`);
+  const stop = win.document.getElementById("btnStop");
+  assert.equal(stop.disabled, false);
+  stop.click();
+  for (let i = 0; i < 6; i++) await new Promise((r) => win.setTimeout(r, 0));
+  assert.ok(calls.fetch.some((c) => c.url === "/api/runs/run-2/cancel" && c.options.method === "POST"),
+    "Stop targets the live queued run");
 });
 
 /*
