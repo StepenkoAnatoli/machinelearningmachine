@@ -72,7 +72,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 391 tests (367 Python + 24 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 381 tests (357 Python + 24 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -490,22 +490,15 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 367 tests, all offline
+pytest -q                                    # 357 tests, all offline
 node --test tests/js/*.test.mjs          # 24 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
-python scripts/bench_sessions.py                       # saved-session listing: 1.3 ms vs 213 ms
 ```
 
 ```
 $ pytest -q
-........................................................................ [ 19%]
-........................................................................ [ 39%]
-........................................................................ [ 58%]
-........................................................................ [ 78%]
-........................................................................ [ 98%]
-.......                                                                  [100%]
-367 passed in 22.6s
+357 passed in 21.3s
 ```
 
 Coverage by area: protocol/bus bounds, agents and topologies, provider provenance,
@@ -593,7 +586,6 @@ machinelearningmachine/
 │   └── 03_four_agent_pipeline.py
 ├── scripts/
 │   ├── build_vendor.py      # Regenerate static/vendor/ from pinned npm deps
-│   ├── bench_sessions.py    # Times the saved-session listing against the old full parse
 │   └── e2e_server_check.py  # End-to-end pass against a running server (HTTP + WS)
 ├── tests/
 │   ├── test_protocol.py     # message + bus bounds

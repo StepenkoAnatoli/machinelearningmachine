@@ -31,8 +31,6 @@ MAX_AVATAR_CHARS = 8
 #: provider those grow far past what the simulator ever produced; the budget has
 #: to be enforced by *shrinking the input*, never by refusing the turn.
 MAX_INJECTED_PROMPT = 10_000
-MAX_CONTEXT_MESSAGE = 2_000
-MAX_CONTEXT_MESSAGES = 6
 
 #: Marker kept at both ends of a clamped context so the transcript says what
 #: happened instead of quietly reading like a complete message.
@@ -49,14 +47,12 @@ def fit_context(prompt: str, limit: int = MAX_INJECTED_PROMPT) -> Tuple[str, int
 
     Returns ``(text, dropped_characters)``.
     """
-    text = prompt if isinstance(prompt, str) else str(prompt)
-    if len(text) <= limit:
-        return text, 0
-    dropped = len(text) - limit
-    budget = max(0, limit - len(_CONTEXT_CUT))
+    if len(prompt) <= limit:
+        return prompt, 0
+    budget = limit - len(_CONTEXT_CUT)
     head = budget - (budget // 3)
     tail = budget // 3
-    return text[:head].rstrip() + _CONTEXT_CUT + text[-tail:].lstrip(), dropped
+    return prompt[:head].rstrip() + _CONTEXT_CUT + prompt[-tail:].lstrip(), len(prompt) - limit
 
 
 
@@ -181,14 +177,10 @@ class BaseAgent:
 
         # Build prompt context from memory - limit for performance
         recent_messages = []
-        for m in self.memory[-MAX_CONTEXT_MESSAGES:]:
+        for m in self.memory[-6:]:
             role = "assistant" if m.sender_id == self.agent_id else "user"
             # Truncate very long messages for context window
-            content = (
-                m.content[:MAX_CONTEXT_MESSAGE] + "..."
-                if len(m.content) > MAX_CONTEXT_MESSAGE
-                else m.content
-            )
+            content = m.content[:2000] + "..." if len(m.content) > 2000 else m.content
             recent_messages.append({"role": role, "content": f"[{m.sender_name}]: {content}"})
 
         if prompt:
@@ -236,7 +228,7 @@ class BaseAgent:
                     "provider_error": e.reason,
                     "provider_status_code": e.status_code,
                     # Honest about how hard the provider was tried before giving up.
-                    "provider_attempts": int(getattr(e, "attempts", 1) or 1),
+                    "provider_attempts": e.attempts,
                 }
             )
             self.status = "degraded"
@@ -266,7 +258,7 @@ class BaseAgent:
         # A provider is free to answer with more text than the protocol can carry.
         # Clamping here (instead of letting Message reject it) is what keeps a long
         # code answer from turning into a failed run and a lost transcript.
-        content, content_dropped = clamp_content(content if isinstance(content, str) else str(content))
+        content, content_dropped = clamp_content(content)
         if content_dropped:
             metadata["content_truncated"] = content_dropped
 

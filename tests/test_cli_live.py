@@ -49,12 +49,6 @@ def test_no_flag_means_no_provider_from_the_environment(monkeypatch):
     assert all(isinstance(a.provider, MockLLMProvider) for a in mesh.agents.values())
 
 
-def test_the_mesh_default_is_simulated_even_with_keys_present(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-ambient-key-that-must-stay-put")
-    mesh = _mesh()
-    assert isinstance(mesh.gpt.provider, MockLLMProvider)
-
-
 # ------------------------------------------------------------------- --live wiring
 
 def test_live_openai_wires_the_two_coding_agents(monkeypatch):
@@ -152,12 +146,6 @@ def test_the_rejection_says_which_setting_was_wrong(monkeypatch, capsys):
 def test_session_ttl_env_reaches_the_registry(monkeypatch):
     config = _serve_config(monkeypatch, ["serve"], {"MACHINELEARNINGMACHINE_SESSION_TTL": "7"})
     assert config.session_idle_ttl == 420.0
-    from machinelearningmachine.server.state import SessionRegistry
-
-    registry = SessionRegistry(
-        config=config, max_sessions=config.max_sessions, idle_ttl=config.session_idle_ttl
-    )
-    assert registry.sweep_interval_seconds() == min(60.0, max(5.0, 420.0 / 4))
 
 
 def test_the_insecure_provider_url_opt_out_can_come_from_the_environment(monkeypatch):

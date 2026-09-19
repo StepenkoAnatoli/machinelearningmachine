@@ -61,47 +61,6 @@ class EnvValueError(ValueError):
     """A numeric setting was given something that is not a usable number."""
 
 
-def checked_number(
-    value: object,
-    *,
-    label: str,
-    minimum: Optional[float] = None,
-    maximum: Optional[float] = None,
-) -> float:
-    """
-    Validate one numeric setting from any source (a flag, an environment variable).
-
-    Unlike a boolean flag, an unparseable number is refused rather than quietly
-    replaced: ``SESSION_TTL=5m`` silently falling back to 6 hours is a server that
-    is not configured the way its operator believes it is.
-    """
-    try:
-        parsed = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError) as exc:
-        raise EnvValueError(f"{label} must be a number, got {value!r}") from exc
-    if not math.isfinite(parsed):
-        raise EnvValueError(f"{label} must be a finite number, got {value!r}")
-    if minimum is not None and parsed < minimum:
-        raise EnvValueError(f"{label} must be at least {minimum:g}")
-    if maximum is not None and parsed > maximum:
-        raise EnvValueError(f"{label} must be at most {maximum:g}")
-    return parsed
-
-
-def number(
-    suffix: str,
-    *,
-    default: float,
-    minimum: Optional[float] = None,
-    maximum: Optional[float] = None,
-) -> float:
-    """A numeric setting from :func:`names_for`, or ``default`` when unset."""
-    raw = get(suffix)
-    if not raw:
-        return float(default)
-    return checked_number(raw, label=describe(suffix), minimum=minimum, maximum=maximum)
-
-
 def resolve_number(
     flag_value: Optional[object],
     suffix: str,
@@ -111,10 +70,30 @@ def resolve_number(
     minimum: Optional[float] = None,
     maximum: Optional[float] = None,
 ) -> float:
-    """The command-line flag wins, then the environment, then the default."""
-    if flag_value is not None:
-        return checked_number(flag_value, label=label, minimum=minimum, maximum=maximum)
-    return number(suffix, default=default, minimum=minimum, maximum=maximum)
+    """
+    One numeric setting: the command-line flag wins, then the environment, then the
+    default.
+
+    Unlike a boolean flag, an unparseable number is refused rather than quietly
+    replaced: ``SESSION_TTL=5m`` silently falling back to 6 hours is a server that
+    is not configured the way its operator believes it is.
+    """
+    if flag_value is None:
+        raw = get(suffix)
+        if not raw:
+            return float(default)
+        flag_value, label = raw, describe(suffix)
+    try:
+        parsed = float(flag_value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise EnvValueError(f"{label} must be a number, got {flag_value!r}") from exc
+    if not math.isfinite(parsed):
+        raise EnvValueError(f"{label} must be a finite number, got {flag_value!r}")
+    if minimum is not None and parsed < minimum:
+        raise EnvValueError(f"{label} must be at least {minimum:g}")
+    if maximum is not None and parsed > maximum:
+        raise EnvValueError(f"{label} must be at most {maximum:g}")
+    return parsed
 
 
 def string_list(suffix: str) -> List[str]:

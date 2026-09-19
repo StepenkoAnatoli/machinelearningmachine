@@ -26,15 +26,6 @@ class MessageType(str, Enum):
 MAX_CONTENT_LENGTH = 50_000
 MAX_TOPIC_LENGTH = 100
 
-#: Shown when a message had to be cut to fit the protocol limit. Kept next to the
-#: limit it guards, so every producer sees the same honest wording.
-TRUNCATION_NOTICE = (
-    "\n\n> ✂️ **Truncated:** the full text is {original} characters, which exceeds this "
-    "mesh's {limit}-character message limit. The {how} is shown. Nothing was saved "
-    "elsewhere - re-run with a shorter request if you need the rest."
-)
-
-
 def clamp_content(content: str, limit: int = MAX_CONTENT_LENGTH) -> Tuple[str, int]:
     """
     Fit ``content`` into ``limit`` characters, saying so when it did not fit.
@@ -48,16 +39,16 @@ def clamp_content(content: str, limit: int = MAX_CONTENT_LENGTH) -> Tuple[str, i
 
     Returns ``(text, dropped_characters)``.
     """
-    text = content if isinstance(content, str) else str(content)
-    if len(text) <= limit:
-        return text, 0
-    notice = TRUNCATION_NOTICE.format(original=len(text), limit=limit, how="beginning")
-    keep = max(0, limit - len(notice))
-    # Never keep less than half the budget just to make room for the notice.
-    if keep < limit // 2:
-        keep = max(0, limit - 80)
-        notice = f"\n\n> ✂️ **Truncated:** {len(text) - keep} of {len(text)} characters dropped."
-    return text[:keep].rstrip() + notice, len(text) - keep
+    if len(content) <= limit:
+        return content, 0
+    notice = (
+        f"\n\n> ✂️ **Truncated:** the full text is {len(content)} characters, which exceeds "
+        f"this mesh's {limit}-character message limit. The beginning is shown. Nothing was "
+        "saved elsewhere - re-run with a shorter request if you need the rest."
+    )
+    keep = limit - len(notice)
+    return content[:keep].rstrip() + notice, len(content) - keep
+
 
 class Message(BaseModel):
     # 12 hex characters (~10^14). The browser keys messages by this id, so a

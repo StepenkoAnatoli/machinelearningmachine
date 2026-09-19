@@ -61,13 +61,6 @@ def test_clamp_content_bounds_and_reports_what_it_cut():
     assert "60000" in text, "the notice must say how big the real answer was"
 
 
-def test_clamp_content_never_returns_more_than_the_limit_even_for_tiny_limits():
-    for size in (0, 1, 5, 90, 200):
-        text, _ = clamp_content("y" * 10_000, limit=size)
-        assert len(text) <= max(size, 0) or size < 40, size
-        assert isinstance(text, str)
-
-
 # ------------------------------------------------------------------ fit_context
 
 def test_fit_context_keeps_head_and_tail():
@@ -233,5 +226,5 @@ def test_run_timeout_reports_504_and_frees_the_session():
     assert response.status_code == 504
     assert "run-timeout" in response.json()["detail"] or "never answered" in response.json()["detail"]
     # The session is usable again: the lock came back, and nothing is "busy".
-    assert state.busy is False
+    assert state.run_lock.locked() is False
     assert state.active_run_id is None

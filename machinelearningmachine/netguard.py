@@ -328,8 +328,6 @@ def validate_provider_target(
     except ValueError as exc:  # e.g. "http://host:abc/"
         raise UnsafeURL("That base URL has an invalid port.", detail=str(exc)) from exc
     port = port if port is not None else (443 if scheme == "https" else 80)
-    if not (1 <= port <= 65535):  # pragma: no cover - urlparse already bounds it
-        raise UnsafeURL("That base URL has an invalid port.")
 
     allowed_hosts = {h.strip().lower().lstrip(".") for h in extra_allowed_hosts if h and h.strip()}
 
@@ -341,7 +339,7 @@ def validate_provider_target(
         allowlist is configured at all, so it cannot be used here: that would turn
         "the operator listed nothing" into "every address is a local backend".
         """
-        if any(name == entry or name.endswith("." + entry) for entry in allowed_hosts if entry):
+        if any(name == entry or name.endswith("." + entry) for entry in allowed_hosts):
             return True
         ambient = operator_allowlist()
         if ambient is None:
@@ -366,12 +364,12 @@ def validate_provider_target(
                 "Could not resolve that host - check the base URL.",
                 detail=str(exc.__class__.__name__),
             ) from exc
-        if host in _LOCAL_HOSTNAMES:
-            # "localhost" resolves to loopback on every normal machine, so treat
-            # the name as the address it stands for rather than resolving blindly.
-            if not allow_private and not _operator_listed(host):
-                raise UnsafeURL(_PRIVATE_TARGET_REASON)
-            addresses = addresses or ["127.0.0.1"]
+        if host in _LOCAL_HOSTNAMES and not addresses:
+            # "localhost" resolves to loopback on every normal machine. Where this
+            # one has no resolver entry for it, treat the name as the address it
+            # stands for: refusing here would break the documented Ollama setup,
+            # and the block check below still decides whether it may be dialled.
+            addresses = ["127.0.0.1"]
 
     if not addresses:
         raise UnsafeURL("That host does not resolve to an address.")

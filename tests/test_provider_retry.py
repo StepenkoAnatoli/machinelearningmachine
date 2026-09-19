@@ -17,6 +17,8 @@ What these tests pin:
 """
 
 
+import asyncio
+
 import pytest
 
 from machinelearningmachine.agents.providers import (
@@ -90,22 +92,7 @@ def _provider(cls=OpenAIProvider, **kwargs):
     return cls(**kwargs)
 
 
-@pytest.fixture
-def backoffs(monkeypatch):
-    """Record the wait between attempts instead of performing it."""
-    from machinelearningmachine.agents import providers
-
-    recorded = []
-
-    async def spy(delay: float) -> None:
-        assert 0 <= delay < 5, f"backoff grew past a sane bound: {delay}"
-        recorded.append(delay)
-
-    monkeypatch.setattr(providers, "_backoff_sleep", spy)
-    return recorded
-
-
-async def test_a_retryable_status_is_tried_again_and_the_answer_arrives(monkeypatch, backoffs):
+async def test_a_retryable_status_is_tried_again_and_the_answer_arrives(monkeypatch):
     calls = []
     monkeypatch.setattr(
         "machinelearningmachine.agents.providers._aiohttp",
@@ -120,7 +107,7 @@ async def test_a_retryable_status_is_tried_again_and_the_answer_arrives(monkeypa
     assert len(calls) == 2, "one retry, then success"
 
 
-async def test_attempts_are_reported_on_the_error_that_gives_up(monkeypatch, backoffs):
+async def test_attempts_are_reported_on_the_error_that_gives_up(monkeypatch):
     calls = []
     monkeypatch.setattr(
         "machinelearningmachine.agents.providers._aiohttp",
@@ -132,12 +119,15 @@ async def test_attempts_are_reported_on_the_error_that_gives_up(monkeypatch, bac
             system_prompt="s", messages=[{"role": "user", "content": "hi"}],
             agent_role="r", agent_name="GPT",
         )
-    assert exc.value.attempts == 2
-    assert "after 2 attempts" in exc.value.reason
+    err = exc.value
+    assert err.attempts == 2
+    assert "after 2 attempts" in err.reason
+    # ``str(exc)`` is what reaches the toast; ``reason`` is what reaches the transcript.
+    assert err.reason in str(err), f"{str(err)!r} does not carry {err.reason!r}"
     assert len(calls) == 2, "max_attempts is a total, not a per-failure budget"
 
 
-async def test_a_rejected_credential_is_not_retried(monkeypatch, backoffs):
+async def test_a_rejected_credential_is_not_retried(monkeypatch):
     """401 is permanent: retrying it only makes a bad key more visible."""
     calls = []
     monkeypatch.setattr(
@@ -152,10 +142,11 @@ async def test_a_rejected_credential_is_not_retried(monkeypatch, backoffs):
         )
     assert exc.value.retryable is False
     assert exc.value.attempts == 1
-    assert len(calls) == 1
+    assert "attempts" not in exc.value.reason
+    assert len(calls) == 1, "a 401 is not a reason to knock twice"
 
 
-async def test_connection_resets_are_treated_as_transient(monkeypatch, backoffs):
+async def test_connection_resets_are_treated_as_transient(monkeypatch):
     calls = []
     monkeypatch.setattr(
         "machinelearningmachine.agents.providers._aiohttp",
@@ -170,7 +161,7 @@ async def test_connection_resets_are_treated_as_transient(monkeypatch, backoffs)
     assert len(calls) == 2
 
 
-async def test_retrying_is_disabled_by_max_attempts_one(monkeypatch, backoffs):
+async def test_retrying_is_disabled_by_max_attempts_one(monkeypatch):
     calls = []
     monkeypatch.setattr(
         "machinelearningmachine.agents.providers._aiohttp",
@@ -185,7 +176,7 @@ async def test_retrying_is_disabled_by_max_attempts_one(monkeypatch, backoffs):
     assert len(calls) == 1
 
 
-async def test_an_unparseable_success_body_is_not_retried(monkeypatch, backoffs):
+async def test_an_unparseable_success_body_is_not_retried(monkeypatch):
     """The request worked; replaying it would double-bill a token-limited call."""
     calls = []
     monkeypatch.setattr(
@@ -202,7 +193,7 @@ async def test_an_unparseable_success_body_is_not_retried(monkeypatch, backoffs)
     assert len(calls) == 1
 
 
-async def test_anthropic_shares_the_policy(monkeypatch, backoffs):
+async def test_anthropic_shares_the_policy(monkeypatch):
     calls = []
     monkeypatch.setattr(
         "machinelearningmachine.agents.providers._aiohttp",
@@ -217,7 +208,7 @@ async def test_anthropic_shares_the_policy(monkeypatch, backoffs):
     assert len(calls) == 2
 
 
-async def test_the_degraded_message_says_the_provider_was_retried(monkeypatch, backoffs):
+async def test_the_degraded_message_says_the_provider_was_retried(monkeypatch):
     """
     Honesty rule: a fallback message must not hide that the server tried again.
     ``metadata.provider_attempts`` is what makes "we did retry" part of the record
@@ -238,57 +229,32 @@ async def test_the_degraded_message_says_the_provider_was_retried(monkeypatch, b
     assert "after 3 attempts" in meta["provider_error"]
 
 
-async def test_the_wait_between_attempts_actually_happens(monkeypatch, backoffs):
-    """A retry without a delay is a busy loop against a service that just said 429."""
+async def test_the_wait_between_attempts_actually_happens(monkeypatch):
+    """
+    A retry without a delay is a busy loop against a service that just said 429.
+
+    ``asyncio.sleep`` is patched here rather than the retry loop exposing a hook
+    for this: the only thing awaited inside ``provider.generate`` is the backoff,
+    so the delay can be measured exactly, and the test does not spend it.
+    """
     calls = []
+    waits = []
+
+    async def record(delay):
+        waits.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
     monkeypatch.setattr(
         "machinelearningmachine.agents.providers._aiohttp",
         lambda: fake_aiohttp([429, 200], calls),
     )
-    provider = OpenAIProvider(
-        api_key="sk-" + "k" * 30, base_url="http://127.0.0.1:1/v1",
-        retry_backoff=0.5, fallback_to_mock=False,
-    )
+    provider = _provider(retry_backoff=0.5)
     out = await provider.generate(
         system_prompt="s", messages=[{"role": "user", "content": "hi"}],
         agent_role="r", agent_name="GPT",
     )
     assert out == "recovered answer"
-    assert len(backoffs) == 1, backoffs
-    assert 0.5 <= backoffs[0] < 1.5, "the delay scales with the attempt and stays short"
+    assert len(calls) == 2, "one retry, then success"
+    assert len(waits) == 1, waits
+    assert 0.5 <= waits[0] < 1.5, "the delay scales with the attempt and stays short"
 
-
-async def test_the_message_and_the_reason_agree_about_the_attempts(monkeypatch, backoffs):
-    """``str(exc)`` is what reaches the toast; ``reason`` is what reaches the transcript."""
-    calls = []
-    monkeypatch.setattr(
-        "machinelearningmachine.agents.providers._aiohttp",
-        lambda: fake_aiohttp([503, 503], calls),
-    )
-    provider = OpenAIProvider(api_key="sk-" + "k" * 30, base_url="http://127.0.0.1:1/v1", fallback_to_mock=False)
-    with pytest.raises(ProviderError) as exc:
-        await provider.generate(
-            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
-            agent_role="r", agent_name="GPT",
-        )
-    err = exc.value
-    assert err.attempts == 2
-    assert "after 2 attempts" in err.reason
-    assert err.reason in str(err), f"{str(err)!r} does not carry {err.reason!r}"
-
-
-async def test_a_non_retryable_refusal_never_claims_retries(monkeypatch, backoffs):
-    calls = []
-    monkeypatch.setattr(
-        "machinelearningmachine.agents.providers._aiohttp",
-        lambda: fake_aiohttp([401], calls),
-    )
-    provider = OpenAIProvider(api_key="sk-" + "k" * 30, base_url="http://127.0.0.1:1/v1", fallback_to_mock=False)
-    with pytest.raises(ProviderError) as exc:
-        await provider.generate(
-            system_prompt="s", messages=[{"role": "user", "content": "hi"}],
-            agent_role="r", agent_name="GPT",
-        )
-    assert exc.value.attempts == 1
-    assert "attempts" not in exc.value.reason
-    assert len(calls) == 1, "a 401 is not a reason to knock twice"

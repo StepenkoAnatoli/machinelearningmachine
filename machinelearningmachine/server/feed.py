@@ -31,24 +31,10 @@ DEFAULT_MAX_QUEUE = 128
 #: How long one frame may take to leave before the peer is considered gone. A write
 #: that blocks past this is a dead or hostile client; the run must not care.
 DEFAULT_SEND_TIMEOUT = 10.0
-#: Report a dropped-frame backlog to the browser only once it has drained this far,
-#: so a briefly slow client is not told to re-fetch on every frame.
-_GAP_NOTICE_WATERMARK = 0.5
 
 
 class ClientFeed:
     """A bounded, non-blocking send queue for exactly one WebSocket connection."""
-
-    __slots__ = (
-        "_closed",
-        "_dropped",
-        "_gap_pending",
-        "_max_queue",
-        "_queue",
-        "_send_timeout",
-        "_task",
-        "websocket",
-    )
 
     def __init__(
         self,
@@ -125,9 +111,10 @@ class ClientFeed:
                         return
                 finally:
                     self._queue.task_done()
-                if self._gap_pending and self._queue.qsize() <= int(
-                    self._max_queue * _GAP_NOTICE_WATERMARK
-                ):
+                # Tell the browser about a dropped-frame backlog only once it has
+                # drained half way, so a briefly slow client is not told to
+                # re-fetch on every frame.
+                if self._gap_pending and self._queue.qsize() <= self._max_queue // 2:
                     count, self._gap_pending = self._gap_pending, 0
                     try:
                         self._queue.put_nowait({"type": "stream_gap", "dropped": count})

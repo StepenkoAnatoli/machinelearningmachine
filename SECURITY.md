@@ -128,7 +128,7 @@ Three consequences worth knowing:
 
 Two things in this project dial out to an address a caller chose: the page reader
 (`POST /api/read/url`) and the provider base URL (`POST /api/config`'s
-`openai_base_url` / `anthropic_base_url`, used by `{"verify": true}` and by every live
+`openai_base_url`, used by `{"verify": true}` and by every live
 run). Both are mediated by `machinelearningmachine/netguard.py`.
 
 The page reader is **off unless you pass `--enable-url-reader`**, and even then:

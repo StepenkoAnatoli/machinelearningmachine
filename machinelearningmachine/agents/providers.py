@@ -22,6 +22,7 @@ import logging
 import os
 import random
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from .._deps import install_hint
 
@@ -73,22 +74,6 @@ class ProviderError(RuntimeError):
         #: ``--strict-provider-errors``, the whole run).
         self.attempts = max(1, int(attempts))
 
-    def exhausted_retries(self) -> "ProviderError":
-        """
-        Record that the retry budget was spent, in the message as well as in
-        ``reason``.
-
-        Two separate strings describing one failure is how a user ends up with
-        "timed out" in the transcript and "timed out (after 2 attempts)" in the log,
-        so both are rewritten here, once, at the point where the number is known.
-        """
-        if self.attempts > 1 and self.retryable:
-            self.reason = f"{self.reason} (after {self.attempts} attempts)"
-            self.args = (
-                f"{self.provider}: {self.reason}" + (f" [{self.detail}]" if self.detail else ""),
-            )
-        return self
-
 
 def _aiohttp():
     """
@@ -111,12 +96,6 @@ DEFAULT_MAX_ATTEMPTS = 2
 DEFAULT_RETRY_BACKOFF = 0.5
 #: Seconds an HTTP call may take before the provider is considered unreachable.
 DEFAULT_REQUEST_TIMEOUT = 60.0
-
-
-async def _backoff_sleep(delay: float) -> None:
-    """The single await between attempts. A seam for tests, and nothing more."""
-    if delay > 0:
-        await asyncio.sleep(delay)
 
 
 class BaseLLMProvider:
@@ -144,11 +123,10 @@ class BaseLLMProvider:
 
 async def post_for_json(
     *,
-    provider: Any,
+    provider: BaseLLMProvider,
     url: str,
     headers: Dict[str, str],
     payload: Dict[str, Any],
-    host_label: str,
 ) -> Dict[str, Any]:
     """
     POST ``payload`` as JSON and hand back the parsed body, retrying transient failures.
@@ -165,10 +143,10 @@ async def post_for_json(
       API key is never part of either.
     """
     aiohttp = _aiohttp()
-    attempts = max(1, int(getattr(provider, "max_attempts", DEFAULT_MAX_ATTEMPTS) or 1))
-    backoff = float(getattr(provider, "retry_backoff", DEFAULT_RETRY_BACKOFF) or 0.0)
-    timeout = float(getattr(provider, "timeout", DEFAULT_REQUEST_TIMEOUT) or DEFAULT_REQUEST_TIMEOUT)
-    last_error: Optional[ProviderError] = None
+    attempts = provider.max_attempts
+    backoff = provider.retry_backoff
+    timeout = provider.timeout
+    last_error: ProviderError
 
     for attempt in range(1, attempts + 1):
         try:
@@ -204,7 +182,7 @@ async def post_for_json(
             logger.error("%s request failed: %s", provider.label, exc)
             last_error = ProviderError(
                 provider.label,
-                f"could not reach {host_label}",
+                f"could not reach {urlparse(url).netloc or url}",
                 detail=str(exc)[:200],
                 retryable=True,
                 attempts=attempt,
@@ -228,15 +206,25 @@ async def post_for_json(
                 retryable=isinstance(exc, OSError),
                 attempts=attempt,
             )
-        if last_error is not None and last_error.retryable and attempt < attempts:
+        if last_error.retryable and attempt < attempts:
             # Jitter so parallel agents do not retry in lockstep. Not a
             # security-relevant use of random(): a fixed delay would be a
             # worse request, not an unsafe one.
-            await _backoff_sleep(backoff * attempt + random.uniform(0, backoff))  # noqa: S311
+            delay = backoff * attempt + random.uniform(0, backoff)  # noqa: S311
+            if delay > 0:
+                await asyncio.sleep(delay)
             continue
-        if last_error is not None:
-            raise last_error.exhausted_retries()
-        raise AssertionError("post_for_json exited without a result or an error")  # pragma: no cover
+        if last_error.attempts > 1 and last_error.retryable:
+            # Say how hard the provider was tried in ``args`` as well as in
+            # ``reason``: two strings describing one failure is how a user ends up
+            # with "timed out" in the transcript and "timed out (after 2 attempts)"
+            # in the log.
+            last_error.reason = f"{last_error.reason} (after {last_error.attempts} attempts)"
+            last_error.args = (
+                f"{last_error.provider}: {last_error.reason}"
+                + (f" [{last_error.detail}]" if last_error.detail else ""),
+            )
+        raise last_error
 
 
 class MockLLMProvider(BaseLLMProvider):
@@ -779,7 +767,8 @@ class OpenAIProvider(BaseLLMProvider):
         # base URL must never pick up the operator's ambient credential, or pointing
         # the config at an attacker host turns into stealing that key.
         self.allow_env_key = bool(allow_env_key)
-        self.api_key = (api_key or (self._env_key() if self.allow_env_key else "") or "").strip()
+        env_key = os.environ.get("OPENAI_API_KEY", "") if self.allow_env_key else ""
+        self.api_key = (api_key or env_key).strip()
         self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
         self.model = model
         #: When False, provider problems raise :class:`ProviderError` instead of
@@ -788,17 +777,6 @@ class OpenAIProvider(BaseLLMProvider):
         self.timeout = float(timeout)
         self.max_attempts = max(1, int(max_attempts))
         self.retry_backoff = max(0.0, float(retry_backoff))
-
-    @staticmethod
-    def _env_key() -> str:
-        return os.environ.get("OPENAI_API_KEY", "")
-
-    @staticmethod
-    def _host_label(base_url: str) -> str:
-        from urllib.parse import urlparse
-
-        parsed = urlparse(base_url)
-        return f"{parsed.netloc or base_url}"
 
     async def _simulate(self, system_prompt, messages, agent_role, agent_name, task_context, reason: str) -> str:
         """Simulator answer, explicitly labelled as *not* an OpenAI answer."""
@@ -840,10 +818,7 @@ class OpenAIProvider(BaseLLMProvider):
         }
 
         # A truncated answer is still an answer, but it must never *look* complete.
-        data = await post_for_json(
-            provider=self, url=url, headers=headers, payload=payload,
-            host_label=self._host_label(self.base_url),
-        )
+        data = await post_for_json(provider=self, url=url, headers=headers, payload=payload)
 
         try:
             content = data["choices"][0]["message"]["content"]
@@ -861,8 +836,6 @@ class AnthropicProvider(BaseLLMProvider):
 
     label = "Anthropic"
 
-    ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
-
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -872,26 +845,16 @@ class AnthropicProvider(BaseLLMProvider):
         timeout: float = DEFAULT_REQUEST_TIMEOUT,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         retry_backoff: float = DEFAULT_RETRY_BACKOFF,
-        base_url: Optional[str] = None,
     ):
         self.allow_env_key = bool(allow_env_key)
-        self.api_key = (
-            api_key
-            or (os.environ.get("ANTHROPIC_API_KEY", "") if self.allow_env_key else "")
-            or ""
-        ).strip()
+        env_key = os.environ.get("ANTHROPIC_API_KEY", "") if self.allow_env_key else ""
+        self.api_key = (api_key or env_key).strip()
         self.model = model
         self.fallback_to_mock = fallback_to_mock
         self.timeout = float(timeout)
         self.max_attempts = max(1, int(max_attempts))
         self.retry_backoff = max(0.0, float(retry_backoff))
-        self.base_url = (base_url or self.ANTHROPIC_BASE_URL).rstrip("/")
-
-    @property
-    def host_label(self) -> str:
-        from urllib.parse import urlparse
-
-        return urlparse(self.base_url).netloc or self.base_url
+        self.base_url = "https://api.anthropic.com/v1"
 
     async def _simulate(self, system_prompt, messages, agent_role, agent_name, task_context, reason: str) -> str:
         if not self.fallback_to_mock:
@@ -915,9 +878,11 @@ class AnthropicProvider(BaseLLMProvider):
             )
 
         url = f"{self.base_url}/messages"
-        headers = {"anthropic-version": "2023-06-01", "content-type": "application/json"}
-        if self.api_key:
-            headers["x-api-key"] = self.api_key
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
 
         # Filter out system message and format for Anthropic
         anthropic_msgs = []
@@ -935,10 +900,7 @@ class AnthropicProvider(BaseLLMProvider):
             "max_tokens": 2048,
         }
 
-        data = await post_for_json(
-            provider=self, url=url, headers=headers, payload=payload,
-            host_label=self.host_label,
-        )
+        data = await post_for_json(provider=self, url=url, headers=headers, payload=payload)
 
         blocks = data.get("content") or [] if isinstance(data, dict) else []
         texts = [b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"]

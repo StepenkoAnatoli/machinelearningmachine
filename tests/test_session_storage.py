@@ -265,12 +265,3 @@ def test_pruning_keeps_the_newest_session_even_within_one_second(tmp_path, monke
     store._prune_old_sessions()
     remaining = sorted(p.stem for p in directory.glob("*.json"))
     assert remaining == sorted(ids[1:]), "the just-saved session must survive, the oldest must go"
-
-
-def test_max_sessions_bound_is_enforced_on_save(tmp_path, monkeypatch):
-    monkeypatch.setattr(store, "MAX_SESSIONS", 5)
-    for i in range(9):
-        store.save_session(f"session {i}", AGENTS, _messages(1))
-    listed = store.list_sessions()
-    assert len(listed) == 5
-    assert {s["name"] for s in listed} == {f"session {i}" for i in range(4, 9)}

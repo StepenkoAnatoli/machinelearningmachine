@@ -59,11 +59,9 @@ META_HEAD_BYTES = 4096
 #: Anything that does not match this shape - a hand-edited file, an older layout -
 #: falls back to a full parse, so the fast path is an optimisation, never a
 #: correctness assumption.
-_CREATED_AT = re.compile(r'"created_at": (-?\d+(?:\.\d+)?)')
-
 _HEAD_META = re.compile(
     r'^\{"id": "(?P<id>(?:[^"\\]|\\.)*)", "version": \d+, "name": "(?P<name>(?:[^"\\]|\\.)*)", '
-    r'"created_at": -?\d+(?:\.\d+)?, "message_count": (?P<count>\d+)'
+    r'"created_at": (?P<created>-?\d+(?:\.\d+)?), "message_count": (?P<count>\d+)'
 )
 
 #: Saved sessions can be split into per-client sub-directories ("namespaces"),
@@ -296,21 +294,11 @@ def _head_meta(path: Path) -> Optional[Dict[str, Any]]:
         name = json.loads(f'"{match.group("name")}"')
     except (json.JSONDecodeError, ValueError):
         return None
-    created = _CREATED_AT.search(head)
-    if created is None:
-        # The prefix ended mid-number (or the file was written by an older build).
-        # Nothing is lost by asking the filesystem instead of the document.
-        try:
-            stamp = path.stat().st_mtime
-        except OSError:
-            return None
-    else:
-        stamp = float(created.group(1))
     return _meta(
         session_id,
         name or path.stem,
         int(match.group("count")),
-        stamp,
+        float(match.group("created")),
         trimmed='"trimmed": true' in head,
     )
 
