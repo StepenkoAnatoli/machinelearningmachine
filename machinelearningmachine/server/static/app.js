@@ -729,6 +729,20 @@ document.addEventListener("DOMContentLoaded", () => {
     return false;
   }
 
+  /** Select an element's text, so the user's own Ctrl+C can take it from there. */
+  function selectElementText(el) {
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const selection = window.getSelection();
+      if (!selection) return;
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } catch (e) {
+      /* selecting is a courtesy - its failure must never read as a copy failure */
+    }
+  }
+
   /** Hand text back in the prompt box, selected, as a one-keystroke manual copy. */
   function offerPromptInBox(text) {
     if (!inputPrompt) return;
@@ -1599,7 +1613,10 @@ document.addEventListener("DOMContentLoaded", () => {
             copyBtn.innerHTML = '<i class="fa-regular fa-copy" aria-hidden="true"></i> Copy';
           }, 2000);
         } else {
-          showToast("Failed to copy code", "error");
+          // No clipboard here (plain http://): hand the user the selection rather
+          // than a dead end - their own Ctrl+C is then one keystroke away.
+          selectElementText(block);
+          showToast("Couldn't reach the clipboard - the code is selected, press Ctrl+C.", "warning", 5000);
         }
       });
       pre.appendChild(copyBtn);

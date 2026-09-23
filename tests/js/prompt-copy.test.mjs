@@ -46,9 +46,9 @@ const opened = [];
  * clipboard), "denied" (the API exists but rejects - a non-secure context or a
  * refused permission), or "absent" (plain http:// on a browser without it).
  */
-async function loadClient({ clipboard = "api" } = {}) {
+async function loadClient({ clipboard = "api", vendor = false } = {}) {
   const html = HTML.replace(/<script[^>]*\ssrc=[^>]*><\/script>/gi, "").replace(/<link[^>]*>/gi, "");
-  const calls = { fetch: [], clipboard: [] };
+  const calls = { fetch: [], clipboard: [], sockets: [] };
 
   const dom = new JSDOM(html, {
     url: "http://127.0.0.1:8000/",
@@ -69,11 +69,17 @@ async function loadClient({ clipboard = "api" } = {}) {
         constructor(url) {
           this.url = url;
           this.readyState = 1;
-
+          calls.sockets.push(this);
+          // Deliver onopen asynchronously, like a browser handing over later.
+          win.setTimeout(() => this.onopen && this.onopen({}), 0);
         }
         send() {}
         close() {
           this.readyState = 3;
+          this.onclose && this.onclose({ code: 1000 });
+        }
+        emit(payload) {
+          this.onmessage && this.onmessage({ data: JSON.stringify(payload) });
         }
       }
       win.WebSocket = FakeSocket;
@@ -116,6 +122,12 @@ async function loadClient({ clipboard = "api" } = {}) {
       }
       // "absent": jsdom's default - no navigator.clipboard at all.
 
+      // The code-block tests need fenced markdown to become a real <pre><code>
+      // with a copy button; the others read textContent and stay cheap.
+      if (vendor) {
+        win.eval(read(join(staticDir, "vendor", "marked", "marked.min.js")));
+        win.eval(read(join(staticDir, "vendor", "dompurify", "purify.min.js")));
+      }
       win.eval(read(join(staticDir, "markdown.js")));
       win.eval(read(join(staticDir, "app.js")));
     },
@@ -123,7 +135,7 @@ async function loadClient({ clipboard = "api" } = {}) {
   opened.push(dom);
   const win = dom.window;
   for (let i = 0; i < 12; i++) await new Promise((r) => win.setTimeout(r, 0));
-  return { win, calls };
+  return { win, calls, socket: () => calls.sockets[calls.sockets.length - 1] };
 }
 
 /**
@@ -344,3 +356,72 @@ test("prompt copy: the clipboard is touched from exactly one place in the client
     "it must be async: writeText returns a promise");
 });
 
+/*
+ * The code-block copy button (the `pre code` blocks inside replies) shared the
+ * same flaw: it called `navigator.clipboard.writeText` directly, so over plain
+ * http:// - where that API does not exist - every click answered "Failed to copy
+ * code" and copied nothing. It has no textarea to fall back into, but it does
+ * have a selection: select the code and say so.
+ */
+const CODE_REPLY = "Here is the implementation:\n\n```python\nimport threading\n\nclass RateLimiter:\n    pass\n```\n";
+
+/** A reply carrying one fenced code block, as the server would deliver it. */
+async function withCodeReply({ clipboard = "api" } = {}) {
+  const { win, calls, socket } = await loadClient({ clipboard, vendor: true });
+  socket().emit({ type: "init", authenticated: true, agents: [], history: [], limits: {}, flags: {} });
+  socket().emit({
+    type: "new_message",
+    run_id: "run-1",
+    message: {
+      id: "m1",
+      sender_id: "gpt",
+      sender_name: "GPT-6 Astra",
+      recipient_id: "*",
+      topic: "general",
+      message_type: "answer",
+      content: CODE_REPLY,
+      artifacts: {},
+      metadata: {},
+      timestamp: 1700000000,
+    },
+  });
+  await settle(win, 12);
+  const btn = win.document.querySelector("#messagesContainer .btn-copy-code");
+  assert.ok(btn, "the reply rendered a code block with its copy button");
+  return { win, calls, btn, code: win.document.querySelector("#messagesContainer pre code") };
+}
+
+test("code block: a working clipboard still copies the block and says so", async () => {
+  const { win, calls, btn, code } = await withCodeReply();
+  btn.click();
+  await settle(win);
+
+  assert.deepEqual(calls.clipboard, [code.innerText], "the block's text reaches the clipboard");
+  assert.match(btn.textContent, /copied/i, "and the button reports it on itself");
+  assert.ok(hasToast(win, /code copied to clipboard/i), JSON.stringify(toasts(win)));
+});
+
+test("code block: without a clipboard it selects the code instead of pretending to fail", async () => {
+  const { win, btn, code, calls } = await withCodeReply({ clipboard: "absent" });
+  assert.equal(win.navigator.clipboard, undefined, "plain http://, where the API is missing");
+
+  btn.click();
+  await settle(win);
+
+  assert.deepEqual(calls.clipboard, [], "nothing was copied, and nothing claims otherwise");
+  assert.match(String(win.getSelection()), /class RateLimiter/, "the code is selected, so Ctrl+C is one keystroke");
+  assert.ok(hasToast(win, /couldn't reach the clipboard/i),
+    `the reason is stated: ${JSON.stringify(toasts(win))}`);
+  assert.ok(!hasToast(win, /^Failed to copy code$/i), "not the old dead-end error");
+  assert.ok(!hasToast(win, /code copied to clipboard/i), "and never a false success");
+});
+
+test("code block: a denied clipboard degrades the same way", async () => {
+  const { win, btn } = await withCodeReply({ clipboard: "denied" });
+
+  btn.click();
+  await settle(win);
+
+  assert.match(String(win.getSelection()), /class RateLimiter/);
+  assert.ok(hasToast(win, /couldn't reach the clipboard/i), JSON.stringify(toasts(win)));
+});
