@@ -379,3 +379,43 @@ def test_the_icons_are_served_from_the_static_mount():
         response = client.get(f"/static/icons/{name}")
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("image/png")
+
+
+# --------------------------------------------------------------------------- #
+# the head: what the browser reads the moment it opens the page
+# --------------------------------------------------------------------------- #
+def _head() -> str:
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    return html[: html.index("</head>")]
+
+
+def test_the_head_wires_the_install_assets():
+    head = _head()
+    assert 'rel="manifest"' in head and "/manifest.webmanifest" in head, (
+        "without the manifest link the browser never offers to install the dashboard"
+    )
+    assert 'rel="apple-touch-icon"' in head and "/static/icons/apple-touch-icon.png" in head, (
+        "iOS icons come from this link, not from the manifest"
+    )
+    assert 'rel="icon"' in head and "/favicon.ico" in head, "the tab icon is a real file now"
+
+
+def test_the_favicon_is_a_file_not_a_font_dependent_data_uri():
+    """
+    The old inline favicon was an SVG containing the text "⚡": it rendered in
+    whatever emoji font the OS happened to have, and nothing could test, cache or
+    serve it. The drawn mark replaced it, and this keeps it replaced.
+    """
+    head = _head()
+    assert "data:image/svg+xml" not in head, "the tab icon should come from static/icons/icon.svg or favicon.ico"
+    assert "/static/icons/icon.svg" in head or "/static/icons/icon-192.png" in head, (
+        "the crisp icon should be declared for browsers that take an SVG or a PNG"
+    )
+
+
+def test_every_icon_the_head_references_exists():
+    import re
+
+    for ref in re.findall(r'(?:href)="(/(?:static/)?[^"]+\.(?:png|ico|svg|webmanifest))"', _head()):
+        path = STATIC / ref.replace("/static/", "").lstrip("/")
+        assert path.is_file(), f"the head references a missing file: {ref}"

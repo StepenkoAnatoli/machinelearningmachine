@@ -172,7 +172,7 @@ def test_user_centered_design_agrees_runs_queue():
     assert "waits its turn in a bounded per-session queue" in ucd
 
 
-def test_readme_test_listing_counts_are_true():
+def test_readme_test_listing_counts_are_true(request):
     # D24: the tests/ tree said "9 tests" for a 17-test suite, omitted the
     # run-control suites, and the jsdom how-to line said 24 for 32.
     counts = _jsdom_counts()
@@ -187,6 +187,18 @@ def test_readme_test_listing_counts_are_true():
     claimed_total = re.search(r"(\d+) jsdom browser tests", howto)
     assert claimed_total, "README should state the jsdom total where it shows the command"
     assert int(claimed_total.group(1)) == sum(counts.values())
+    # The same "how to run it" block shows the pytest command with a count beside
+    # it, and that number had rotted to 476 while the real suite was nearer 500:
+    # a reader checking "how many tests are there" got an answer that was wrong by
+    # a whole release. Pinned the same way as the jsdom one.
+    pytest_line = next(line for line in README.splitlines() if line.strip().startswith("pytest -q"))
+    python_claimed = re.search(r"(\d+) tests", pytest_line)
+    assert python_claimed, f"README should state the pytest total beside the command: {pytest_line!r}"
+    actual_total = request.session.testscollected if hasattr(request, "session") else None
+    if actual_total and actual_total >= 100:
+        assert int(python_claimed.group(1)) == actual_total, (
+            f"README claims {python_claimed.group(1)} pytest tests, collected {actual_total}"
+        )
     # Which suites the tree names is pinned by test_readme_test_tree_lists_every_suite.
 
 

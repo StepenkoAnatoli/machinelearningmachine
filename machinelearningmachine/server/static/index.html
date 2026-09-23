@@ -21,7 +21,16 @@
   <script src="/static/vendor/dompurify/purify.min.js" defer></script>
   <script src="/static/vendor/highlight.js/highlight.min.js" defer></script>
   <script src="/static/markdown.js" defer></script>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <!--
+    App identity: the crisp drawn mark for browsers that take an SVG, the
+    generated ICO for everything else, the iOS home-screen icon, and the manifest
+    that makes the dashboard installable. All four are files served from this
+    origin (static/icons/icon.svg is their source - scripts/make_icons.py).
+  -->
+  <link rel="icon" type="image/svg+xml" href="/static/icons/icon.svg">
+  <link rel="icon" href="/favicon.ico" sizes="32x32">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased">
