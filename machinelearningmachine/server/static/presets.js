@@ -307,6 +307,70 @@
       .join("");
   }
 
+  /** Canonical file shape (spec §4.2 field order) — a whitelist-copy, so an
+   *  export can never write a key the format does not define. */
+  function filePreset(preset) {
+    return {
+      schema: PRESET_SCHEMA,
+      label: preset.label,
+      agent_id: preset.agent_id,
+      name: preset.name,
+      role: preset.role,
+      system_prompt: preset.system_prompt,
+      color: preset.color,
+      avatar: preset.avatar,
+    };
+  }
+
+  /** Pretty-printed + trailing newline (spec §5.4): human-diffable, and
+   *  exactly what the import gate expects to read back. */
+  function encodePreset(preset) {
+    return JSON.stringify(filePreset(preset), null, 2) + "\n";
+  }
+
+  function encodeLibrary(list) {
+    return JSON.stringify({ schema: LIB_SCHEMA, presets: list.map(filePreset) }, null, 2) + "\n";
+  }
+
+  /** File-name slug (spec §5.4): lowercase, every non-[a-z0-9] run → one dash,
+   *  trimmed, ≤ 40 chars, 'preset' when nothing survives. */
+  function slugify(label) {
+    var s = String(label)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40)
+      .replace(/-+$/g, ""); // a dash stranded by the cap would read as a typo
+    return s || "preset";
+  }
+
+  function exportName(label) {
+    return "preset-" + slugify(label) + ".json";
+  }
+
+  function libraryExportName(when) {
+    // Duck-typed, not `instanceof`: callers may pass a Date from another realm
+    // (jsdom tests do) and that must still stamp *their* date.
+    var d = when && typeof when.getFullYear === "function" ? when : new Date();
+    function pad(n) {
+      return (n < 10 ? "0" : "") + n;
+    }
+    return "agent-presets-" + d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + ".json";
+  }
+
+  /** Production download: Blob + anchor, no network, no navigation (spec §4.4). */
+  function downloadFile(filename, text) {
+    var blob = new Blob([text], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   // Per-page save-as-preset wiring (the button is static markup: one listener,
   // latest callbacks/store swapped in on each mount).
   var saveState = null;
@@ -326,6 +390,7 @@
     var fillForm = typeof options.fillForm === "function" ? options.fillForm : null;
     var getFormData = typeof options.getFormData === "function" ? options.getFormData : null;
     var toast = typeof options.toast === "function" ? options.toast : null;
+    var download = typeof options.download === "function" ? options.download : downloadFile;
     var chips = typeof document === "object" ? document.getElementById("presetChips") : null;
     if (!chips || !fillForm) {
       return false;
@@ -345,12 +410,43 @@
     var manager = document.getElementById("presetManager");
     var badge = document.getElementById("presetManagerBadge");
     var emptyMsg = document.getElementById("presetManagerEmpty");
+    var exportAllBtn = document.getElementById("btnPresetExportAll");
     var managerOpen = false;
 
     function loadPreset(preset) {
       fillForm(six(preset));
       if (toast) {
         toast("Loaded preset: " + preset.label, "info", 2000);
+      }
+    }
+
+    /** Hand one file to the download seam; a blocked browser is a toast, never
+     *  a throw, and the library is untouched either way (spec §5.5). */
+    function saveFile(filename, text) {
+      try {
+        download(filename, text);
+      } catch (e) {
+        if (toast) {
+          toast("Couldn't export that file.", "error", 4000);
+        }
+        return false;
+      }
+      return true;
+    }
+
+    function exportOne(preset) {
+      if (saveFile(exportName(preset.label), encodePreset(preset)) && toast) {
+        toast("Exported '" + preset.label + "'.", "success", 2500);
+      }
+    }
+
+    function exportAll() {
+      var list = store.load();
+      if (!list.length) {
+        return; // the button is disabled while empty; belt and braces
+      }
+      if (saveFile(libraryExportName(new Date()), encodeLibrary(list)) && toast) {
+        toast(list.length === 1 ? "Exported 1 preset." : "Exported " + list.length + " presets.", "success", 2500);
       }
     }
 
@@ -466,11 +562,19 @@
         'Delete preset "' + preset.label + '"',
         "fa-solid fa-trash-can",
       );
+      var exportBtn = makeButton(
+        "preset-act preset-export",
+        'Export preset "' + preset.label + '"',
+        "fa-solid fa-download",
+      );
       loadBtn.addEventListener("click", function () {
         loadPreset(preset);
       });
       renameBtn.addEventListener("click", function () {
         startRename(row, preset);
+      });
+      exportBtn.addEventListener("click", function () {
+        exportOne(preset);
       });
       delBtn.addEventListener("click", function () {
         var res = store.deleteByLabel(preset.label);
@@ -484,6 +588,7 @@
       });
       actions.appendChild(loadBtn);
       actions.appendChild(renameBtn);
+      actions.appendChild(exportBtn);
       actions.appendChild(delBtn);
 
       row.appendChild(info);
@@ -494,21 +599,24 @@
     /** Rebuild rows, badge and empty state from the store (single source of
      *  truth: localStorage — nothing is cached in this closure). */
     function renderManager() {
+      var list = store.load();
+      if (badge) {
+        badge.textContent = "Saved presets (" + list.length + ")";
+      }
+      if (exportAllBtn) {
+        exportAllBtn.disabled = list.length === 0; // nothing to export yet
+      }
+      if (emptyMsg) {
+        emptyMsg.hidden = !managerOpen || list.length > 0;
+      }
       if (!manager) {
         return;
       }
-      var list = store.load();
       manager.textContent = ""; // textContent discipline: nothing is parsed
       list.forEach(function (preset) {
         manager.appendChild(makeRow(preset));
       });
       manager.hidden = !managerOpen;
-      if (badge) {
-        badge.textContent = "Saved presets (" + list.length + ")";
-      }
-      if (emptyMsg) {
-        emptyMsg.hidden = !managerOpen || list.length > 0;
-      }
     }
 
     function setManagerOpen(next) {
@@ -604,25 +712,31 @@
       saveState.afterSave = renderManager;
     }
 
-    // Manager disclosure (spec §6.2 flow 3): collapsed by default so the common
-    // path stays short; the badge shows the count either way. Static markup, so
-    // one listener per page that delegates to the latest mount.
-    if (disclosure && manager) {
-      if (!managerState) {
-        managerState = { toggle: null };
+    // Manager disclosure + Export-all (spec §6.2 flows 3–4): static markup, so
+    // one listener per page that delegates to the latest mount. The row stays
+    // visible whether the manager is open or closed.
+    if (!managerState) {
+      managerState = { toggle: null, exportAll: null };
+      if (disclosure) {
         disclosure.addEventListener("click", function () {
           if (managerState.toggle) {
             managerState.toggle();
           }
         });
       }
-      managerState.toggle = function () {
-        setManagerOpen(!managerOpen);
-      };
-      setManagerOpen(false);
-    } else {
-      renderManager();
+      if (exportAllBtn) {
+        exportAllBtn.addEventListener("click", function () {
+          if (managerState.exportAll) {
+            managerState.exportAll();
+          }
+        });
+      }
     }
+    managerState.toggle = function () {
+      setManagerOpen(!managerOpen); // collapsed by default; badge shows the count
+    };
+    managerState.exportAll = exportAll;
+    setManagerOpen(false);
     return true;
   }
 
@@ -850,6 +964,10 @@
     validatePreset: validatePreset,
     uniqueLabel: uniqueLabel,
     createStore: createStore,
+    encodePreset: encodePreset,
+    encodeLibrary: encodeLibrary,
+    exportName: exportName,
+    libraryExportName: libraryExportName,
     mount: mount,
   };
 })();

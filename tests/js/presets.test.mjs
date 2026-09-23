@@ -365,6 +365,9 @@ function mountFixture() {
             <button type="button" id="btnPresetManager" aria-expanded="false" aria-controls="presetManager">
               <span id="presetManagerBadge">Saved presets (0)</span>
             </button>
+            <button type="button" id="btnPresetExportAll" disabled aria-label="Export all saved presets">
+              <span>Export all</span>
+            </button>
           </div>
           <div id="presetManager" role="list" aria-label="Saved presets" hidden></div>
           <p id="presetManagerEmpty" hidden>No saved presets yet — fill the form and hit 'Save as preset'.</p>
@@ -382,7 +385,7 @@ function mountFixture() {
   win.eval(read(join(staticDir, "presets.js")));
   const doc = win.document;
   const storage = fakeStorage();
-  const calls = { fill: [], toast: [], submit: 0 };
+  const calls = { fill: [], toast: [], submit: 0, download: [] };
   doc.getElementById("formAddAgent").addEventListener("submit", (e) => {
     e.preventDefault();
     calls.submit += 1;
@@ -457,12 +460,14 @@ function mountFixture() {
     labelOf(row) {
       return row.querySelector(".preset-row-label").textContent;
     },
-    start() {
+    start(over = {}) {
       return win.MLMPresets.mount({
         getFormData: fields,
         fillForm: (p) => calls.fill.push(p),
         toast: (...a) => calls.toast.push(a),
+        download: (name, text) => calls.download.push([name, text]),
         storage,
+        ...over,
       });
     },
   };
@@ -578,6 +583,12 @@ test("index.html wires the presets seam (sync script before app.js, container ab
     html.includes("No saved presets yet — fill the form and hit 'Save as preset'."),
     "the empty-state copy is the spec's, verbatim",
   );
+  const exportAt = html.indexOf('id="btnPresetExportAll"');
+  assert.ok(exportAt !== -1 && exportAt < formAt, "Export-all sits on the disclosure row");
+  const exportTag = html.slice(html.lastIndexOf("<button", exportAt), html.indexOf(">", exportAt) + 1);
+  assert.ok(exportTag.includes('type="button"'), "Export-all can never submit the form");
+  assert.ok(exportTag.includes("disabled"), "Export-all starts disabled (empty library)");
+  assert.ok(exportTag.includes('aria-label="Export all saved presets"'), "Export-all is labelled");
 });
 
 // ------------------------------------------------------- store (localStorage)
@@ -1050,4 +1061,123 @@ test("manager: hostile labels render inert and never touch style attributes", ()
   assert.equal(row.querySelectorAll("[style]").length, 0, "no inline styles from presets");
   const input = (row.querySelector(".preset-rename").click(), fx.doc.getElementById("presetManager").querySelector(".preset-rename-input"));
   assert.equal(input.value, evil, "the rename input carries the raw label, unsanitized and inert");
+});
+
+// ------------------------------------------------------------------- export
+
+test("export: single preset file is the spec's pretty-printed object, nothing else", () => {
+  const fx = mountFixture();
+  const preset = {
+    label: "My DBA kit",
+    agent_id: "my-dba-kit",
+    name: "My DBA kit",
+    role: "DBA",
+    system_prompt: "You are a careful DBA.",
+    color: "#0ea5e9",
+    avatar: "🧩",
+    evil: "should never be written",
+  };
+  assert.equal(
+    fx.win.MLMPresets.encodePreset(preset),
+    `{
+  "schema": "mlm-agent-preset/1",
+  "label": "My DBA kit",
+  "agent_id": "my-dba-kit",
+  "name": "My DBA kit",
+  "role": "DBA",
+  "system_prompt": "You are a careful DBA.",
+  "color": "#0ea5e9",
+  "avatar": "🧩"
+}
+`,
+  );
+});
+
+test("export: library file wraps self-describing entries and round-trips losslessly", () => {
+  const fx = mountFixture();
+  fx.seed(["My DBA kit", "Sec review kit"]);
+  const stored = fx.readStore(); // exactly what the library holds
+  const text = fx.win.MLMPresets.encodeLibrary(stored);
+  assert.ok(text.endsWith("\n"), "trailing newline");
+  const data = native(JSON.parse(text));
+  assert.deepEqual(Object.keys(data), ["schema", "presets"]);
+  assert.equal(data.schema, "mlm-agent-preset-lib/1");
+  assert.equal(data.presets.length, 2);
+  for (const entry of data.presets) {
+    assert.equal(entry.schema, "mlm-agent-preset/1", "every entry stays self-describing");
+    for (const [key, value] of Object.entries(entry)) {
+      assert.equal(typeof value, "string", `${key} must be a string (no numbers, no nesting)`);
+    }
+  }
+  // Round-trip: parse → validate each → deep-equal what the library held
+  // (criterion #2). Both sides carry their own `schema` — nothing is lost.
+  const back = data.presets.map((raw) => {
+    const res = fx.win.MLMPresets.validatePreset(raw);
+    assert.equal(res.ok, true, JSON.stringify(res));
+    return native(res.value);
+  });
+  assert.deepEqual(back, stored);
+});
+
+test("export: filenames follow the slug rules (§5.4)", () => {
+  const { exportName, libraryExportName } = mountFixture().win.MLMPresets;
+  assert.equal(exportName("Security Auditor"), "preset-security-auditor.json");
+  assert.equal(exportName("🧩 Küt/Kit  v2!"), "preset-k-t-kit-v2.json", "unicode runs collapse to one dash");
+  assert.equal(exportName("!!!"), "preset-preset.json", "empty slug falls back to 'preset'");
+  assert.equal(exportName("A".repeat(60)), "preset-" + "a".repeat(40) + ".json", "capped at 40 chars");
+  assert.equal(
+    exportName("a".repeat(39) + "!b c"),
+    "preset-" + "a".repeat(39) + ".json",
+    "a dash stranded by the cap is trimmed",
+  );
+  assert.equal(libraryExportName(new Date(2026, 8, 23, 12)), "agent-presets-2026-09-23.json");
+  assert.match(libraryExportName(new Date()), /^agent-presets-\d{4}-\d{2}-\d{2}\.json$/);
+});
+
+test("export: [⬇ All] is disabled while the library is empty, then exports the whole library", () => {
+  const fx = mountFixture();
+  const btn = () => fx.doc.getElementById("btnPresetExportAll");
+  fx.start();
+  assert.equal(btn().disabled, true, "nothing to export yet");
+  fx.seed(["My DBA kit", "Sec review kit"]);
+  fx.start();
+  assert.equal(btn().disabled, false);
+  btn().click();
+  assert.equal(fx.calls.download.length, 1);
+  const [name, text] = fx.calls.download[0];
+  assert.match(name, /^agent-presets-\d{4}-\d{2}-\d{2}\.json$/);
+  const data = native(JSON.parse(text));
+  assert.equal(data.schema, "mlm-agent-preset-lib/1");
+  assert.deepEqual(data.presets.map((p) => p.label), ["My DBA kit", "Sec review kit"]);
+  assert.deepEqual(fx.calls.toast, [["Exported 2 presets.", "success", 2500]]);
+});
+
+test("export: per-row [⬇] writes one self-describing preset file", () => {
+  const fx = mountFixture();
+  fx.seed(["My DBA kit"]);
+  fx.start();
+  fx.open();
+  const rowExport = fx.rows()[0].querySelector(".preset-export");
+  assert.equal(rowExport.getAttribute("aria-label"), 'Export preset "My DBA kit"');
+  rowExport.click();
+  assert.equal(fx.calls.download.length, 1);
+  const [name, text] = fx.calls.download[0];
+  assert.equal(name, "preset-my-dba-kit.json");
+  const data = native(JSON.parse(text));
+  assert.equal(data.schema, "mlm-agent-preset/1");
+  assert.equal(data.label, "My DBA kit");
+  assert.deepEqual(fx.calls.toast, [["Exported 'My DBA kit'.", "success", 2500]]);
+  assert.equal(fx.doc.images.length, 0);
+});
+
+test("export: a failing download seam toasts plainly and stays non-destructive", () => {
+  const fx = mountFixture();
+  fx.seed(["My DBA kit"]);
+  fx.start({ download: () => { throw new Error("blocked by the browser"); } });
+  fx.open();
+  fx.rows()[0].querySelector(".preset-export").click();
+  assert.deepEqual(fx.calls.toast, [["Couldn't export that file.", "error", 4000]]);
+  assert.deepEqual(fx.readStore().map((p) => p.label), ["My DBA kit"], "library untouched");
+  fx.doc.getElementById("btnPresetExportAll").click();
+  assert.deepEqual(fx.calls.toast[1], ["Couldn't export that file.", "error", 4000]);
 });
