@@ -86,7 +86,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 707 tests (513 Python + 194 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 716 tests (519 Python + 197 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -519,10 +519,11 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 513 tests, all offline
-node --test tests/js/*.test.mjs          # 194 jsdom browser tests (needs: npm ci)
+pytest -q                                    # 519 tests, all offline
+node --test tests/js/*.test.mjs          # 197 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
+node scripts/offline_recovery_check.mjs   # kills and restarts a real server: offline -> recovery
 ```
 
 ```
@@ -634,7 +635,9 @@ machinelearningmachine/
 │   ├── pick_port.py         # First free local port, so a busy 8000 cannot stop a launch
 │   ├── bench_sessions.py    # Session-listing benchmark: header read vs full parse
 │   ├── make_icons.py        # app icons: static/icons/icon.svg -> committed PNG/ICO, stdlib only
-│   └── e2e_server_check.py  # End-to-end pass against a running server (HTTP + WS)
+│   ├── e2e_server_check.py  # End-to-end pass against a running server (HTTP + WS)
+│   └── offline_recovery_check.mjs  # the real page, a real server: stop it, start it, no reload
+│                            #   (needs npm ci; not in CI - it kills a server on purpose)
 ├── tests/
 │   ├── test_protocol.py     # message + bus bounds
 │   ├── test_deps.py         # missing-dependency hints name package + commands
@@ -666,6 +669,7 @@ machinelearningmachine/
 │   ├── test_preset_contract.py      # drift lock: the preset mirror table vs AddAgentRequest
 │   ├── test_docs_are_accurate.py      # docs claims that fail the build when stale
 │   ├── test_pwa.py                  # icons match their SVG source; manifest/worker/routes/head answer like a browser asks
+│   ├── test_offline_check_script.py # the live offline->recovery check stays runnable and documented
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
 │       ├── client-lifecycle.test.mjs  # 20 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery, stale-record guard, session-row rendering
@@ -673,7 +677,7 @@ machinelearningmachine/
 │       ├── preset-contract.test.mjs   # 6 tests: drift lock — the client's LIMITS + gallery vs the spec's table
 │       ├── theme.test.mjs             # 14 tests: resolution, persistence, toggle wiring, canvas palette, and both light-layer drift locks (utilities + hand-written components)
 │       ├── service-worker.test.mjs    # 15 tests: the shell precache list drift-locked to the shipped files, and /api/ + /ws pinned as never cached
-│       ├── offline.test.mjs           # 22 tests: worker registration, the unreachable-server state (and the signals that must not trigger it), what is disabled while it lasts, and the reload-free recovery
+│       ├── offline.test.mjs           # 25 tests: worker registration, the unreachable-server state (and the signals that must not trigger it), what is disabled while it lasts, the reload-free recovery, and no leaked sockets
 │       ├── prompt-copy.test.mjs       # 14 tests: copy-last-prompt button, source choice, and the clipboard fallbacks for both the prompt and the code-block button (one writeText call site)
 │       └── audit_vendor_deps.test.mjs # 12 tests: the npm-audit wrapper's classification
 │                                      #   (CVE vs unreachable endpoint vs vacuous pass)

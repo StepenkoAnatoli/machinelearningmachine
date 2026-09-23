@@ -10,4 +10,7 @@ include tests/conftest.py
 recursive-include .github *.yml
 recursive-include tests/js *.test.mjs
 recursive-include scripts *.py
+# The live offline->recovery check is JavaScript (it drives the real page through
+# jsdom), and the README tells a reader to run it - so it has to be in the sdist.
+recursive-include scripts *.mjs
 recursive-include examples *.py

@@ -478,7 +478,7 @@ What ships now: a web app manifest and hand-drawn icons (one SVG source, pixel-l
 by test) make the dashboard installable; a service worker precaches only the shell
 (`index.html`, `app.js`, `theme.js`, `presets.js`, `markdown.js`, `style.css`,
 favicons, icons, `manifest.webmanifest`) network-first, so the page still opens with
-the server stopped, then says so in a banner and greys out exactly the eleven controls
+the server stopped, then says so in a banner and greys out exactly the fourteen controls
 that cannot work without a server - each with a reason a screen reader can reach.
 Theme, the prompt box, copy, presets, read-aloud, help and search keep working, because
 none of them ever needed the server. When the server comes back the page notices by
@@ -493,6 +493,7 @@ The one real find of the round was not in the offline code at all:
 
 | What a user saw | What was actually wrong | What it is now |
 | --- | --- | --- |
+| Offline, "Export Markdown"/"Export JSON" and Clear-providers stayed enabled and answered a click with an error toast | They looked local - an export is a download, clearing keys is forgetting something - but all three go through the server (`/api/export/*`, `POST /api/config`). The offline set had been chosen by eye | Every `apiFetch` call site was mapped to the control that triggers it; the three joined the marked set (eleven controls -> fourteen), and `enableControl()` now keeps a control off when the server dies *during* its own request - that path used to leave a permanently disabled Export button behind |
 | The *Saved Sessions* panel said "Could not list saved sessions" and listed nothing, for everybody, always - while the API returned the sessions correctly | Building each row ended with `delBtn.querySelector("i").insertAdjacentElement("afterend", document.createTextNode(" "))`. `insertAdjacentElement` requires an *Element*, and a text node is not one, so it threw a `TypeError` in every browser; the throw was swallowed by the render's own `catch`, which is why nothing surfaced anywhere | `insertAdjacentText`, plus a `tests/js/client-lifecycle.test.mjs` case that renders two saved sessions and fails without the fix. The offline round's session-row test forced this: to prove "a row built offline is disabled" there first had to be a row |
 
 **The principle that came out of this round**: an error handler that shows a friendly
@@ -504,10 +505,10 @@ offline tests were only able to find this because they asserted what the user ca
 
 ```
 $ pytest -q
-513 passed in 40.9s
+519 passed in 40.9s
 $ node --test tests/js/*.test.mjs
-# tests 194
-# pass 194
+# tests 196
+# pass 196
 # fail 0
 $ ruff check machinelearningmachine tests scripts examples
 All checks passed!
@@ -515,7 +516,17 @@ $ npm run audit:js
 ok - npm audit: 140 packages checked against the advisory database (critical=0 high=0 moderate=0 low=0)
 $ python scripts/e2e_server_check.py --base http://127.0.0.1:8799
 ALL E2E CHECKS PASSED (http://127.0.0.1:8799)
+$ node scripts/offline_recovery_check.mjs
+ALL OFFLINE/RECOVERY CHECKS PASSED (34)
 ```
+
+The last one is the round's own addition, and the reason to trust the rest: it starts a
+server whose port it has *confirmed* free, drives the real dashboard in jsdom with real
+fetch/WebSocket/timers, kills that server, brings it back, and asserts the page
+recovered by itself - twice, once with a fast restart (2s, the race where the probe and
+the socket's retry both want to reconnect) and once with a longer outage. It was written
+after the jsdom suite passed 24/24 while the leak it now catches was still live: two
+sockets open, every message delivered twice.
 
 ---
 
