@@ -65,6 +65,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
 - ♿ Full keyboard navigation, focus traps in modals, ARIA labels, skip links
 - ⌨️ Shortcuts: `Ctrl+Enter` to run, `Esc` to close modals
 - 🔍 Search/filter messages, character count, auto-resizing prompt
+- 📋 **Copy the prompt you ran** — one click in the prompt row recovers the last prompt you *executed*, even after Clear, a scenario preset or dictation overwrote the box; before anything has been run it copies the draft. If the browser refuses clipboard access (the usual case over plain `http://`), the text is handed back into the box, selected, instead of failing quietly
 - 📱 Responsive, respects `prefers-reduced-motion`, and the network canvas draws **on demand** - it repaints when something changes and then stops (no permanent animation loop, idle tab costs nothing)
 - 🌗 **Light or dark** — the dashboard follows your OS preference on the first visit and remembers your choice afterwards (header toggle, one `localStorage` key). Dark stays the default when the OS expresses no preference, and both themes cover the whole page: chrome, panels, modals, toasts, code blocks and the network graph
 
@@ -85,7 +86,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 626 tests (484 Python + 142 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 637 tests (484 Python + 153 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -519,7 +520,7 @@ Everything is offline and hermetic - network calls are injected, never performed
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
 pytest -q                                    # 476 tests, all offline
-node --test tests/js/*.test.mjs          # 142 jsdom browser tests (needs: npm ci)
+node --test tests/js/*.test.mjs          # 153 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 ```
@@ -662,6 +663,7 @@ machinelearningmachine/
 │       ├── presets.test.mjs           # 76 tests: mirror table, localStorage store, chips, save/rename/delete manager, import/export
 │       ├── preset-contract.test.mjs   # 6 tests: drift lock — the client's LIMITS + gallery vs the spec's table
 │       ├── theme.test.mjs             # 14 tests: resolution, persistence, toggle wiring, canvas palette, and both light-layer drift locks (utilities + hand-written components)
+│       ├── prompt-copy.test.mjs       # 11 tests: copy-last-prompt button, source choice, clipboard fallbacks, single writeText call site
 │       └── audit_vendor_deps.test.mjs # 12 tests: the npm-audit wrapper's classification
 │                                      #   (CVE vs unreachable endpoint vs vacuous pass)
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,

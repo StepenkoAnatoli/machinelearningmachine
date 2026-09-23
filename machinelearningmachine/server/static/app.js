@@ -69,6 +69,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnExportJson = document.getElementById("btnExportJson");
   const charCountEl = document.getElementById("charCount");
   const promptClearBtn = document.getElementById("btnClearPrompt");
+  const promptCopyBtn = document.getElementById("btnCopyPrompt");
   const searchInput = document.getElementById("searchMessages");
   const toastContainer = document.getElementById("toastContainer");
 
@@ -701,6 +702,57 @@ document.addEventListener("DOMContentLoaded", () => {
     // Auto-resize
     inputPrompt.style.height = "auto";
     inputPrompt.style.height = Math.min(inputPrompt.scrollHeight, 200) + "px";
+  }
+
+  // ===== The prompt the user last handed to the machine =====
+  // One string, in memory, this tab only. Nothing else on the page is allowed to
+  // overwrite a prompt (presets, dictation and Clear all do), so "what did I
+  // actually ask for?" is a question only this record can answer.
+  let lastRunPrompt = "";
+
+  /**
+   * Put text on the clipboard. Resolves true when it landed there, false when the
+   * browser will not let us - which is the normal case for this dashboard, since
+   * `navigator.clipboard` does not exist over the plain http:// most LAN users
+   * reach it on, and a rejected promise is indistinguishable to the user from a
+   * button that does nothing. Never throws: callers offer a manual fallback.
+   */
+  async function copyTextToClipboard(text) {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (e) {
+      /* denied, or not a secure context: fall through to the caller's plan B */
+    }
+    return false;
+  }
+
+  /** Hand text back in the prompt box, selected, as a one-keystroke manual copy. */
+  function offerPromptInBox(text) {
+    if (!inputPrompt) return;
+    inputPrompt.value = text;
+    updateCharCount();
+    inputPrompt.focus();
+    inputPrompt.select();
+  }
+
+  /** Copy the last prompt run, or the draft if nothing has been run yet. */
+  async function copyPrompt() {
+    const fromRun = Boolean(lastRunPrompt);
+    const text = fromRun ? lastRunPrompt : (inputPrompt ? inputPrompt.value.trim() : "");
+    if (!text) {
+      showToast("No prompt to copy yet - run one, or type into the box.", "warning", 3000);
+      return;
+    }
+    if (await copyTextToClipboard(text)) {
+      showToast(fromRun ? "Last run prompt copied." : "Current prompt copied.", "success", 2000);
+      return;
+    }
+    // Could not reach the clipboard: give the text back where Ctrl+C works.
+    offerPromptInBox(text);
+    showToast("Couldn't reach the clipboard - the prompt is in the box and selected, press Ctrl+C.", "warning", 5000);
   }
 
   // ===== Canvas Handling - draws only while something is actually moving =====
@@ -1540,14 +1592,13 @@ document.addEventListener("DOMContentLoaded", () => {
       copyBtn.setAttribute("aria-label", "Copy code to clipboard");
       copyBtn.innerHTML = '<i class="fa-regular fa-copy" aria-hidden="true"></i> Copy';
       copyBtn.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(block.innerText);
+        if (await copyTextToClipboard(block.innerText)) {
           copyBtn.innerHTML = '<i class="fa-solid fa-check text-emerald-400" aria-hidden="true"></i> Copied!';
           showToast("Code copied to clipboard", "success", 2000);
           setTimeout(() => {
             copyBtn.innerHTML = '<i class="fa-regular fa-copy" aria-hidden="true"></i> Copy';
           }, 2000);
-        } catch (e) {
+        } else {
           showToast("Failed to copy code", "error");
         }
       });
@@ -1664,6 +1715,11 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  // Copy prompt button (the last one run, or the current draft)
+  if (promptCopyBtn) {
+    promptCopyBtn.addEventListener("click", copyPrompt);
+  }
+
   wireAuthPanel();
 
   // Search messages
@@ -1735,6 +1791,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (SpeechKit.isReadPromptOnRun()) {
       SpeechKit.speak(prompt, { label: "Your prompt" });
     }
+
+    // Remember it *now*, not on success: a refused, queued or failed run is
+    // exactly when the text is wanted back, and it is what the user handed over.
+    lastRunPrompt = prompt;
 
     localRun = true;
     // The reconcile window for a late 202: only terminal frames inside this

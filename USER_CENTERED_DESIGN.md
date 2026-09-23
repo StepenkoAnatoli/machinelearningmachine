@@ -467,9 +467,8 @@ ALL E2E CHECKS PASSED
 
 ## 🔮 Future User-Centered Improvements (Not Yet Done)
 
-1. **Copy prompt button**: quick duplicate of the last prompt.
-2. **Offline support**: service worker for PWA.
-3. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
+1. **Offline support**: service worker for PWA.
+2. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
 
 These are noted but not implemented to keep scope focused on highest user value fixes.
 (An earlier version of this list proposed *session isolation* and *export
@@ -485,7 +484,11 @@ save/rename/delete library and JSON import/export, held in this browser only
 rule then removed *dark/light toggle*: `static/theme.js` resolves the theme before
 the first paint (OS preference on a first visit, then the remembered choice) and the
 header toggle flips it, with the light layer in `style.css` kept honest by
-`tests/js/theme.test.mjs`.)
+`tests/js/theme.test.mjs`. It then removed *copy prompt button*: the prompt row
+now carries a Copy button that returns the last prompt you ran — read from an
+in-memory record written at commit time, so a refused or queued run is still
+recoverable, and with a stated fallback when the clipboard is out of reach
+(`app.js`, pinned by `tests/js/prompt-copy.test.mjs`).)
 
 ---
 
