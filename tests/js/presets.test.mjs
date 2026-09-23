@@ -476,3 +476,203 @@ test("index.html wires the presets seam (sync script before app.js, container ab
   assert.ok(chipTag.includes('role="group"'), "chips container keeps role=group");
   assert.ok(chipTag.includes('aria-label="Module presets"'), "chips container is labelled");
 });
+
+// ------------------------------------------------------- store (localStorage)
+
+function fakeStorage(init = {}) {
+  const map = new Map(Object.entries(init));
+  return {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => {
+      map.set(k, String(v));
+    },
+    removeItem: (k) => {
+      map.delete(k);
+    },
+    _map: map,
+  };
+}
+
+const SESSION_ONLY = "Presets won't persist in this browser session.";
+
+test("store: key, library schema and default bounds are exact (spec §4.3)", () => {
+  assert.equal(core.STORAGE_KEY, "mlm.agentPresets.v1");
+  assert.equal(core.LIB_SCHEMA, "mlm-agent-preset-lib/1");
+  assert.deepEqual(native(core.BOUNDS), {
+    presets: 50,
+    presetChars: 8 * 1024,
+    libraryChars: 256 * 1024,
+  });
+});
+
+test("store: empty storage loads as []", () => {
+  const store = core.createStore({ storage: fakeStorage() });
+  assert.equal(store.available, true);
+  assert.deepEqual(native(store.load()), []);
+});
+
+test("store: save/load round-trip is lossless and labels stay clean when free", () => {
+  const store = core.createStore({ storage: fakeStorage() });
+  const res = store.save(base());
+  assert.equal(res.ok, true);
+  assert.equal(res.value.label, "Security Auditor kit");
+  assert.deepEqual(native(store.load()), [native(res.value)]);
+});
+
+test("store: collisions suffix (2), (3)… against builtins and saved labels", () => {
+  const store = core.createStore({ storage: fakeStorage() });
+  const r1 = store.save(base({ label: "DB Expert" })); // builtin label
+  assert.equal(r1.value.label, "DB Expert (2)");
+  const r2 = store.save(base({ label: "DB Expert" }));
+  assert.equal(r2.value.label, "DB Expert (3)");
+});
+
+test("store: preset-count bound rejects the overflow with a plain error", () => {
+  const notices = [];
+  const store = core.createStore({
+    storage: fakeStorage(),
+    onNotice: (m) => notices.push(m),
+    bounds: { presets: 2, presetChars: 8192, libraryChars: 262144 },
+  });
+  assert.equal(store.save(base({ label: "One", agent_id: "one-a" })).ok, true);
+  assert.equal(store.save(base({ label: "Two", agent_id: "two-a" })).ok, true);
+  const res = store.save(base({ label: "Three", agent_id: "three-a" }));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "Your preset library is full (2 presets). Remove or export some first.");
+  assert.equal(store.load().length, 2);
+  assert.deepEqual(notices, []); // full is an error, not a persistence notice
+});
+
+test("store: size bounds reject oversized preset and oversized library", () => {
+  const smallPreset = core.createStore({
+    storage: fakeStorage(),
+    bounds: { presets: 50, presetChars: 200, libraryChars: 262144 },
+  });
+  const r1 = smallPreset.save(base());
+  assert.equal(r1.ok, false);
+  assert.equal(r1.error, "That preset is too large to save.");
+  const smallLib = core.createStore({
+    storage: fakeStorage(),
+    bounds: { presets: 50, presetChars: 8192, libraryChars: 350 },
+  });
+  assert.equal(smallLib.save(base({ label: "A", agent_id: "a-aa" })).ok, true);
+  const r2 = smallLib.save(base({ label: "B", agent_id: "b-bb" }));
+  assert.equal(r2.ok, false);
+  assert.equal(r2.error, "Your preset library is too large to save more. Export it, then remove some presets.");
+  assert.equal(smallLib.load().length, 1); // nothing partially written
+});
+
+test("store: a throwing setItem leaves the old library intact", () => {
+  const storage = fakeStorage();
+  const store = core.createStore({ storage });
+  assert.equal(store.save(base({ label: "Keep", agent_id: "keep-a" })).ok, true);
+  const before = storage._map.get(core.STORAGE_KEY);
+  storage.setItem = () => {
+    throw new Error("QuotaExceededError");
+  };
+  const res = store.save(base({ label: "Lose", agent_id: "lose-a" }));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "Couldn't save — this browser's storage is full or blocked.");
+  assert.equal(storage._map.get(core.STORAGE_KEY), before); // untouched
+  assert.deepEqual(native(store.load().map((p) => p.label)), ["Keep"]);
+});
+
+test("store: unavailable storage → in-memory round-trip + one-time notice", () => {
+  const notices = [];
+  const broken = {
+    getItem: () => null,
+    setItem: () => {
+      throw new Error("SecurityError");
+    },
+    removeItem: () => {},
+  };
+  const store = core.createStore({ storage: broken, onNotice: (m) => notices.push(m) });
+  assert.equal(store.available, false);
+  assert.deepEqual(notices, [SESSION_ONLY]);
+  const res = store.save(base({ label: "Volatile", agent_id: "volatile-1" }));
+  assert.equal(res.ok, true);
+  assert.deepEqual(native(store.load().map((p) => p.label)), ["Volatile"]);
+  store.save(base({ label: "Volatile2", agent_id: "volatile-2" }));
+  assert.deepEqual(notices, [SESSION_ONLY]); // still one notice only
+});
+
+test("store: corrupt or foreign blobs load as [] without throwing", () => {
+  for (const junk of [
+    "not json",
+    "[1,2,3]",
+    '{"schema":"nope","presets":[]}',
+    '{"schema":"mlm-agent-preset-lib/1","presets":"no"}',
+    '{"presets":[]}',
+    "",
+  ]) {
+    const store = core.createStore({ storage: fakeStorage({ [core.STORAGE_KEY]: junk }) });
+    assert.deepEqual(native(store.load()), [], `junk: ${junk.slice(0, 20)}`);
+  }
+});
+
+test("store: tampered entries are dropped, valid ones kept and whitelist-copied", () => {
+  const good1 = core.validatePreset(base({ label: "Good One", agent_id: "good-one" })).value;
+  const good2 = core.validatePreset(base({ label: "Good Two", agent_id: "good-two" })).value;
+  const tampered = { ...good1, label: "Tampered", extra: "evil", __proto__: { x: 1 } };
+  const blob = JSON.stringify({
+    schema: core.LIB_SCHEMA,
+    presets: [good1, 42, "hello", { label: "x" }, tampered, good2],
+  });
+  const store = core.createStore({ storage: fakeStorage({ [core.STORAGE_KEY]: blob }) });
+  const labels = native(store.load().map((p) => p.label));
+  assert.deepEqual(labels, ["Good One", "Tampered", "Good Two"]); // object with label+known keys validates
+  for (const p of native(store.load())) {
+    assert.deepEqual(Object.keys(p).sort(), [
+      "agent_id",
+      "avatar",
+      "color",
+      "label",
+      "name",
+      "role",
+      "schema",
+      "system_prompt",
+    ]);
+  }
+  assert.equal({}.x, undefined);
+});
+
+test("store: deleteByLabel removes and persists; unknown labels fail plainly", () => {
+  const storage = fakeStorage();
+  const store = core.createStore({ storage });
+  store.save(base({ label: "One", agent_id: "one-a" }));
+  store.save(base({ label: "Two", agent_id: "two-a" }));
+  const res = store.deleteByLabel("One");
+  assert.equal(res.ok, true);
+  assert.deepEqual(native(store.load().map((p) => p.label)), ["Two"]);
+  const missing = store.deleteByLabel("nope");
+  assert.equal(missing.ok, false);
+  assert.equal(missing.error, "No preset named 'nope'.");
+});
+
+test("store: rename changes the label; collisions, invalids and unknowns are refused", () => {
+  const storage = fakeStorage();
+  const store = core.createStore({ storage });
+  store.save(base({ label: "Alpha", agent_id: "alpha-a" }));
+  store.save(base({ label: "Beta", agent_id: "beta-bb" }));
+  const ok = store.rename("Alpha", "Gamma");
+  assert.equal(ok.ok, true);
+  assert.equal(ok.value.label, "Gamma");
+  assert.deepEqual(native(store.load().map((p) => p.label).sort()), ["Beta", "Gamma"]);
+  const same = store.rename("Gamma", "Gamma"); // no-op succeeds
+  assert.equal(same.ok, true);
+  const taken = store.rename("Gamma", "Beta");
+  assert.equal(taken.ok, false);
+  assert.equal(taken.field, "label");
+  assert.equal(taken.error, "That name is already taken — pick another.");
+  const takenBuiltin = store.rename("Gamma", "DB Expert");
+  assert.equal(takenBuiltin.ok, false);
+  assert.equal(takenBuiltin.error, "That name is already taken — pick another.");
+  const invalid = store.rename("Gamma", "x".repeat(61));
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.field, "label");
+  assert.equal(invalid.error, "Preset name must be 1-60 characters.");
+  const unknown = store.rename("ghost", "Anything");
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.error, "No preset named 'ghost'.");
+  assert.deepEqual(native(store.load().map((p) => p.label).sort()), ["Beta", "Gamma"]); // unchanged
+});

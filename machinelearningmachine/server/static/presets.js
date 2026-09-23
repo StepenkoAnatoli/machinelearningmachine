@@ -344,14 +344,230 @@
     return true;
   }
 
+  /**
+   * Library store: one localStorage key, atomic writes, bounded size (spec
+   * §4.3). Storage, notice callback and bounds are injectable for tests; the
+   * production default is `localStorage` with the spec bounds. When storage is
+   * unavailable (private windows), the same API works against an in-memory
+   * list and `onNotice` fires once with MSG.sessionOnly.
+   */
+  var BOUNDS = {
+    presets: 50,
+    presetChars: 8 * 1024,
+    libraryChars: 256 * 1024,
+  };
+
+  var MSG_STORE = {
+    sessionOnly: "Presets won't persist in this browser session.",
+    full: function (n) {
+      return "Your preset library is full (" + n + " presets). Remove or export some first.";
+    },
+    presetLarge: "That preset is too large to save.",
+    libraryLarge: "Your preset library is too large to save more. Export it, then remove some presets.",
+    writeFail: "Couldn't save \u2014 this browser's storage is full or blocked.",
+    missing: function (label) {
+      return "No preset named '" + label + "'.";
+    },
+    taken: "That name is already taken \u2014 pick another.",
+  };
+
+  /** Compact-JSON length — the serialization all size bounds are measured on. */
+  function compactSize(v) {
+    return JSON.stringify(v).length;
+  }
+
+  function createStore(options) {
+    options = options || {};
+    var bounds = options.bounds || BOUNDS;
+    var builtinLabels = options.builtinLabels ||
+      BUILTINS.map(function (b) {
+        return b.label;
+      });
+    var onNotice = typeof options.onNotice === "function" ? options.onNotice : function () {};
+    var storage = options.storage;
+    var memory = [];
+    var available = false;
+
+    if (storage === undefined) {
+      try {
+        storage = typeof localStorage === "object" && localStorage ? localStorage : null;
+      } catch (e) {
+        storage = null;
+      }
+    }
+    if (storage) {
+      try {
+        var probe = STORAGE_KEY + ":probe";
+        storage.setItem(probe, "1");
+        storage.removeItem(probe);
+        available = true;
+      } catch (e) {
+        storage = null;
+      }
+    }
+    if (!available) {
+      onNotice(MSG_STORE.sessionOnly);
+    }
+
+    function read() {
+      if (!available) {
+        return memory.slice();
+      }
+      var raw = null;
+      try {
+        raw = storage.getItem(STORAGE_KEY);
+      } catch (e) {
+        return [];
+      }
+      if (raw === null || raw === "") {
+        return [];
+      }
+      var data = null;
+      try {
+        data = JSON.parse(raw);
+      } catch (e) {
+        return [];
+      }
+      if (!isPlainObject(data) || data.schema !== LIB_SCHEMA || !Array.isArray(data.presets)) {
+        return [];
+      }
+      var out = [];
+      for (var i = 0; i < data.presets.length; i++) {
+        var v = validatePreset(data.presets[i]);
+        if (v.ok) {
+          out.push(v.value); // whitelist-copy drops any tampered extras
+        }
+      }
+      return out;
+    }
+
+    function write(list) {
+      if (!available) {
+        memory = list.slice();
+        return true;
+      }
+      try {
+        // One atomic setItem: on throw the old library stays byte-identical.
+        storage.setItem(STORAGE_KEY, JSON.stringify({ schema: LIB_SCHEMA, presets: list }));
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function save(raw) {
+      var v = validatePreset(raw);
+      if (!v.ok) {
+        return v;
+      }
+      var list = read();
+      if (list.length >= bounds.presets) {
+        return fail(null, MSG_STORE.full(bounds.presets));
+      }
+      if (compactSize(v.value) > bounds.presetChars) {
+        return fail(null, MSG_STORE.presetLarge);
+      }
+      var taken = builtinLabels.concat(
+        list.map(function (p) {
+          return p.label;
+        }),
+      );
+      v.value.label = uniqueLabel(v.value.label, taken, "manual");
+      var next = list.concat([v.value]);
+      if (compactSize({ schema: LIB_SCHEMA, presets: next }) > bounds.libraryChars) {
+        return fail(null, MSG_STORE.libraryLarge);
+      }
+      if (!write(next)) {
+        return fail(null, MSG_STORE.writeFail);
+      }
+      return { ok: true, value: v.value };
+    }
+
+    function deleteByLabel(label) {
+      var list = read();
+      var idx = -1;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].label === label) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx === -1) {
+        return fail(null, MSG_STORE.missing(label));
+      }
+      var next = list.slice();
+      next.splice(idx, 1);
+      if (!write(next)) {
+        return fail(null, MSG_STORE.writeFail);
+      }
+      return { ok: true };
+    }
+
+    function rename(oldLabel, newLabel) {
+      var list = read();
+      var idx = -1;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].label === oldLabel) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx === -1) {
+        return fail(null, MSG_STORE.missing(oldLabel));
+      }
+      if (newLabel === oldLabel) {
+        return { ok: true, value: list[idx] };
+      }
+      var candidate = {};
+      for (var k in list[idx]) {
+        if (Object.prototype.hasOwnProperty.call(list[idx], k)) {
+          candidate[k] = list[idx][k];
+        }
+      }
+      candidate.label = newLabel;
+      var v = validatePreset(candidate);
+      if (!v.ok) {
+        return v;
+      }
+      var taken = builtinLabels.concat(
+        list
+          .filter(function (p, i2) {
+            return i2 !== idx;
+          })
+          .map(function (p) {
+            return p.label;
+          }),
+      );
+      if (taken.indexOf(v.value.label) !== -1) {
+        return fail("label", MSG_STORE.taken);
+      }
+      var next = list.slice();
+      next[idx] = v.value;
+      if (!write(next)) {
+        return fail(null, MSG_STORE.writeFail);
+      }
+      return { ok: true, value: v.value };
+    }
+
+    return {
+      available: available,
+      load: read,
+      save: save,
+      deleteByLabel: deleteByLabel,
+      rename: rename,
+    };
+  }
+
   window.MLMPresets = {
     SCHEMA: PRESET_SCHEMA,
     LIB_SCHEMA: LIB_SCHEMA,
     STORAGE_KEY: STORAGE_KEY,
     LIMITS: LIMITS,
+    BOUNDS: BOUNDS,
     BUILTINS: BUILTINS,
     validatePreset: validatePreset,
     uniqueLabel: uniqueLabel,
+    createStore: createStore,
     mount: mount,
   };
 })();
