@@ -311,12 +311,15 @@
   // latest callbacks/store swapped in on each mount).
   var saveState = null;
 
+  // Per-page manager wiring, same deal for the static disclosure button.
+  var managerState = null;
+
   /**
    * Attach the preset UI inside the Add Custom Module modal. P1: built-in
-   * chips. P2: Save-as-preset. `fillForm(payload)` writes the six fields;
-   * `getFormData()` reads them back; `toast(msg, type, ms)` is app.js's
-   * showToast. Returns false (never throws) when the page lacks the container
-   * or the seam is incomplete.
+   * chips. P2: Save-as-preset + the saved-presets manager. `fillForm(payload)`
+   * writes the six fields; `getFormData()` reads them back; `toast(msg, type,
+   * ms)` is app.js's showToast. Returns false (never throws) when the page
+   * lacks the container or the seam is incomplete.
    */
   function mount(options) {
     options = options || {};
@@ -337,6 +340,185 @@
           }
         },
       });
+
+    var disclosure = document.getElementById("btnPresetManager");
+    var manager = document.getElementById("presetManager");
+    var badge = document.getElementById("presetManagerBadge");
+    var emptyMsg = document.getElementById("presetManagerEmpty");
+    var managerOpen = false;
+
+    function loadPreset(preset) {
+      fillForm(six(preset));
+      if (toast) {
+        toast("Loaded preset: " + preset.label, "info", 2000);
+      }
+    }
+
+    // Rows are built like Saved Sessions rows: createElement + textContent,
+    // never interpolated markup. An aria-label quoting the label goes through
+    // setAttribute (a label containing a quote cannot escape it).
+    function makeButton(className, ariaLabel, iconClass, text) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = className;
+      btn.setAttribute("aria-label", ariaLabel);
+      if (iconClass) {
+        var ico = document.createElement("i");
+        ico.className = iconClass;
+        ico.setAttribute("aria-hidden", "true");
+        btn.appendChild(ico);
+      } else {
+        btn.textContent = text;
+      }
+      return btn;
+    }
+
+    function renameButtonFor(label) {
+      if (!manager) {
+        return null;
+      }
+      var rows = manager.querySelectorAll(".preset-row");
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].dataset.label === label) {
+          return rows[i].querySelector(".preset-rename");
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Inline rename (spec §6.2 flow 3): the label swaps for a focused input;
+     * Enter/blur commit, Esc cancels. `done` is set before any re-render, so
+     * the blur that browser fires when the input leaves the DOM can never
+     * commit twice. A refused commit keeps the old label and toasts the rule.
+     */
+    function startRename(row, preset) {
+      var input = document.createElement("input");
+      input.type = "text";
+      input.className = "preset-rename-input";
+      input.maxLength = LIMITS.label.max;
+      input.setAttribute("aria-label", "Preset name");
+      input.value = preset.label;
+      row.querySelector(".preset-row-info").replaceChild(input, row.querySelector(".preset-row-label"));
+      input.focus();
+      input.select();
+
+      var done = false;
+      function settle(focusLabel) {
+        done = true;
+        renderManager();
+        var btn = renameButtonFor(focusLabel);
+        if (btn) {
+          btn.focus();
+        }
+      }
+      function commit() {
+        if (done) {
+          return;
+        }
+        var res = store.rename(preset.label, input.value);
+        if (!res.ok) {
+          if (toast) {
+            toast(res.error, "error", 4000);
+          }
+          settle(preset.label); // refused: the old label stands
+          return;
+        }
+        settle(res.value.label);
+      }
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          settle(preset.label); // cancel: nothing saved, focus returns
+        }
+      });
+      input.addEventListener("blur", commit);
+    }
+
+    function makeRow(preset) {
+      var row = document.createElement("div");
+      row.className = "preset-row";
+      row.setAttribute("role", "listitem");
+      row.dataset.label = preset.label;
+
+      var info = document.createElement("div");
+      info.className = "preset-row-info";
+      var labelEl = document.createElement("p");
+      labelEl.className = "preset-row-label";
+      labelEl.textContent = preset.avatar + " " + preset.label;
+      labelEl.title = labelEl.textContent;
+      var metaEl = document.createElement("p");
+      metaEl.className = "preset-row-meta";
+      metaEl.textContent = preset.name + " \u00b7 " + preset.role;
+      metaEl.title = metaEl.textContent;
+      info.appendChild(labelEl);
+      info.appendChild(metaEl);
+
+      var actions = document.createElement("div");
+      actions.className = "preset-row-actions";
+      var loadBtn = makeButton("preset-act preset-act-load", 'Load preset "' + preset.label + '"', null, "Load");
+      var renameBtn = makeButton("preset-act preset-rename", 'Rename preset "' + preset.label + '"', "fa-solid fa-pen");
+      var delBtn = makeButton(
+        "preset-act preset-act-danger preset-delete",
+        'Delete preset "' + preset.label + '"',
+        "fa-solid fa-trash-can",
+      );
+      loadBtn.addEventListener("click", function () {
+        loadPreset(preset);
+      });
+      renameBtn.addEventListener("click", function () {
+        startRename(row, preset);
+      });
+      delBtn.addEventListener("click", function () {
+        var res = store.deleteByLabel(preset.label);
+        if (!res.ok) {
+          if (toast) {
+            toast(res.error, "error", 4000);
+          }
+          return;
+        }
+        renderManager(); // one-click and silent, like session rows
+      });
+      actions.appendChild(loadBtn);
+      actions.appendChild(renameBtn);
+      actions.appendChild(delBtn);
+
+      row.appendChild(info);
+      row.appendChild(actions);
+      return row;
+    }
+
+    /** Rebuild rows, badge and empty state from the store (single source of
+     *  truth: localStorage — nothing is cached in this closure). */
+    function renderManager() {
+      if (!manager) {
+        return;
+      }
+      var list = store.load();
+      manager.textContent = ""; // textContent discipline: nothing is parsed
+      list.forEach(function (preset) {
+        manager.appendChild(makeRow(preset));
+      });
+      manager.hidden = !managerOpen;
+      if (badge) {
+        badge.textContent = "Saved presets (" + list.length + ")";
+      }
+      if (emptyMsg) {
+        emptyMsg.hidden = !managerOpen || list.length > 0;
+      }
+    }
+
+    function setManagerOpen(next) {
+      managerOpen = next;
+      if (disclosure) {
+        disclosure.setAttribute("aria-expanded", next ? "true" : "false");
+      }
+      renderManager();
+    }
+
     while (chips.firstChild) {
       chips.removeChild(chips.firstChild); // idempotent re-mount
     }
@@ -359,10 +541,7 @@
       btn.appendChild(face);
       btn.appendChild(document.createTextNode(" " + preset.label));
       btn.addEventListener("click", function () {
-        fillForm(six(preset));
-        if (toast) {
-          toast("Loaded preset: " + preset.label, "info", 2000);
-        }
+        loadPreset(preset);
       });
       chips.appendChild(btn);
     });
@@ -374,7 +553,14 @@
     if (saveBtn) {
       saveBtn.hidden = !getFormData;
       if (!saveState) {
-        saveState = { getFormData: null, store: null, toast: null, lastSaveAt: 0, lastFingerprint: null };
+        saveState = {
+          getFormData: null,
+          store: null,
+          toast: null,
+          afterSave: null,
+          lastSaveAt: 0,
+          lastFingerprint: null,
+        };
         saveBtn.addEventListener("click", function () {
           var st = saveState;
           if (!st || !st.getFormData) {
@@ -407,11 +593,35 @@
           if (st.toast) {
             st.toast("Saved '" + res.value.label + "' to your presets.", "success", 2500);
           }
+          if (st.afterSave) {
+            st.afterSave();
+          }
         });
       }
       saveState.getFormData = getFormData;
       saveState.store = store;
       saveState.toast = toast;
+      saveState.afterSave = renderManager;
+    }
+
+    // Manager disclosure (spec §6.2 flow 3): collapsed by default so the common
+    // path stays short; the badge shows the count either way. Static markup, so
+    // one listener per page that delegates to the latest mount.
+    if (disclosure && manager) {
+      if (!managerState) {
+        managerState = { toggle: null };
+        disclosure.addEventListener("click", function () {
+          if (managerState.toggle) {
+            managerState.toggle();
+          }
+        });
+      }
+      managerState.toggle = function () {
+        setManagerOpen(!managerOpen);
+      };
+      setManagerOpen(false);
+    } else {
+      renderManager();
     }
     return true;
   }

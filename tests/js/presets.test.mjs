@@ -361,6 +361,13 @@ function mountFixture() {
         <div class="mb-4">
           <div id="presetChips" role="group" aria-label="Module presets"></div>
           <button type="button" id="btnSavePreset"><span>Save as preset</span></button>
+          <div class="preset-manager-bar">
+            <button type="button" id="btnPresetManager" aria-expanded="false" aria-controls="presetManager">
+              <span id="presetManagerBadge">Saved presets (0)</span>
+            </button>
+          </div>
+          <div id="presetManager" role="list" aria-label="Saved presets" hidden></div>
+          <p id="presetManagerEmpty" hidden>No saved presets yet — fill the form and hit 'Save as preset'.</p>
         </div>
         <form id="formAddAgent">
           <input id="newAgentId"><input id="newAgentName"><input id="newAgentRole">
@@ -416,6 +423,39 @@ function mountFixture() {
     },
     readStore() {
       return native(win.MLMPresets.createStore({ storage }).load());
+    },
+    seed(entries) {
+      const store = win.MLMPresets.createStore({ storage });
+      for (const entry of entries) {
+        const raw = typeof entry === "string" ? { label: entry } : entry;
+        const slug = String(raw.label)
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 40);
+        const res = store.save({
+          name: "Seeded agent",
+          role: "Seeder",
+          system_prompt: "Seeded preset used by the manager tests.",
+          color: "#0ea5e9",
+          avatar: "🧩",
+          ...raw,
+          agent_id: ("seed-" + (slug || "preset")).slice(0, 50).replace(/-+$/g, ""),
+        });
+        if (!res.ok) throw new Error("seed failed: " + JSON.stringify(res));
+      }
+    },
+    open() {
+      doc.getElementById("btnPresetManager").click();
+    },
+    rows() {
+      return [...doc.getElementById("presetManager").children];
+    },
+    rowByLabel(label) {
+      return this.rows().find((r) => r.dataset.label === label) || null;
+    },
+    labelOf(row) {
+      return row.querySelector(".preset-row-label").textContent;
     },
     start() {
       return win.MLMPresets.mount({
@@ -519,6 +559,25 @@ test("index.html wires the presets seam (sync script before app.js, container ab
   const saveTag = html.slice(html.lastIndexOf("<button", saveAt), html.indexOf(">", saveAt) + 1);
   assert.ok(saveTag.includes('type="button"'), "Save-as-preset can never submit the form");
   assert.ok(html.slice(saveAt, saveAt + 400).includes("Save as preset"));
+  const discAt = html.indexOf('id="btnPresetManager"');
+  assert.ok(discAt !== -1 && discAt < formAt, "the manager disclosure sits above the form");
+  const discTag = html.slice(html.lastIndexOf("<button", discAt), html.indexOf(">", discAt) + 1);
+  assert.ok(discTag.includes('type="button"'), "the disclosure can never submit the form");
+  assert.ok(discTag.includes('aria-expanded="false"'), "the manager starts collapsed");
+  assert.ok(discTag.includes('aria-controls="presetManager"'), "the disclosure points at the panel");
+  assert.ok(html.slice(discAt, discAt + 400).includes("Saved presets (0)"), "badge shows the count");
+  const managerAt = html.indexOf('id="presetManager"');
+  assert.ok(managerAt !== -1 && managerAt < formAt, "the manager panel sits above the form");
+  const managerTag = html.slice(html.lastIndexOf("<div", managerAt), html.indexOf(">", managerAt) + 1);
+  assert.ok(managerTag.includes('role="list"'), "the panel is a list");
+  assert.ok(managerTag.includes('aria-label="Saved presets"'), "the panel is labelled");
+  assert.ok(managerTag.includes("hidden"), "the panel starts collapsed");
+  const emptyAt = html.indexOf('id="presetManagerEmpty"');
+  assert.ok(emptyAt !== -1 && emptyAt < formAt, "the empty-state line sits above the form");
+  assert.ok(
+    html.includes("No saved presets yet — fill the form and hit 'Save as preset'."),
+    "the empty-state copy is the spec's, verbatim",
+  );
 });
 
 // ------------------------------------------------------- store (localStorage)
@@ -799,4 +858,196 @@ test("save: hostile Display Name is stored as data and toasted as plain text", (
   assert.equal(lib[0].label, evil);
   assert.equal(lib[0].name, evil);
   assert.equal(fx.doc.images.length, 0); // nothing ever parsed it as markup
+});
+
+// ---------------------------------------------------------- manager UI (P2)
+
+test("manager: collapsed with a count badge by default, opens as a disclosure", () => {
+  const fx = mountFixture();
+  fx.start();
+  const disc = fx.doc.getElementById("btnPresetManager");
+  assert.equal(disc.getAttribute("aria-expanded"), "false");
+  assert.equal(fx.doc.getElementById("presetManager").hidden, true);
+  assert.equal(fx.doc.getElementById("presetManagerEmpty").hidden, true);
+  assert.equal(fx.doc.getElementById("presetManagerBadge").textContent, "Saved presets (0)");
+  fx.open();
+  assert.equal(disc.getAttribute("aria-expanded"), "true");
+  assert.equal(fx.doc.getElementById("presetManager").hidden, false);
+  assert.equal(fx.doc.getElementById("presetManagerEmpty").hidden, false);
+  assert.equal(
+    fx.doc.getElementById("presetManagerEmpty").textContent,
+    "No saved presets yet — fill the form and hit 'Save as preset'.",
+  );
+  fx.open(); // second click collapses again
+  assert.equal(disc.getAttribute("aria-expanded"), "false");
+  assert.equal(fx.doc.getElementById("presetManager").hidden, true);
+  assert.equal(fx.doc.getElementById("presetManagerEmpty").hidden, true);
+});
+
+test("manager: rows mirror the sessions pattern — info block, quoted aria-labels, no builtins", () => {
+  const fx = mountFixture();
+  fx.seed(["My DBA kit", "Sec review kit"]);
+  fx.start();
+  assert.equal(fx.doc.getElementById("presetManagerBadge").textContent, "Saved presets (2)");
+  fx.open();
+  const rows = fx.rows();
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].getAttribute("role"), "listitem");
+  assert.equal(fx.labelOf(rows[0]), "🧩 My DBA kit");
+  assert.equal(rows[0].querySelector(".preset-row-meta").textContent, "Seeded agent · Seeder");
+  const load = rows[0].querySelector(".preset-act-load");
+  assert.equal(load.textContent, "Load");
+  assert.equal(load.getAttribute("aria-label"), 'Load preset "My DBA kit"');
+  assert.equal(rows[0].querySelector(".preset-rename").getAttribute("aria-label"), 'Rename preset "My DBA kit"');
+  assert.equal(rows[0].querySelector(".preset-delete").getAttribute("aria-label"), 'Delete preset "My DBA kit"');
+  for (const btn of rows[0].querySelectorAll("button")) {
+    assert.equal(btn.type, "button", "manager buttons can never submit");
+  }
+  assert.ok(!fx.doc.getElementById("presetManager").textContent.includes("Security Auditor"), "no builtin rows");
+});
+
+test("manager: Load fills the form and toasts exactly like a chip", () => {
+  const fx = mountFixture();
+  fx.seed(["My DBA kit"]);
+  fx.start();
+  fx.open();
+  fx.rows()[0].querySelector(".preset-act-load").click();
+  assert.deepEqual(native(fx.calls.fill), [
+    {
+      agent_id: "seed-my-dba-kit",
+      name: "Seeded agent",
+      role: "Seeder",
+      system_prompt: "Seeded preset used by the manager tests.",
+      color: "#0ea5e9",
+      avatar: "🧩",
+    },
+  ]);
+  assert.deepEqual(fx.calls.toast, [["Loaded preset: My DBA kit", "info", 2000]]);
+});
+
+test("manager: rename swaps in a focused input, Enter commits and focus returns", () => {
+  const fx = mountFixture();
+  fx.seed(["My DBA kit"]);
+  fx.start();
+  fx.open();
+  const renameBtn = fx.rows()[0].querySelector(".preset-rename");
+  renameBtn.click();
+  const input = fx.doc.getElementById("presetManager").querySelector(".preset-rename-input");
+  assert.ok(input, "the label swapped for an input");
+  assert.equal(input.value, "My DBA kit");
+  assert.equal(input.getAttribute("aria-label"), "Preset name");
+  assert.equal(input.maxLength, 60);
+  assert.equal(fx.doc.activeElement, input, "focus lands in the input");
+  input.value = "Renamed kit";
+  input.dispatchEvent(new fx.win.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  assert.deepEqual(fx.readStore().map((p) => p.label), ["Renamed kit"]);
+  assert.equal(fx.labelOf(fx.rows()[0]), "🧩 Renamed kit");
+  assert.equal(fx.doc.activeElement, fx.rows()[0].querySelector(".preset-rename"), "focus returns to ✎");
+  assert.deepEqual(fx.calls.toast, [], "a visible rename needs no toast");
+});
+
+test("manager: rename commits on blur and Esc cancels", () => {
+  const fx = mountFixture();
+  fx.seed(["My DBA kit", "Sec review kit"]);
+  fx.start();
+  fx.open();
+  const inputOf = (label) => {
+    fx.rowByLabel(label).querySelector(".preset-rename").click();
+    return fx.doc.getElementById("presetManager").querySelector(".preset-rename-input");
+  };
+  let input = inputOf("My DBA kit");
+  input.value = "Blurred kit";
+  input.blur();
+  assert.deepEqual(fx.readStore().map((p) => p.label).sort(), ["Blurred kit", "Sec review kit"]);
+
+  input = inputOf("Sec review kit");
+  input.value = "Discarded";
+  input.dispatchEvent(new fx.win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.deepEqual(fx.readStore().map((p) => p.label).sort(), ["Blurred kit", "Sec review kit"], "Esc changed nothing");
+  assert.ok(!fx.doc.getElementById("presetManager").querySelector(".preset-rename-input"), "input closed");
+  assert.deepEqual(fx.calls.toast, [], "cancelling is silent");
+});
+
+test("manager: rename refuses taken, builtin and invalid labels — old label stands", () => {
+  const fx = mountFixture();
+  fx.seed(["My DBA kit", "Sec review kit"]);
+  fx.start();
+  fx.open();
+  const tryRename = (from, to) => {
+    fx.rowByLabel(from).querySelector(".preset-rename").click();
+    const input = fx.doc.getElementById("presetManager").querySelector(".preset-rename-input");
+    input.value = to;
+    input.dispatchEvent(new fx.win.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    return fx.doc.activeElement;
+  };
+  let focus = tryRename("My DBA kit", "Sec review kit");
+  assert.deepEqual(fx.calls.toast[0], ["That name is already taken — pick another.", "error", 4000]);
+  focus = tryRename("My DBA kit", "DB Expert");
+  assert.deepEqual(fx.calls.toast[1], ["That name is already taken — pick another.", "error", 4000]);
+  assert.ok(fx.rowByLabel("My DBA kit"), "the old label still stands");
+  assert.equal(focus, fx.rowByLabel("My DBA kit").querySelector(".preset-rename"), "focus returns to ✎");
+  tryRename("My DBA kit", "   ");
+  assert.deepEqual(fx.calls.toast[2], [MSG.label, "error", 4000]);
+  assert.deepEqual(fx.readStore().map((p) => p.label).sort(), ["My DBA kit", "Sec review kit"]);
+});
+
+test("manager: core rename/delete refuse builtins and unknown labels", () => {
+  const fx = mountFixture();
+  const store = fx.win.MLMPresets.createStore({ storage: fx.storage });
+  const renamed = store.rename("DB Expert", "Mine now");
+  assert.equal(renamed.ok, false);
+  assert.equal(renamed.error, "No preset named 'DB Expert'.");
+  const deleted = store.deleteByLabel("DB Expert");
+  assert.equal(deleted.ok, false);
+  assert.equal(deleted.error, "No preset named 'DB Expert'.");
+});
+
+test("manager: delete is one-click, silent and updates badge + empty state", () => {
+  const fx = mountFixture();
+  fx.seed(["My DBA kit"]);
+  fx.start();
+  fx.open();
+  fx.rows()[0].querySelector(".preset-delete").click();
+  assert.deepEqual(fx.readStore(), []);
+  assert.equal(fx.rows().length, 0);
+  assert.equal(fx.doc.getElementById("presetManagerBadge").textContent, "Saved presets (0)");
+  assert.equal(fx.doc.getElementById("presetManagerEmpty").hidden, false, "empty state returns");
+  assert.deepEqual(fx.calls.toast, [], "sessions-style delete is silent");
+});
+
+test("manager: saving refreshes the badge and rows; a re-mount keeps one listener per button", () => {
+  const fx = mountFixture();
+  fx.start();
+  fx.open();
+  fx.fill({ name: "Fresh kit", agent_id: "fresh-kit" });
+  fx.saveBtn.click();
+  assert.equal(fx.doc.getElementById("presetManagerBadge").textContent, "Saved presets (1)");
+  assert.equal(fx.rows().length, 1);
+  assert.equal(fx.labelOf(fx.rows()[0]), "🔐 Fresh kit");
+
+  fx.start(); // idempotent re-mount: no duplicated rows, no duplicated handlers
+  fx.fill({ name: "Second kit", agent_id: "second-kit" });
+  fx.saveBtn.click();
+  assert.equal(fx.doc.getElementById("presetManagerBadge").textContent, "Saved presets (2)");
+  assert.equal(fx.rows().length, 2);
+  assert.equal(fx.calls.toast.length, 2, "each save toasted exactly once");
+  assert.equal(fx.doc.getElementById("btnPresetManager").getAttribute("aria-expanded"), "false", "re-mount folds it");
+  fx.open();
+  assert.equal(fx.doc.getElementById("presetManager").hidden, false, "one toggle per click");
+  assert.equal(fx.doc.getElementById("presetManagerEmpty").hidden, true, "rows exist: no empty line");
+});
+
+test("manager: hostile labels render inert and never touch style attributes", () => {
+  const fx = mountFixture();
+  const evil = "<img src=x onerror=alert(1)>";
+  fx.seed([{ label: evil, name: "<script>alert(2)</script>", role: '"><b onmouseover=alert(3)>' }]);
+  fx.start();
+  fx.open();
+  const row = fx.rows()[0];
+  assert.equal(fx.labelOf(row), "🧩 " + evil);
+  assert.equal(row.querySelector(".preset-row-meta").textContent, '<script>alert(2)</script> · "><b onmouseover=alert(3)>');
+  assert.equal(fx.doc.images.length, 0, "nothing was parsed as markup");
+  assert.equal(row.querySelectorAll("[style]").length, 0, "no inline styles from presets");
+  const input = (row.querySelector(".preset-rename").click(), fx.doc.getElementById("presetManager").querySelector(".preset-rename-input"));
+  assert.equal(input.value, evil, "the rename input carries the raw label, unsanitized and inert");
 });

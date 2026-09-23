@@ -433,6 +433,15 @@
             <span>Save as preset</span>
           </button>
         </div>
+
+        <div class="preset-manager-bar">
+          <button type="button" id="btnPresetManager" class="preset-disclosure" aria-expanded="false" aria-controls="presetManager">
+            <i class="fa-solid fa-chevron-right preset-chevron" aria-hidden="true"></i>
+            <span id="presetManagerBadge">Saved presets (0)</span>
+          </button>
+        </div>
+        <div id="presetManager" class="preset-manager" role="list" aria-label="Saved presets" hidden></div>
+        <p id="presetManagerEmpty" class="preset-manager-empty" hidden>No saved presets yet — fill the form and hit 'Save as preset'.</p>
       </div>
 
       <form id="formAddAgent" class="space-y-4" novalidate>
