@@ -87,6 +87,11 @@ pre code.hljs {
   gap: 0.5rem;
   margin-top: 0.75rem;
 }
+.preset-manager-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
 .preset-disclosure {
   display: inline-flex;
   align-items: center;

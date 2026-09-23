@@ -365,9 +365,15 @@ function mountFixture() {
             <button type="button" id="btnPresetManager" aria-expanded="false" aria-controls="presetManager">
               <span id="presetManagerBadge">Saved presets (0)</span>
             </button>
-            <button type="button" id="btnPresetExportAll" disabled aria-label="Export all saved presets">
-              <span>Export all</span>
-            </button>
+            <div class="preset-manager-actions">
+              <button type="button" id="btnPresetImport" aria-label="Import preset file">
+                <span>Import</span>
+              </button>
+              <button type="button" id="btnPresetExportAll" disabled aria-label="Export all saved presets">
+                <span>Export all</span>
+              </button>
+            </div>
+            <input type="file" id="presetImportInput" accept=".json,application/json" hidden>
           </div>
           <div id="presetManager" role="list" aria-label="Saved presets" hidden></div>
           <p id="presetManagerEmpty" hidden>No saved presets yet — fill the form and hit 'Save as preset'.</p>
@@ -385,7 +391,7 @@ function mountFixture() {
   win.eval(read(join(staticDir, "presets.js")));
   const doc = win.document;
   const storage = fakeStorage();
-  const calls = { fill: [], toast: [], submit: 0, download: [] };
+  const calls = { fill: [], toast: [], submit: 0, download: [], files: [] };
   doc.getElementById("formAddAgent").addEventListener("submit", (e) => {
     e.preventDefault();
     calls.submit += 1;
@@ -451,6 +457,12 @@ function mountFixture() {
     open() {
       doc.getElementById("btnPresetManager").click();
     },
+    pickFile(body) {
+      const input = doc.getElementById("presetImportInput");
+      Object.defineProperty(input, "files", { value: [{ name: "kit.json", body }], configurable: true });
+      input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      Object.defineProperty(input, "files", { value: [], configurable: true });
+    },
     rows() {
       return [...doc.getElementById("presetManager").children];
     },
@@ -466,6 +478,10 @@ function mountFixture() {
         fillForm: (p) => calls.fill.push(p),
         toast: (...a) => calls.toast.push(a),
         download: (name, text) => calls.download.push([name, text]),
+        readFile: (file, done) => {
+          calls.files.push(file);
+          done(file.body);
+        },
         storage,
         ...over,
       });
@@ -589,6 +605,16 @@ test("index.html wires the presets seam (sync script before app.js, container ab
   assert.ok(exportTag.includes('type="button"'), "Export-all can never submit the form");
   assert.ok(exportTag.includes("disabled"), "Export-all starts disabled (empty library)");
   assert.ok(exportTag.includes('aria-label="Export all saved presets"'), "Export-all is labelled");
+  const importAt = html.indexOf('id="btnPresetImport"');
+  assert.ok(importAt !== -1 && importAt < formAt, "Import sits on the disclosure row");
+  const importTag = html.slice(html.lastIndexOf("<button", importAt), html.indexOf(">", importAt) + 1);
+  assert.ok(importTag.includes('type="button"'), "Import can never submit the form");
+  assert.ok(importTag.includes('aria-label="Import preset file"'), "Import is labelled");
+  const inputAt = html.indexOf('id="presetImportInput"');
+  assert.ok(inputAt !== -1 && inputAt < formAt, "the file picker is inside the modal");
+  const inputTag = html.slice(html.lastIndexOf("<input", inputAt), html.indexOf(">", inputAt) + 1);
+  assert.ok(inputTag.includes('type="file"') && inputTag.includes("hidden"), "the picker is a hidden file input");
+  assert.ok(inputTag.includes('accept=".json,application/json"'), "the picker accepts JSON (validated regardless — §5.4)");
 });
 
 // ------------------------------------------------------- store (localStorage)
@@ -1180,4 +1206,258 @@ test("export: a failing download seam toasts plainly and stays non-destructive",
   assert.deepEqual(fx.readStore().map((p) => p.label), ["My DBA kit"], "library untouched");
   fx.doc.getElementById("btnPresetExportAll").click();
   assert.deepEqual(fx.calls.toast[1], ["Couldn't export that file.", "error", 4000]);
+});
+
+// ------------------------------------------------------------------- import
+
+test("import: gate 1 — a file over 512 KB is refused before parsing", () => {
+  const store = core.createStore({ storage: fakeStorage() });
+  const res = store.importText("x".repeat(512 * 1024 + 1));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "That file is too large to be a preset file.");
+  assert.deepEqual(native(store.load()), []);
+});
+
+test("import: gate 2 — non-JSON is refused in plain words", () => {
+  const store = core.createStore({ storage: fakeStorage() });
+  const res = store.importText("{{{ definitely not json");
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "That file isn't valid JSON.");
+});
+
+test("import: gate 3 — the file must self-describe; shape picks single vs library", () => {
+  const store = core.createStore({ storage: fakeStorage() });
+  const bad = [
+    "{}",
+    "[]",
+    JSON.stringify({ schema: "mlm-agent-preset/9", label: "X" }),
+    JSON.stringify({ schema: "mlm-agent-preset-lib/1" }),
+    JSON.stringify({ schema: "mlm-agent-preset-lib/1", presets: {} }),
+    JSON.stringify({ schema: "mlm-agent-preset-lib/1", presets: "nope" }),
+  ];
+  for (const text of bad) {
+    const res = store.importText(text);
+    assert.equal(res.ok, false, text);
+    assert.equal(res.error, "That file was made for a different version of this app.", text);
+  }
+  const tooMany = {
+    schema: "mlm-agent-preset-lib/1",
+    presets: Array.from({ length: 101 }, (_, i) => base({ label: "Kit " + i, agent_id: "kit-" + i + "-one" })),
+  };
+  const res = store.importText(JSON.stringify(tooMany));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "That file lists more presets than this app supports.");
+});
+
+test("import: single preset files and library files both auto-detect", () => {
+  const store = core.createStore({ storage: fakeStorage() });
+  const one = store.importText(JSON.stringify(base({ label: "Solo kit", agent_id: "solo-kit" })));
+  assert.deepEqual(native(one.value), { imported: 1, skipped: 0, total: 1 });
+  const two = store.importText(
+    JSON.stringify({
+      schema: "mlm-agent-preset-lib/1",
+      presets: [base({ label: "Kit A", agent_id: "kit-a-one" }), base({ label: "Kit B", agent_id: "kit-b-one" })],
+    }),
+  );
+  assert.deepEqual(native(two.value), { imported: 2, skipped: 0, total: 2 });
+  assert.deepEqual(native(store.load().map((p) => p.label)), ["Solo kit", "Kit A", "Kit B"]);
+});
+
+test("import: prototype-pollution payloads are inert and extra keys are dropped", () => {
+  const store = core.createStore({ storage: fakeStorage() });
+  const text =
+    '{"schema":"mlm-agent-preset-lib/1","__proto__":{"polluted":"yes"},"constructor":{"prototype":{"polluted":"yes"}},' +
+    '"presets":[{"schema":"mlm-agent-preset/1","__proto__":{"polluted":"yes"},"prototype":{"polluted":"yes"},' +
+    '"constructor":{"prototype":{"polluted":"yes"}},"label":"Hostile kit","agent_id":"hostile-one","name":"H",' +
+    '"role":"R","system_prompt":"At least ten characters here.","color":"#0ea5e9","avatar":"🧩",' +
+    '"extra":{"nested":{"deep":[1,2,3]}}}]}';
+  const res = store.importText(text);
+  assert.deepEqual(native(res.value), { imported: 1, skipped: 0, total: 1 });
+  assert.equal(Object.prototype.polluted, undefined, "Object.prototype stays clean");
+  assert.equal({}.polluted, undefined);
+  const [entry] = native(store.load());
+  assert.deepEqual(Object.keys(entry), [
+    "schema",
+    "agent_id",
+    "name",
+    "role",
+    "system_prompt",
+    "color",
+    "avatar",
+    "label",
+  ]);
+  assert.equal(entry.extra, undefined);
+});
+
+test("import: valid entries land, bad ones are skipped, each skip is reported", () => {
+  const warns = [];
+  const store = core.createStore({ storage: fakeStorage(), warn: (m) => warns.push(m) });
+  const res = store.importText(
+    JSON.stringify({
+      schema: "mlm-agent-preset-lib/1",
+      presets: [
+        base({ label: "Good one", agent_id: "good-one" }),
+        base({ label: "Bad color", agent_id: "bad-color", color: "red" }),
+        base({ label: "Bad prompt", agent_id: "bad-prompt", system_prompt: "short" }),
+        base({ label: "Nested junk", agent_id: "nested-junk", system_prompt: { deep: ["x"] } }),
+        base({ label: "Bad types", agent_id: "bad-types", name: 42 }),
+        base({ label: "Good two", agent_id: "good-two" }),
+      ],
+    }),
+  );
+  assert.deepEqual(native(res.value), { imported: 2, skipped: 4, total: 6 });
+  assert.deepEqual(native(store.load().map((p) => p.label)), ["Good one", "Good two"]);
+  assert.equal(warns.length, 4, "every skipped entry is reported with details");
+  assert.ok(warns.some((m) => m.includes("Bad color") && m.includes("hex code")), warns.join(" | "));
+});
+
+test("import: collisions take the (imported) family against builtins and saved labels", () => {
+  const store = core.createStore({ storage: fakeStorage() });
+  store.save(base({ label: "My kit", agent_id: "my-kit" }));
+  const res = store.importText(
+    JSON.stringify({
+      schema: "mlm-agent-preset-lib/1",
+      presets: [
+        base({ label: "My kit", agent_id: "my-kit-2" }),
+        base({ label: "DB Expert", agent_id: "db-expert-2" }),
+        base({ label: "My kit", agent_id: "my-kit-3" }),
+      ],
+    }),
+  );
+  assert.equal(res.ok, true);
+  assert.deepEqual(native(store.load().map((p) => p.label)), [
+    "My kit",
+    "My kit (imported)",
+    "DB Expert (imported)",
+    "My kit (imported 2)",
+  ]);
+});
+
+test("import: fills to the preset cap, reports the remainder, refuses a full library", () => {
+  const bounds = { presets: 4, presetChars: 8192, libraryChars: 262144 };
+  const store = core.createStore({ storage: fakeStorage(), bounds });
+  store.save(base({ label: "Existing", agent_id: "existing-one" }));
+  const presets = Array.from({ length: 5 }, (_, i) => base({ label: "Kit " + i, agent_id: "kit-" + i + "-one" }));
+  const res = store.importText(JSON.stringify({ schema: "mlm-agent-preset-lib/1", presets }));
+  assert.deepEqual(native(res.value), { imported: 3, skipped: 2, total: 5 });
+  assert.equal(store.load().length, 4, "filled to the cap, no further");
+
+  const full = core.createStore({ storage: fakeStorage(), bounds });
+  for (const i of [0, 1, 2, 3]) full.save(base({ label: "N" + i, agent_id: "n" + i + "-one" }));
+  const refused = full.importText(JSON.stringify({ schema: "mlm-agent-preset-lib/1", presets: [presets[0]] }));
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error, "Your preset library is full (4 presets). Remove or export some first.");
+  assert.equal(full.load().length, 4);
+});
+
+test("import: per-preset and library size bounds hold on the merge", () => {
+  // A base preset is ~235 compact chars; 300 lets the small one in and keeps
+  // the 500-char-prompt one out, so the bound is exercised, not the validator.
+  const store = core.createStore({
+    storage: fakeStorage(),
+    bounds: { presets: 50, presetChars: 300, libraryChars: 262144 },
+  });
+  const res = store.importText(
+    JSON.stringify({
+      schema: "mlm-agent-preset-lib/1",
+      presets: [base({ label: "Small", agent_id: "small-one" }), base({ label: "Big", agent_id: "big-one", system_prompt: "y".repeat(500) })],
+    }),
+  );
+  assert.deepEqual(native(res.value), { imported: 1, skipped: 1, total: 2 });
+
+  const tight = core.createStore({
+    storage: fakeStorage(),
+    bounds: { presets: 50, presetChars: 8192, libraryChars: 400 },
+  });
+  const over = tight.importText(
+    JSON.stringify({
+      schema: "mlm-agent-preset-lib/1",
+      presets: [base({ label: "A", agent_id: "a-one" }), base({ label: "B", agent_id: "b-one" })],
+    }),
+  );
+  assert.equal(over.ok, false);
+  assert.equal(over.error, "Your preset library is too large to save more. Export it, then remove some presets.");
+  assert.deepEqual(native(tight.load()), []);
+});
+
+test("import: a throwing setItem leaves the old library intact", () => {
+  const storage = fakeStorage();
+  const store = core.createStore({ storage });
+  store.save(base({ label: "Before", agent_id: "before-one" }));
+  storage.setItem = () => {
+    throw new Error("quota exceeded");
+  };
+  const res = store.importText(JSON.stringify(base({ label: "After", agent_id: "after-one" })));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "Couldn't save — this browser's storage is full or blocked.");
+  assert.deepEqual(native(store.load().map((p) => p.label)), ["Before"]);
+});
+
+test("import: a file where nothing survives validation changes nothing", () => {
+  const store = core.createStore({ storage: fakeStorage() });
+  const res = store.importText(
+    JSON.stringify({
+      schema: "mlm-agent-preset-lib/1",
+      presets: [base({ label: "Bad", agent_id: "no" }), base({ label: "Also bad", agent_id: "x" })],
+    }),
+  );
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "That file didn't contain any usable presets.");
+  assert.deepEqual(native(store.load()), []);
+});
+
+test("import UI: the Import button opens the hidden picker, and the picker imports", () => {
+  const fx = mountFixture();
+  fx.start();
+  const input = fx.doc.getElementById("presetImportInput");
+  let opened = 0;
+  input.click = () => {
+    opened += 1;
+  };
+  fx.doc.getElementById("btnPresetImport").click();
+  assert.equal(opened, 1, "Import opens the file picker");
+
+  const text = JSON.stringify({
+    schema: "mlm-agent-preset-lib/1",
+    presets: [base({ label: "Kit A", agent_id: "kit-a-one" }), base({ label: "Kit B", agent_id: "kit-b-one" })],
+  });
+  fx.pickFile(text);
+  assert.equal(fx.calls.files.length, 1, "the chosen file reached the read seam");
+  assert.deepEqual(native(fx.readStore().map((p) => p.label)), ["Kit A", "Kit B"]);
+  assert.deepEqual(fx.calls.toast, [["Imported 2 presets.", "success", 3000]]);
+  assert.equal(fx.doc.getElementById("presetManagerBadge").textContent, "Saved presets (2)");
+  assert.equal(fx.doc.getElementById("btnPresetExportAll").disabled, false);
+});
+
+test("import UI: partial imports are reported honestly and the same file can re-fire", () => {
+  const fx = mountFixture();
+  fx.start();
+  const text = JSON.stringify({
+    schema: "mlm-agent-preset-lib/1",
+    presets: [
+      base({ label: "Good", agent_id: "good-one" }),
+      base({ label: "Bad", agent_id: "bad-one", color: "nope" }),
+      base({ label: "Also good", agent_id: "also-good-one" }),
+      base({ label: "Bad two", agent_id: "bad-two-one", name: "" }),
+    ],
+  });
+  fx.pickFile(text);
+  assert.deepEqual(fx.calls.toast[0], ["Imported 2 of 4 — 2 skipped.", "warning", 4000]);
+  assert.equal(fx.readStore().length, 2);
+  fx.pickFile(text); // the input was cleared, so picking the same file imports again
+  assert.equal(fx.calls.toast.length, 2);
+  assert.deepEqual(native(fx.readStore().map((p) => p.label)), ["Good", "Also good", "Good (imported)", "Also good (imported)"]);
+});
+
+test("import UI: failures toast plainly, stay non-destructive and never throw", () => {
+  const fx = mountFixture();
+  fx.start();
+  fx.pickFile("not json at all");
+  assert.deepEqual(fx.calls.toast, [["That file isn't valid JSON.", "error", 4000]]);
+  assert.deepEqual(native(fx.readStore()), []);
+
+  const unreadable = mountFixture();
+  unreadable.start({ readFile: (file, done) => done(null) });
+  unreadable.pickFile("whatever");
+  assert.deepEqual(unreadable.calls.toast, [["Couldn't read that file.", "error", 4000]]);
 });

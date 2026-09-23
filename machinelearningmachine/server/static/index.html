@@ -439,10 +439,17 @@
             <i class="fa-solid fa-chevron-right preset-chevron" aria-hidden="true"></i>
             <span id="presetManagerBadge">Saved presets (0)</span>
           </button>
-          <button type="button" id="btnPresetExportAll" class="preset-act" disabled aria-label="Export all saved presets">
-            <i class="fa-solid fa-download" aria-hidden="true"></i>
-            <span>Export all</span>
-          </button>
+          <div class="preset-manager-actions">
+            <button type="button" id="btnPresetImport" class="preset-act" aria-label="Import preset file">
+              <i class="fa-solid fa-upload" aria-hidden="true"></i>
+              <span>Import</span>
+            </button>
+            <button type="button" id="btnPresetExportAll" class="preset-act" disabled aria-label="Export all saved presets">
+              <i class="fa-solid fa-download" aria-hidden="true"></i>
+              <span>Export all</span>
+            </button>
+          </div>
+          <input type="file" id="presetImportInput" accept=".json,application/json" hidden>
         </div>
         <div id="presetManager" class="preset-manager" role="list" aria-label="Saved presets" hidden></div>
         <p id="presetManagerEmpty" class="preset-manager-empty" hidden>No saved presets yet — fill the form and hit 'Save as preset'.</p>

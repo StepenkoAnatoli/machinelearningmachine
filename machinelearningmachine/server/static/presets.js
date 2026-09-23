@@ -358,6 +358,22 @@
     return "agent-presets-" + d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + ".json";
   }
 
+  /** Production file reader: Blob.text(); anything unreadable lands as null so
+   *  the caller can toast plainly instead of throwing (spec §5.5). */
+  function readFileText(file, done) {
+    try {
+      if (file && typeof file.text === "function") {
+        file.text().then(done, function () {
+          done(null);
+        });
+        return;
+      }
+    } catch (e) {
+      // fall through to the plain failure below
+    }
+    done(null);
+  }
+
   /** Production download: Blob + anchor, no network, no navigation (spec §4.4). */
   function downloadFile(filename, text) {
     var blob = new Blob([text], { type: "application/json" });
@@ -391,6 +407,7 @@
     var getFormData = typeof options.getFormData === "function" ? options.getFormData : null;
     var toast = typeof options.toast === "function" ? options.toast : null;
     var download = typeof options.download === "function" ? options.download : downloadFile;
+    var readFile = typeof options.readFile === "function" ? options.readFile : readFileText;
     var chips = typeof document === "object" ? document.getElementById("presetChips") : null;
     if (!chips || !fillForm) {
       return false;
@@ -411,6 +428,8 @@
     var badge = document.getElementById("presetManagerBadge");
     var emptyMsg = document.getElementById("presetManagerEmpty");
     var exportAllBtn = document.getElementById("btnPresetExportAll");
+    var importBtn = document.getElementById("btnPresetImport");
+    var importInput = document.getElementById("presetImportInput");
     var managerOpen = false;
 
     function loadPreset(preset) {
@@ -596,6 +615,34 @@
       return row;
     }
 
+    /** A picked file → store import → honest summary (spec §5.2/§6.2). Any
+     *  failure is a toast; the library is untouched by definition. */
+    function importPicked(file) {
+      readFile(file, function (text) {
+        if (typeof text !== "string") {
+          if (toast) {
+            toast("Couldn't read that file.", "error", 4000);
+          }
+          return;
+        }
+        var res = store.importText(text);
+        renderManager(); // badge/rows/Export-all reflect the library either way
+        if (!toast) {
+          return;
+        }
+        if (!res.ok) {
+          toast(res.error, "error", 4000);
+          return;
+        }
+        var v = res.value;
+        if (v.skipped > 0) {
+          toast("Imported " + v.imported + " of " + v.total + " \u2014 " + v.skipped + " skipped.", "warning", 4000);
+        } else {
+          toast(v.imported === 1 ? "Imported 1 preset." : "Imported " + v.imported + " presets.", "success", 3000);
+        }
+      });
+    }
+
     /** Rebuild rows, badge and empty state from the store (single source of
      *  truth: localStorage — nothing is cached in this closure). */
     function renderManager() {
@@ -712,11 +759,11 @@
       saveState.afterSave = renderManager;
     }
 
-    // Manager disclosure + Export-all (spec §6.2 flows 3–4): static markup, so
-    // one listener per page that delegates to the latest mount. The row stays
-    // visible whether the manager is open or closed.
+    // Manager row — disclosure, Import, Export-all (spec §6.2 flows 3–4):
+    // static markup, so one listener per page that delegates to the latest
+    // mount. The row stays visible whether the manager is open or closed.
     if (!managerState) {
-      managerState = { toggle: null, exportAll: null };
+      managerState = { toggle: null, exportAll: null, pick: null, picked: null };
       if (disclosure) {
         disclosure.addEventListener("click", function () {
           if (managerState.toggle) {
@@ -731,13 +778,105 @@
           }
         });
       }
+      if (importBtn && importInput) {
+        importBtn.addEventListener("click", function () {
+          if (managerState.pick) {
+            managerState.pick();
+          }
+        });
+      }
+      if (importInput) {
+        importInput.addEventListener("change", function () {
+          var file = importInput.files && importInput.files[0];
+          // Clear first: picking the same file twice must fire again, and the
+          // queued read gets the handle we captured.
+          importInput.value = "";
+          if (file && managerState.picked) {
+            managerState.picked(file);
+          }
+        });
+      }
     }
     managerState.toggle = function () {
       setManagerOpen(!managerOpen); // collapsed by default; badge shows the count
     };
     managerState.exportAll = exportAll;
+    managerState.pick = function () {
+      if (importInput) {
+        importInput.click();
+      }
+    };
+    managerState.picked = importPicked;
     setManagerOpen(false);
     return true;
+  }
+
+  /**
+   * Parse and gate a candidate import file (spec §5.2 gates 1–5). Pure: no
+   * storage access, no writes — the caller decides whether to commit.
+   *
+   * `taken` is every label already in play (built-ins + saved); accepted
+   * entries leave here carrying their final ` (imported)` family label, so a
+   * file with three copies of "Kit" cannot produce three identical labels.
+   *
+   * Returns {ok:true, value:{presets, skipped, total}} — `presets` are ready
+   * to append — or {ok:false, field, error} with a plain-language message.
+   */
+  function planImport(text, taken, bounds, warn) {
+    if (typeof text !== "string" || text.length > IMPORT_MAX_BYTES) {
+      return fail(null, MSG_STORE.tooLarge);
+    }
+    var data = null;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      return fail(null, MSG_STORE.notJson);
+    }
+    if (!isPlainObject(data)) {
+      return fail(null, MSG_STORE.fileVersion);
+    }
+    var entries = null;
+    if (data.schema === PRESET_SCHEMA) {
+      entries = [data];
+    } else if (data.schema === LIB_SCHEMA && Array.isArray(data.presets)) {
+      if (data.presets.length > IMPORT_MAX_ENTRIES) {
+        return fail(null, MSG_STORE.tooMany);
+      }
+      entries = data.presets;
+    } else {
+      return fail(null, MSG_STORE.fileVersion);
+    }
+
+    // Gate 5: accept valid entries, skip bad ones, report honestly. Every read
+    // is a top-level known field, type-checked inside validatePreset and
+    // whitelist-copied into a fresh object — parsed JSON is never spread or
+    // walked, so nested junk and __proto__ payloads have nowhere to land.
+    var labels = taken.slice();
+    var presets = [];
+    var skipped = 0;
+    for (var i = 0; i < entries.length; i++) {
+      // A skipped entry still deserves a name in the console log when it
+      // carries a readable one — truncated, because a hostile file can put
+      // anything in there.
+      var raw = entries[i];
+      var said = isPlainObject(raw) && typeof raw.label === "string" ? raw.label.trim().slice(0, 60) : "";
+      var where = "Skipped preset " + (i + 1) + (said ? ' ("' + said + '")' : "");
+      var v = validatePreset(raw);
+      if (!v.ok) {
+        skipped += 1;
+        warn(where + ": " + v.error);
+        continue;
+      }
+      if (compactSize(v.value) > bounds.presetChars) {
+        skipped += 1;
+        warn(where + ": " + MSG_STORE.presetLarge);
+        continue;
+      }
+      v.value.label = uniqueLabel(v.value.label, labels, "import");
+      labels.push(v.value.label);
+      presets.push(v.value);
+    }
+    return { ok: true, value: { presets: presets, skipped: skipped, total: entries.length } };
   }
 
   /**
@@ -765,7 +904,20 @@
       return "No preset named '" + label + "'.";
     },
     taken: "That name is already taken \u2014 pick another.",
+    // Import gates (spec §5.2). Note `fileVersion` is deliberately distinct
+    // from validatePreset's per-preset version message: one is about a file,
+    // the other about an entry.
+    tooLarge: "That file is too large to be a preset file.",
+    notJson: "That file isn't valid JSON.",
+    fileVersion: "That file was made for a different version of this app.",
+    tooMany: "That file lists more presets than this app supports.",
+    noUsable: "That file didn't contain any usable presets.",
   };
+
+  // Import gates 1 and 3 (spec §5.2). 512 KB measured in UTF-16 code units —
+  // the same number for any ASCII JSON, and a conservative bound otherwise.
+  var IMPORT_MAX_BYTES = 512 * 1024;
+  var IMPORT_MAX_ENTRIES = 100;
 
   /** Compact-JSON length — the serialization all size bounds are measured on. */
   function compactSize(v) {
@@ -780,6 +932,15 @@
         return b.label;
       });
     var onNotice = typeof options.onNotice === "function" ? options.onNotice : function () {};
+    // Gate-5 details go to the console by default (spec §5.2); tests inject.
+    var warn =
+      typeof options.warn === "function"
+        ? options.warn
+        : function (msg) {
+            if (typeof console === "object" && console && typeof console.warn === "function") {
+              console.warn(msg);
+            }
+          };
     var storage = options.storage;
     var memory = [];
     var available = false;
@@ -851,6 +1012,13 @@
       }
     }
 
+    /** Every label in a library list — the taken set for uniqueLabel. */
+    function labelsOf(list) {
+      return list.map(function (p) {
+        return p.label;
+      });
+    }
+
     function save(raw) {
       var v = validatePreset(raw);
       if (!v.ok) {
@@ -863,11 +1031,7 @@
       if (compactSize(v.value) > bounds.presetChars) {
         return fail(null, MSG_STORE.presetLarge);
       }
-      var taken = builtinLabels.concat(
-        list.map(function (p) {
-          return p.label;
-        }),
-      );
+      var taken = builtinLabels.concat(labelsOf(list));
       v.value.label = uniqueLabel(v.value.label, taken, "manual");
       var next = list.concat([v.value]);
       if (compactSize({ schema: LIB_SCHEMA, presets: next }) > bounds.libraryChars) {
@@ -926,13 +1090,11 @@
         return v;
       }
       var taken = builtinLabels.concat(
-        list
-          .filter(function (p, i2) {
+        labelsOf(
+          list.filter(function (p, i2) {
             return i2 !== idx;
-          })
-          .map(function (p) {
-            return p.label;
           }),
+        ),
       );
       if (taken.indexOf(v.value.label) !== -1) {
         return fail("label", MSG_STORE.taken);
@@ -945,12 +1107,44 @@
       return { ok: true, value: v.value };
     }
 
+    /**
+     * Import a whole file (spec §5.2 gates 1–7). The merge happens entirely in
+     * memory and lands as ONE setItem — a failure at any gate leaves the
+     * stored library byte-identical.
+     */
+    function importText(text) {
+      var list = read();
+      var taken = builtinLabels.concat(labelsOf(list));
+      var plan = planImport(text, taken, bounds, warn);
+      if (!plan.ok) {
+        return plan;
+      }
+      var room = bounds.presets - list.length;
+      if (room <= 0) {
+        return fail(null, MSG_STORE.full(bounds.presets));
+      }
+      var incoming = plan.value.presets.slice(0, room); // gate 6: fill to the cap
+      var skipped = plan.value.skipped + (plan.value.presets.length - incoming.length);
+      if (!incoming.length) {
+        return fail(null, MSG_STORE.noUsable);
+      }
+      var next = list.concat(incoming);
+      if (compactSize({ schema: LIB_SCHEMA, presets: next }) > bounds.libraryChars) {
+        return fail(null, MSG_STORE.libraryLarge);
+      }
+      if (!write(next)) {
+        return fail(null, MSG_STORE.writeFail);
+      }
+      return { ok: true, value: { imported: incoming.length, skipped: skipped, total: plan.value.total } };
+    }
+
     return {
       available: available,
       load: read,
       save: save,
       deleteByLabel: deleteByLabel,
       rename: rename,
+      importText: importText,
     };
   }
 
