@@ -824,6 +824,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // keeps its own meaning and its own pill.
   let serverUnreachable = false;
   let offlineProbeTimer = null;
+  let offlineProbeRounds = 0;
   const OFFLINE_PROBE_DELAYS = [1000, 2000, 5000, 10000]; // then held at the last one
 
   //: What a disabled control tells the user, and where the full story lives.
@@ -883,6 +884,11 @@ document.addEventListener("DOMContentLoaded", () => {
       offlineBanner.classList.toggle("hidden", !next);
     }
     applyServerControlState();
+    // Entering the state starts the one thing that can end it without the user
+    // doing anything; leaving it stops that, so nothing keeps asking a server we
+    // are already talking to.
+    if (next) scheduleOfflineProbe();
+    else stopOfflineProbe();
     if (next && why) console.info("Server unreachable:", why);
   }
 
@@ -894,6 +900,56 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) {
       return false; // the network itself failed: nothing is listening
     }
+  }
+
+  /**
+   * Ask the server whether it is back, and keep asking - with a widening delay -
+   * for as long as it is not.
+   *
+   * The socket's own retry loop cannot be the only way back: it gives up after
+   * MAX_RECONNECT_ATTEMPTS (ten minutes of dialling forever is not a thing a page
+   * should do), and a server the user relaunches after that would never be
+   * noticed. This loop does not give up, and it is cheap: one request per delay,
+   * the last delay holding at ten seconds.
+   *
+   * Only one probe is ever in flight, so a flapping server cannot stack them.
+   */
+  function scheduleOfflineProbe() {
+    if (offlineProbeTimer !== null || sessionReleased) return;
+    const delay = OFFLINE_PROBE_DELAYS[Math.min(offlineProbeRounds, OFFLINE_PROBE_DELAYS.length - 1)];
+    offlineProbeTimer = setTimeout(() => {
+      offlineProbeTimer = null;
+      offlineProbeRounds += 1;
+      if (!serverUnreachable) return;
+      probeServer().then((reachable) => {
+        if (!serverUnreachable) return;
+        if (reachable) recoverFromOffline();
+        else scheduleOfflineProbe();
+      });
+    }, delay);
+  }
+
+  function stopOfflineProbe() {
+    if (offlineProbeTimer !== null) {
+      clearTimeout(offlineProbeTimer);
+      offlineProbeTimer = null;
+    }
+    offlineProbeRounds = 0; // the next outage starts asking quickly again
+  }
+
+  /**
+   * The server answered a probe: give the page back, in place.
+   *
+   * Deliberately not a reload. The user may be half-way through a prompt, the
+   * transcript on screen is the history they have been reading, and a page that
+   * throws all of that away to save a reconnect has made the outage worse. The
+   * socket is re-opened by hand instead - reconnectWebSocket() drops the dead one,
+   * so its onclose cannot report a second outage for a server that is now fine.
+   */
+  function recoverFromOffline() {
+    stopOfflineProbe();
+    setServerUnreachable(false, "the server answered a probe");
+    if (!ws || ws.readyState > WebSocket.OPEN) reconnectWebSocket();
   }
 
   /** Called when a request could not reach the server at all (not a refusal). */
@@ -939,9 +995,14 @@ document.addEventListener("DOMContentLoaded", () => {
         const delay = Math.min(1000 * Math.pow(1.5, wsReconnectAttempts), 10000);
         setTimeout(initWebSocket, delay);
       } else {
-        connectionStatus.className = "flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-red-950/80 border border-red-800 text-red-400";
-        connectionStatus.innerHTML = '<span class="w-2 h-2 rounded-full bg-red-400"></span><span>Disconnected - Refresh to retry</span>';
-        showToast("Connection lost. Please refresh the page.", "error", 5000);
+        // The socket's budget is spent, which is not the same as the page giving
+        // up: the offline probe keeps asking, and re-opens this socket the moment
+        // the server answers. So say "still trying" - "refresh to retry" would
+        // invite the user to wipe the transcript and their half-written prompt to
+        // fix something the page fixes by itself.
+        connectionStatus.className = "flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-amber-950/80 border border-amber-800 text-amber-400";
+        connectionStatus.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-400"></span><span>Server unreachable - retrying</span>';
+        connectionStatus.setAttribute("aria-label", "Server unreachable, still retrying");
       }
     };
 
@@ -1140,6 +1201,9 @@ document.addEventListener("DOMContentLoaded", () => {
       resyncHistoryFromServer(`Some messages were skipped while this tab was not keeping up (${data.dropped || 0}) - refetched`);
     } else if (data.type === "session_released") {
       sessionReleased = true;
+      // This tab's mesh is gone for good: reconnecting would hand it a different,
+      // empty session, so there is nothing to probe for.
+      stopOfflineProbe();
       localRun = false;
       localQueued = false;
       queuedRunId = null;

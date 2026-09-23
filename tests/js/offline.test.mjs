@@ -11,8 +11,9 @@
  *                           the normal case for this app, not an error)
  *   - it does not exist  -> nothing is attempted at all (old browsers, jsdom)
  *
- * The unreachable-server state machine (the banner, the disabled controls, the
- * automatic recovery) is the next task and lands in this same file.
+ * The rest of the file is the unreachable-server state machine: the banner, the
+ * controls that go grey with a reason, and the recovery that must happen without
+ * a reload.
  *
  * Run: npm install && node --test tests/js/*.test.mjs
  */
@@ -21,7 +22,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { afterEach } from "node:test";
-import { JSDOM } from "jsdom";
+import { JSDOM, VirtualConsole } from "jsdom";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..");
@@ -45,11 +46,26 @@ async function loadClient({ serviceWorker = "absent", fetchFails = false, fetchS
     .replace(/<link[^>]*>/gi, "");
   //: `serverGone` lets a test kill the server mid-flight, which is how the page
   //: ever has session rows on screen while the server is unreachable.
-  const calls = { registered: [], fetch: [], sockets: 0, lastSocket: null, serverGone: false };
+  const calls = {
+    registered: [],
+    fetch: [],
+    sockets: 0,
+    all: [], // every FakeSocket, in order, so a test can count what is still open
+    lastSocket: null,
+    serverGone: false,
+    jsdomErrors: [], // jsdom reports every navigation as an error, and a reload IS one
+  };
+  // jsdom's default console prints "Not implemented: navigation" to the Node
+  // console - noise a test cannot assert on. Captured instead, and forwarded for
+  // everything that is not a jsdom limitation.
+  const virtualConsole = new VirtualConsole();
+  virtualConsole.on("jsdomError", (err) => calls.jsdomErrors.push(String((err && err.message) || err)));
+  virtualConsole.sendTo(console, { omitJSDOMErrors: true });
 
   const dom = new JSDOM(html, {
     url: "http://127.0.0.1:8000/",
     runScripts: "outside-only",
+    virtualConsole,
     beforeParse(win) {
       installTimers(win);
       win.fetch = async (url) => {
@@ -76,15 +92,23 @@ async function loadClient({ serviceWorker = "absent", fetchFails = false, fetchS
         };
       };
       class FakeSocket {
+        // A real WebSocket carries these on the constructor, and code that asks
+        // "is this socket open?" uses them - a fake without them silently answers
+        // every such question with `false`.
+        static CONNECTING = 0;
+        static OPEN = 1;
+        static CLOSING = 2;
+        static CLOSED = 3;
         constructor(url) {
           this.url = url;
           this.readyState = 1;
           calls.sockets += 1;
+          calls.all.push(this);
           calls.lastSocket = this;
           // A socket only opens if something is listening - otherwise onopen here
           // would tell the page the server is up while every request says it is not.
           win.setTimeout(() => {
-            if (fetchFails) {
+            if (fetchFails || calls.serverGone) {
               this.readyState = 3;
               this.onclose && this.onclose({ code: 1006 });
             } else {
@@ -168,7 +192,7 @@ function installTimers(win) {
     const realId = realSetTimeout(() => {
       if (pending.delete(id) && typeof fn === "function") fn(...args);
     }, ms);
-    pending.set(id, { realId });
+    pending.set(id, { realId, fn, ms });
     return id;
   };
   win.clearTimeout = (id) => {
@@ -185,6 +209,27 @@ function installTimers(win) {
   win.__cancelAllTimers = () => {
     for (const record of pending.values()) realClearTimeout(record.realId);
     pending.clear();
+  };
+  /**
+   * Run whatever the page has queued, *now*, instead of waiting out its delays.
+   *
+   * Real time would otherwise rule these tests: the offline probe backs off to
+   * ten seconds between attempts and the socket retry budget takes ten tries, so
+   * "the server comes back later" would cost minutes of wall clock. This runs the
+   * callbacks in queue order and returns how many ran, so a test can loop it and
+   * let the page's promises settle in between. The limit is what keeps a page
+   * that reschedules itself forever from hanging a test.
+   */
+  win.__runPendingTimers = (limit = 50) => {
+    let ran = 0;
+    while (pending.size && ran < limit) {
+      const [id, record] = pending.entries().next().value;
+      pending.delete(id);
+      realClearTimeout(record.realId);
+      ran += 1;
+      if (typeof record.fn === "function") record.fn();
+    }
+    return ran;
   };
 }
 
@@ -511,4 +556,124 @@ test("offline: the prompt box is never disabled - the user's typing is theirs", 
   assert.equal(box.readOnly, false);
   box.value = "a prompt I want to keep";
   assert.equal(box.value, "a prompt I want to keep", "and nothing rewrites it");
+});
+
+/*
+ * Getting back on its feet.
+ *
+ * This is what the whole exercise is for: an outage that ends without the user's
+ * help, and without the one thing that would cost them their work - a reload. The
+ * socket's retry loop is the fast path while it lasts, but it gives up (it has
+ * to, or a page left open overnight would dial forever); what must not give up is
+ * the page. So the page keeps asking the server whether it is back, on a widening
+ * delay, for as long as the outage lasts, and when the answer finally comes it
+ * clears the banner, hands the controls back and re-opens the socket - in place,
+ * with whatever the user has typed still in the prompt box.
+ */
+
+/** Run the page's queued work whatever its delay, and let its promises settle. */
+async function tick(win, rounds = 6) {
+  for (let i = 0; i < rounds; i++) {
+    win.__runPendingTimers(200);
+    await settleFrames(win, 3);
+  }
+}
+
+/** jsdom's word for "something tried to navigate the page". */
+const navigationErrors = (calls) => calls.jsdomErrors.filter((message) => /navigation/i.test(message));
+const probes = (calls) => calls.fetch.filter((url) => String(url).includes("/api/status")).length;
+
+test("offline: the page brings itself back when the server returns - no reload, prompt intact", async () => {
+  const { win, calls, socket } = await loadClient();
+  const box = win.document.getElementById("inputPrompt");
+  box.value = "a half-written prompt I do not want to lose";
+
+  calls.serverGone = true; // the server stops...
+  socket().close(); // ...and the socket dies with it, readyState and all
+  await tick(win, 14); // long enough that the socket's own retry budget is spent
+  assert.ok(bannerVisible(win), "inside the outage the page says so");
+  assert.equal(win.document.getElementById("btnRun").disabled, true);
+
+  calls.serverGone = false; // and later - a minute, an hour, the user relaunches it
+  await tick(win, 8);
+
+  assert.equal(bannerVisible(win), false, "the banner clears by itself");
+  assert.equal(win.document.getElementById("btnRun").disabled, false, "the controls come back");
+  assert.equal(
+    box.value,
+    "a half-written prompt I do not want to lose",
+    "and the user's typing is still there - this is why nothing reloads",
+  );
+  // A reload cannot be observed in the DOM - it would be a different page - so
+  // this is caught at the door: jsdom reports *every* navigation as a jsdomError,
+  // reload included, and the detector itself is pinned by the test below.
+  assert.deepEqual(navigationErrors(calls), [], `nothing reloaded or navigated the page: ${calls.jsdomErrors.join(" | ")}`);
+  assert.ok(calls.sockets >= 2, `the socket is re-dialled for the returned server (made ${calls.sockets})`);
+  assert.match(win.document.getElementById("connectionStatus").textContent, /live mesh/i, "and the page is live again");
+});
+
+test("offline: it never tells the user to refresh, and it never gives up while the server is gone", async () => {
+  const { win, calls, socket } = await loadClient();
+  calls.serverGone = true;
+  socket().close();
+
+  await tick(win, 14); // the socket's retry budget is spent inside this window
+  assert.ok(bannerVisible(win), "still down, and still saying so");
+  assert.deepEqual(
+    toasts(win).filter((text) => /refresh|reload/i.test(text)),
+    [],
+    `no "refresh the page" dead end: ${toasts(win).join(" | ")}`,
+  );
+  assert.doesNotMatch(
+    win.document.getElementById("connectionStatus").textContent,
+    /refresh/i,
+    "and the status line does not ask for one either",
+  );
+
+  // The point: the page is still asking. A "give up" state means a server that
+  // comes back ten minutes later is never noticed, and the banner becomes a lie.
+  const before = probes(calls);
+  await tick(win, 6);
+  const after = probes(calls);
+  assert.ok(after > before, `it keeps probing the server (${before} -> ${after})`);
+  assert.ok(after - before <= 20, `at a sane rate, not in a spin (${after - before} probes in six rounds)`);
+
+  calls.serverGone = false;
+  await tick(win, 8);
+  assert.equal(bannerVisible(win), false, "and an outage this long still ends by itself");
+  assert.equal(win.document.getElementById("btnRun").disabled, false);
+});
+
+test("offline: the navigation detector the recovery test relies on actually fires", async () => {
+  // The test above says "nothing reloaded the page", and that is only worth
+  // anything if the detector can see a reload at all. jsdom refuses to let a test
+  // replace location.reload ("Cannot redefine property"), so the net is jsdom's own
+  // report of an attempted navigation - this proves it is a net, not a no-op.
+  const { win, calls } = await loadClient();
+  assert.deepEqual(navigationErrors(calls), [], "quiet to begin with");
+
+  win.location.reload();
+  await settleFrames(win, 3);
+
+  assert.ok(navigationErrors(calls).length >= 1, `a reload must be visible here: ${calls.jsdomErrors.join(" | ")}`);
+});
+
+test("offline: recovery opens one socket, not a storm of them", async () => {
+  const { win, calls, socket } = await loadClient();
+  calls.serverGone = true;
+  socket().close();
+  await tick(win, 14);
+  calls.serverGone = false;
+  await tick(win, 6);
+
+  assert.equal(bannerVisible(win), false, "the outage is over before sockets are counted");
+  const live = calls.all.filter((s) => s.readyState === 1);
+  assert.equal(live.length, 1, `exactly one live socket, got ${live.length} (of ${calls.all.length} ever opened)`);
+  const opened = calls.all.length;
+  await tick(win, 6);
+  assert.equal(
+    calls.all.length,
+    opened,
+    "and a settled page opens no more: the two recovery paths (socket retry, probe) do not fight",
+  );
 });

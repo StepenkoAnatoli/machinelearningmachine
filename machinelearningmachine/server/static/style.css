@@ -683,7 +683,6 @@ html:not(.dark) .bg-slate-800\/80 { background-color: rgb(241 245 249 / 0.9); }
 html:not(.dark) .bg-slate-800\/90 { background-color: #f1f5f9; }
 html:not(.dark) .hover\:bg-slate-700:hover { background-color: #e2e8f0; }
 html:not(.dark) .bg-emerald-950\/80 { background-color: #ecfdf5; }
-html:not(.dark) .bg-red-950\/80 { background-color: #fef2f2; }
 html:not(.dark) .bg-amber-950\/80 { background-color: #fffbeb; }
 html:not(.dark) .bg-amber-950\/40 { background-color: rgb(255 251 235 / 0.8); }
 html:not(.dark) .bg-amber-900\/50 { background-color: #fef3c7; }
@@ -702,7 +701,6 @@ html:not(.dark) .border-amber-900\/60 { border-color: rgb(252 211 77 / 0.6); }
 html:not(.dark) .border-amber-700\/50 { border-color: rgb(251 191 36 / 0.6); }
 html:not(.dark) .border-emerald-800 { border-color: #6ee7b7; }
 html:not(.dark) .border-emerald-900\/60 { border-color: rgb(110 231 183 / 0.6); }
-html:not(.dark) .border-red-800 { border-color: #fca5a5; }
 html:not(.dark) .border-purple-900\/60 { border-color: rgb(196 181 253 / 0.7); }
 html:not(.dark) .border-purple-700\/50 { border-color: #c4b5fd; }
 html:not(.dark) .border-pink-800\/60 { border-color: rgb(249 168 212 / 0.8); }
@@ -725,7 +723,6 @@ html:not(.dark) .text-amber-200\/80 { color: rgb(180 83 9 / 0.9); }
 html:not(.dark) .text-amber-300 { color: #b45309; }
 html:not(.dark) .text-amber-400 { color: #b45309; }
 html:not(.dark) .text-amber-500 { color: #b45309; }
-html:not(.dark) .text-red-400 { color: #b91c1c; }
 html:not(.dark) .hover\:text-red-300:hover { color: #b91c1c; }
 html:not(.dark) .text-cyan-400 { color: #0e7490; }
 /* The brand gradient is darker in light mode: these three stops are the
