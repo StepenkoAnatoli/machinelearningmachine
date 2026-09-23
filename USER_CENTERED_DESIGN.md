@@ -467,10 +467,9 @@ ALL E2E CHECKS PASSED
 
 ## 🔮 Future User-Centered Improvements (Not Yet Done)
 
-1. **Dark/light toggle**: currently dark only, some users prefer light.
-2. **Copy prompt button**: quick duplicate of the last prompt.
-3. **Offline support**: service worker for PWA.
-4. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
+1. **Copy prompt button**: quick duplicate of the last prompt.
+2. **Offline support**: service worker for PWA.
+3. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
 
 These are noted but not implemented to keep scope focused on highest user value fixes.
 (An earlier version of this list proposed *session isolation* and *export
@@ -482,7 +481,11 @@ document disagree with the dashboard it describes. And it removed *agent presets
 when they shipped: the *Add Module* form now carries five built-in templates plus a
 save/rename/delete library and JSON import/export, held in this browser only
 (`static/presets.js`; the mirror table between it and `AddAgentRequest` is locked by
-`tests/test_preset_contract.py` and `tests/js/preset-contract.test.mjs`).)
+`tests/test_preset_contract.py` and `tests/js/preset-contract.test.mjs`). The same
+rule then removed *dark/light toggle*: `static/theme.js` resolves the theme before
+the first paint (OS preference on a first visit, then the remembered choice) and the
+header toggle flips it, with the light layer in `style.css` kept honest by
+`tests/js/theme.test.mjs`.)
 
 ---
 

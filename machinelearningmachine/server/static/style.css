@@ -639,3 +639,159 @@ input:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .msg-bubble { animation: none !important; }
 }
+
+/* >>> light-theme utility overrides (drift-locked by tests/js/theme.test.mjs) */
+/*
+   The dashboard's colours are absolute dark-palette Tailwind utilities, and the
+   compiled stylesheet keys nothing off `dark` (0 rules — verified). Light mode is
+   this layer: one override per utility the markup actually uses, scoped to
+   html:not(.dark) so dark mode renders exactly as before. It is hand-written but
+   drift-locked: tests/js/theme.test.mjs walks every colour token in index.html and
+   app.js and fails when one has no rule here and is not listed as deliberately
+   theme-neutral (accents, white-on-colour text, a dark modal scrim).
+*/
+html:not(.dark) .bg-slate-950 { background-color: #f8fafc; }
+html:not(.dark) .bg-slate-950\/70 { background-color: #f1f5f9; }
+html:not(.dark) .bg-slate-950\/80 { background-color: #ffffff; }
+html:not(.dark) .bg-slate-900 { background-color: #ffffff; }
+html:not(.dark) .bg-slate-900\/60 { background-color: rgb(255 255 255 / 0.9); }
+html:not(.dark) .bg-slate-900\/80 { background-color: #ffffff; }
+html:not(.dark) .bg-slate-800 { background-color: #f1f5f9; }
+html:not(.dark) .bg-slate-800\/50 { background-color: rgb(241 245 249 / 0.7); }
+html:not(.dark) .bg-slate-800\/70 { background-color: rgb(241 245 249 / 0.85); }
+html:not(.dark) .bg-slate-800\/80 { background-color: rgb(241 245 249 / 0.9); }
+html:not(.dark) .bg-slate-800\/90 { background-color: #f1f5f9; }
+html:not(.dark) .hover\:bg-slate-700:hover { background-color: #e2e8f0; }
+html:not(.dark) .bg-emerald-950\/80 { background-color: #ecfdf5; }
+html:not(.dark) .bg-red-950\/80 { background-color: #fef2f2; }
+html:not(.dark) .bg-amber-950\/80 { background-color: #fffbeb; }
+html:not(.dark) .bg-amber-950\/40 { background-color: rgb(255 251 235 / 0.8); }
+html:not(.dark) .bg-amber-900\/50 { background-color: #fef3c7; }
+html:not(.dark) .bg-purple-900\/40 { background-color: #f5f3ff; }
+html:not(.dark) .bg-pink-900\/40 { background-color: #fdf2f8; }
+html:not(.dark) .hover\:bg-pink-900\/70:hover { background-color: #fce7f3; }
+html:not(.dark) .border-slate-800 { border-color: #e2e8f0; }
+html:not(.dark) .border-slate-800\/80 { border-color: rgb(226 232 240 / 0.9); }
+html:not(.dark) .border-slate-700 { border-color: #cbd5e1; }
+html:not(.dark) .border-slate-700\/60 { border-color: #e2e8f0; }
+html:not(.dark) .border-slate-700\/40 { border-color: rgb(203 213 225 / 0.7); }
+html:not(.dark) .border-slate-600 { border-color: #94a3b8; }
+html:not(.dark) .border-amber-800 { border-color: #fcd34d; }
+html:not(.dark) .border-amber-800\/70 { border-color: rgb(252 211 77 / 0.8); }
+html:not(.dark) .border-amber-900\/60 { border-color: rgb(252 211 77 / 0.6); }
+html:not(.dark) .border-amber-700\/50 { border-color: rgb(251 191 36 / 0.6); }
+html:not(.dark) .border-emerald-800 { border-color: #6ee7b7; }
+html:not(.dark) .border-emerald-900\/60 { border-color: rgb(110 231 183 / 0.6); }
+html:not(.dark) .border-red-800 { border-color: #fca5a5; }
+html:not(.dark) .border-purple-900\/60 { border-color: rgb(196 181 253 / 0.7); }
+html:not(.dark) .border-purple-700\/50 { border-color: #c4b5fd; }
+html:not(.dark) .border-pink-800\/60 { border-color: rgb(249 168 212 / 0.8); }
+html:not(.dark) .text-slate-100 { color: #0f172a; }
+html:not(.dark) .text-slate-200 { color: #1e293b; }
+html:not(.dark) .hover\:text-slate-200:hover { color: #1e293b; }
+html:not(.dark) .text-slate-300 { color: #334155; }
+html:not(.dark) .hover\:text-slate-300:hover { color: #334155; }
+html:not(.dark) .text-slate-400 { color: #475569; }
+html:not(.dark) .text-emerald-300 { color: #047857; }
+html:not(.dark) .text-emerald-400 { color: #047857; }
+html:not(.dark) .text-indigo-400 { color: #4338ca; }
+html:not(.dark) .hover\:text-indigo-300:hover { color: #4338ca; }
+html:not(.dark) .text-purple-300 { color: #6d28d9; }
+html:not(.dark) .text-purple-400 { color: #6d28d9; }
+html:not(.dark) .text-pink-300 { color: #be185d; }
+html:not(.dark) .text-pink-400 { color: #be185d; }
+html:not(.dark) .text-amber-200 { color: #b45309; }
+html:not(.dark) .text-amber-200\/80 { color: rgb(180 83 9 / 0.9); }
+html:not(.dark) .text-amber-300 { color: #b45309; }
+html:not(.dark) .text-amber-400 { color: #b45309; }
+html:not(.dark) .text-amber-500 { color: #b45309; }
+html:not(.dark) .text-red-400 { color: #b91c1c; }
+html:not(.dark) .hover\:text-red-300:hover { color: #b91c1c; }
+html:not(.dark) .text-cyan-400 { color: #0e7490; }
+/* The brand gradient is darker in light mode: these three stops are the
+   bg-clip-text title, and the dark theme's sky-300/emerald-400 are unreadable
+   on a light surface. Written from → via → to so the stop chain resolves to the
+   light colours whichever order Tailwind emitted its own rules in. */
+html:not(.dark) .from-purple-400 { --tw-gradient-from: #7e22ce var(--tw-gradient-from-position); --tw-gradient-to: #7e22ce00; }
+html:not(.dark) .via-sky-300 { --tw-gradient-to: #0284c700; --tw-gradient-stops: var(--tw-gradient-from), #0284c7 var(--tw-gradient-via-position), var(--tw-gradient-to); }
+html:not(.dark) .to-emerald-400 { --tw-gradient-to: #059669; }
+/* <<< light-theme utility overrides */
+
+/* >>> light-theme component overrides */
+/*
+   The hand-styled components in this file (and the vendored highlight.js theme,
+   which is atom-one-dark by filename) need their own light rules — they are not
+   Tailwind utilities, so the block above cannot reach them.
+*/
+html:not(.dark) .custom-scroll::-webkit-scrollbar-track { background: rgba(203, 213, 225, 0.5); }
+html:not(.dark) .custom-scroll::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.6); }
+html:not(.dark) .custom-scroll::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.8); }
+html:not(.dark) .custom-scroll { scrollbar-color: rgba(148, 163, 184, 0.7) rgba(203, 213, 225, 0.6); }
+/* Code blocks stay a light card with GitHub-light token colours: the dark theme
+   is vendored (atom-one-dark.min.css), so the light palette lives here. */
+html:not(.dark) pre code.hljs { background-color: #f8fafc !important; border-color: #e2e8f0; color: #24292e; }
+html:not(.dark) .btn-copy-code { background-color: rgba(255, 255, 255, 0.9); border-color: rgba(148, 163, 184, 0.6); color: #475569; }
+html:not(.dark) .btn-copy-code:hover, html:not(.dark) .btn-copy-code:focus-visible { background-color: #e2e8f0; color: #0f172a; }
+html:not(.dark) .hljs-comment, html:not(.dark) .hljs-quote { color: #6a737d; }
+html:not(.dark) .hljs-keyword, html:not(.dark) .hljs-selector-tag, html:not(.dark) .hljs-literal, html:not(.dark) .hljs-section, html:not(.dark) .hljs-link { color: #d73a49; }
+html:not(.dark) .hljs-string, html:not(.dark) .hljs-title, html:not(.dark) .hljs-name, html:not(.dark) .hljs-type, html:not(.dark) .hljs-attribute, html:not(.dark) .hljs-symbol, html:not(.dark) .hljs-bullet, html:not(.dark) .hljs-variable, html:not(.dark) .hljs-template-variable { color: #22863a; }
+html:not(.dark) .hljs-number, html:not(.dark) .hljs-meta, html:not(.dark) .hljs-built_in, html:not(.dark) .hljs-builtin-name, html:not(.dark) .hljs-params, html:not(.dark) .hljs-doctag { color: #005cc5; }
+html:not(.dark) .hljs-attr, html:not(.dark) .hljs-selector-attr, html:not(.dark) .hljs-selector-class, html:not(.dark) .hljs-selector-id, html:not(.dark) .hljs-selector-pseudo, html:not(.dark) .hljs-regexp, html:not(.dark) .hljs-subst { color: #032f62; }
+html:not(.dark) .hljs-deletion { color: #b31d28; background: #ffeef0; }
+html:not(.dark) .hljs-addition { color: #22863a; background: #f0fff4; }
+html:not(.dark) .hljs-formula { background-color: #e2e8f0; }
+html:not(.dark) .hljs-emphasis { font-style: italic; }
+html:not(.dark) .hljs-strong { font-weight: 700; }
+html:not(.dark) .toast-success { background: rgba(16, 185, 129, 0.12); border-color: rgba(16, 185, 129, 0.35); color: #047857; }
+html:not(.dark) .toast-error { background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.35); color: #b91c1c; }
+html:not(.dark) .toast-info { background: rgba(59, 130, 246, 0.1); border-color: rgba(59, 130, 246, 0.35); color: #1d4ed8; }
+html:not(.dark) .toast-warning { background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.4); color: #b45309; }
+html:not(.dark) .char-count { color: #475569; }
+html:not(.dark) .char-count.warning { color: #b45309; }
+html:not(.dark) .char-count.error { color: #b91c1c; }
+html:not(.dark) #modeBanner { border-color: rgba(217, 119, 6, 0.4); background: #fffbeb; color: #92400e; }
+/* Module presets (static/presets.js); the chip border stays the preset's own
+   hex colour — presets.js writes it inline and that is deliberate. */
+html:not(.dark) .preset-chip { background-color: #f1f5f9; color: #334155; }
+html:not(.dark) .preset-chip:hover { background-color: #e2e8f0; }
+html:not(.dark) .preset-disclosure { color: #475569; }
+html:not(.dark) .preset-disclosure:hover { color: #0f172a; }
+html:not(.dark) .preset-manager-empty { color: #64748b; }
+html:not(.dark) .preset-row { background-color: #ffffff; border-color: #e2e8f0; }
+html:not(.dark) .preset-row-label { color: #1e293b; }
+html:not(.dark) .preset-row-meta { color: #64748b; }
+html:not(.dark) .preset-act { background-color: #f1f5f9; color: #334155; border-color: #cbd5e1; }
+html:not(.dark) .preset-act:hover { background-color: #e2e8f0; color: #0f172a; }
+html:not(.dark) .preset-act:disabled:hover { background-color: #f1f5f9; color: #94a3b8; }
+html:not(.dark) .preset-act-danger:hover { background-color: #fee2e2; color: #b91c1c; }
+html:not(.dark) .preset-rename-input { background-color: #ffffff; color: #0f172a; border-color: #94a3b8; }
+/* Surfaces and chrome that the base file hard-codes in the dark palette. */
+html:not(.dark) .shimmer { background: linear-gradient(90deg, #e2e8f0 25%, #f1f5f9 50%, #e2e8f0 75%); }
+html:not(.dark) .modal-backdrop { background: rgba(15, 23, 42, 0.45); }
+html:not(.dark) .agent-card:hover { background: rgba(226, 232, 240, 0.9) !important; border-color: rgba(148, 163, 184, 0.8) !important; }
+html:not(.dark) .search-input { background: rgba(255, 255, 255, 0.9); border-color: rgba(148, 163, 184, 0.7); }
+html:not(.dark) .session-row:hover { border-color: #94a3b8; background-color: rgba(226, 232, 240, 0.6); }
+/* Read-aloud studio + per-message speech controls (pink is the brand accent in
+   both themes; only the surface underneath it changes). */
+html:not(.dark) .reader-tab { background-color: #f1f5f9; border-color: #cbd5e1; color: #334155; }
+html:not(.dark) .reader-tab:hover { background-color: #e2e8f0; }
+html:not(.dark) .reader-tab-active { background-color: rgba(190, 24, 93, 0.12) !important; border-color: rgba(157, 23, 77, 0.5) !important; color: #be185d !important; }
+html:not(.dark) .msg-speak-btn { border-color: #cbd5e1; background-color: #ffffff; color: #be185d; }
+html:not(.dark) .msg-speak-btn:hover, html:not(.dark) .msg-speak-btn:focus-visible { background-color: rgba(190, 24, 93, 0.12); }
+/* Rendered markdown inside transcripts. */
+html:not(.dark) .md-body h1, html:not(.dark) .md-body h2, html:not(.dark) .md-body h3, html:not(.dark) .md-body h4, html:not(.dark) .md-body h5, html:not(.dark) .md-body h6 { color: #0f172a; }
+html:not(.dark) .md-body code:not(pre code) { background: #f1f5f9; border-color: #e2e8f0; color: #4338ca; }
+html:not(.dark) .md-body blockquote { border-left-color: #94a3b8; background: rgba(241, 245, 249, 0.9); color: #334155; }
+html:not(.dark) .md-body hr { border-top-color: rgba(148, 163, 184, 0.7); }
+html:not(.dark) .md-body a { color: #0369a1; }
+html:not(.dark) .md-body a:hover { color: #075985; }
+html:not(.dark) .md-body th, html:not(.dark) .md-body td { border-color: rgba(148, 163, 184, 0.8); }
+html:not(.dark) .md-body th { background: rgba(241, 245, 249, 0.9); }
+html:not(.dark) .howto-steps .step-dot { color: #4338ca; background: rgba(79, 70, 229, 0.12); border-color: rgba(99, 102, 241, 0.45); }
+/* Provenance badges: same meaning, lighter surfaces (grey = simulated,
+   green = live, red = degraded, amber = clipped). */
+html:not(.dark) .prov-sim { background: rgba(120, 113, 108, 0.12); border-color: rgba(120, 113, 108, 0.4); color: #57534e; }
+html:not(.dark) .prov-live { background: rgba(16, 185, 129, 0.12); border-color: rgba(16, 185, 129, 0.45); color: #047857; }
+html:not(.dark) .prov-degraded { background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.45); color: #b91c1c; }
+html:not(.dark) .prov-clipped { background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.5); color: #b45309; }
+/* <<< light-theme component overrides */

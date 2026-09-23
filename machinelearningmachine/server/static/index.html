@@ -13,6 +13,10 @@
   <link rel="stylesheet" href="/static/vendor/tailwind.css">
   <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css">
   <link rel="stylesheet" href="/static/vendor/highlight.js/styles/atom-one-dark.min.css">
+  <!-- Resolves the theme before the first paint; the light layer in style.css
+       keys off the `dark` class this file sets (no script inside the page: see
+       tests/test_frontend_security.py). -->
+  <script src="/static/theme.js"></script>
   <script src="/static/vendor/marked/marked.min.js" defer></script>
   <script src="/static/vendor/dompurify/purify.min.js" defer></script>
   <script src="/static/vendor/highlight.js/highlight.min.js" defer></script>
@@ -51,6 +55,9 @@
         <button id="btnSessions" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Open saved sessions">
           <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
           <span>Sessions</span>
+        </button>
+        <button id="btnThemeToggle" type="button" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" title="Light or dark theme" aria-label="Light theme" aria-pressed="false">
+          <i class="fa-solid fa-moon" aria-hidden="true"></i>
         </button>
         <button id="btnSettings" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Open settings and API keys">
           <i class="fa-solid fa-sliders" aria-hidden="true"></i>

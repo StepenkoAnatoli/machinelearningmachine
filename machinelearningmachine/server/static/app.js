@@ -1075,6 +1075,12 @@ document.addEventListener("DOMContentLoaded", () => {
       return; // no loop while the tab is hidden or the canvas is gone
     }
 
+    // The graph is drawn in JS, so its colours come from the theme module
+    // rather than from a CSS layer (static/theme.js keeps both palettes).
+    const palette = window.MLMTheme
+      ? window.MLMTheme.palette()
+      : { edge: "rgba(51, 65, 85, 0.4)", nodeFill: "rgba(15, 23, 42, 0.8)", nodeLabel: "#cbd5e1" };
+
     // Throttle, but never below the "something moved" signal.
     if (timestamp - lastDrawTime < DRAW_THROTTLE && !needsRedraw && !activePacket && !isExecuting) {
       return;
@@ -1118,7 +1124,7 @@ document.addEventListener("DOMContentLoaded", () => {
         ctx.beginPath();
         ctx.moveTo(p1.x, p1.y);
         ctx.lineTo(p2.x, p2.y);
-        ctx.strokeStyle = "rgba(51, 65, 85, 0.4)";
+        ctx.strokeStyle = palette.edge;
         ctx.lineWidth = 1.5;
         ctx.setLineDash([4, 4]);
         ctx.stroke();
@@ -1161,7 +1167,7 @@ document.addEventListener("DOMContentLoaded", () => {
       ctx.save();
       ctx.beginPath();
       ctx.arc(node.x, node.y, radius + 2, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(15, 23, 42, 0.8)";
+      ctx.fillStyle = palette.nodeFill;
       ctx.fill();
       ctx.lineWidth = 2.5;
       ctx.strokeStyle = node.color;
@@ -1176,7 +1182,7 @@ document.addEventListener("DOMContentLoaded", () => {
       ctx.fillText(node.avatar, node.x, node.y);
 
       ctx.font = "bold 11px sans-serif";
-      ctx.fillStyle = "#cbd5e1";
+      ctx.fillStyle = palette.nodeLabel;
       ctx.fillText(node.name, node.x, node.y + radius + 14);
     }
 
@@ -1975,6 +1981,15 @@ document.addEventListener("DOMContentLoaded", () => {
       if (openModalEl) closeModal(openModalEl);
     }
   });
+
+  // Theme toggle (static/theme.js owns resolution + persistence; it runs in
+  // <head> so the first paint is already right). This only wires the header
+  // button and forces a repaint, because the canvas palette lives in JS.
+  if (window.MLMTheme) {
+    window.MLMTheme.mount({
+      onChange: () => requestRedraw(true),
+    });
+  }
 
   // Module presets seam (static/presets.js). fillForm/getFormData move the same
   // six fields the submit handler reads as `payload` — Register itself is

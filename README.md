@@ -66,6 +66,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
 - ⌨️ Shortcuts: `Ctrl+Enter` to run, `Esc` to close modals
 - 🔍 Search/filter messages, character count, auto-resizing prompt
 - 📱 Responsive, respects `prefers-reduced-motion`, and the network canvas draws **on demand** - it repaints when something changes and then stops (no permanent animation loop, idle tab costs nothing)
+- 🌗 **Light or dark** — the dashboard follows your OS preference on the first visit and remembers your choice afterwards (header toggle, one `localStorage` key). Dark stays the default when the OS expresses no preference, and both themes cover the whole page: chrome, panels, modals, toasts, code blocks and the network graph
 
 **Practical & Pleasant:**
 - 🚀 **One-click install & launch** — double-click `launch-windows.bat` / `launch-macos.command` / `launch-linux.sh` and the app sets itself up (Python check → venv → dependencies → dashboard → browser) and runs. It refuses to start on a Python older than 3.10 with a message naming the download page, and if port 8000 is already taken it uses the next free port instead of exiting — both of which used to look like "the app is broken"
@@ -84,7 +85,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 612 tests (484 Python + 128 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 626 tests (484 Python + 142 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -518,7 +519,7 @@ Everything is offline and hermetic - network calls are injected, never performed
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
 pytest -q                                    # 476 tests, all offline
-node --test tests/js/*.test.mjs          # 128 jsdom browser tests (needs: npm ci)
+node --test tests/js/*.test.mjs          # 142 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 ```
@@ -608,7 +609,8 @@ machinelearningmachine/
 │   │       ├── presets.js   # Module presets: built-in templates, saved kits (localStorage),
 │   │       │                #   JSON import/export - the mirror table lives in tests/
 │   │       ├── markdown.js  # The XSS boundary: marked + DOMPurify allowlist (tested in tests/js)
-│   │       ├── style.css    # Dark-mode styling incl. transcript + provenance badges
+│   │       ├── theme.js     # Light/dark: resolution in <head> (no flash) + the canvas palette
+│   │       ├── style.css    # Dark styling plus the hand-written light layer (html:not(.dark))
 │   │       └── vendor/      # Pinned Tailwind/FontAwesome/marked/DOMPurify/highlight.js + MANIFEST.json
 │   ├── sessions.py          # Session save/load/delete: atomic writes, header index for
 │   │                        #   cheap listings, per-client folder, trim is recorded
@@ -659,6 +661,7 @@ machinelearningmachine/
 │       ├── client-lifecycle.test.mjs  # 19 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery, stale-record guard
 │       ├── presets.test.mjs           # 76 tests: mirror table, localStorage store, chips, save/rename/delete manager, import/export
 │       ├── preset-contract.test.mjs   # 6 tests: drift lock — the client's LIMITS + gallery vs the spec's table
+│       ├── theme.test.mjs             # 14 tests: resolution, persistence, toggle wiring, canvas palette, and both light-layer drift locks (utilities + hand-written components)
 │       └── audit_vendor_deps.test.mjs # 12 tests: the npm-audit wrapper's classification
 │                                      #   (CVE vs unreachable endpoint vs vacuous pass)
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,
