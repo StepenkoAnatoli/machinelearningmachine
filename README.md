@@ -72,6 +72,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
 - 📖 **[INSTALL-WINDOWS.md](INSTALL-WINDOWS.md)** — the same procedure written for someone who has never installed software from a download: what to click, what the warnings mean, and a troubleshooting table
 - 🧭 **First screen explains itself** — an empty transcript shows three numbered steps (say what you want → Execute Dialogue → read the answers), a **How to use** button reopens them any time, and the simulator-labelling is explained where the answers appear
 - 💾 **Saved sessions** — store any conversation (modules + full transcript) on your computer and reload it later from the *Sessions* panel
+- 🧩 **Module presets** — five built-in templates (Security Auditor, DB Expert, …) fill the *Add Module* form in one click, and you can save your own from a filled-in form, rename or delete them, and export/import them as plain JSON files to carry a kit to another browser. The library lives in this browser (`localStorage`) — the server never stores or serves presets
 - 🔊 **Reads what you write** — your prompt, every agent reply, any message, any text file, or (if the operator enabled it) a web page is read aloud with your computer's own voices (no API keys); plus 🎙️ voice dictation
 - 🔌 **Genuinely offline UI**: nothing in the dashboard is fetched from a third party, so it renders with the network unplugged
 - 🚀 Faster execution (0.15s vs 0.4s delays), no unnecessary waiting
@@ -83,7 +84,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 523 tests (477 Python + 46 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 612 tests (484 Python + 128 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -517,7 +518,7 @@ Everything is offline and hermetic - network calls are injected, never performed
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
 pytest -q                                    # 476 tests, all offline
-node --test tests/js/*.test.mjs          # 46 jsdom browser tests (needs: npm ci)
+node --test tests/js/*.test.mjs          # 128 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 ```
@@ -604,6 +605,8 @@ machinelearningmachine/
 │   │   └── static/
 │   │       ├── index.html   # Dashboard markup (no CDN tags, no inline script)
 │   │       ├── app.js       # WebSocket streaming, Read-Aloud Studio, sessions UI
+│   │       ├── presets.js   # Module presets: built-in templates, saved kits (localStorage),
+│   │       │                #   JSON import/export - the mirror table lives in tests/
 │   │       ├── markdown.js  # The XSS boundary: marked + DOMPurify allowlist (tested in tests/js)
 │   │       ├── style.css    # Dark-mode styling incl. transcript + provenance badges
 │   │       └── vendor/      # Pinned Tailwind/FontAwesome/marked/DOMPurify/highlight.js + MANIFEST.json
@@ -649,10 +652,13 @@ machinelearningmachine/
 │   ├── test_provider_provenance.py  # simulated vs live vs failed-provider labelling
 │   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
 │   ├── test_packaging.py            # every module dir is a real package; package-data globs match
+│   ├── test_preset_contract.py      # drift lock: the preset mirror table vs AddAgentRequest
 │   ├── test_docs_are_accurate.py      # docs claims that fail the build when stale
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
 │       ├── client-lifecycle.test.mjs  # 19 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery, stale-record guard
+│       ├── presets.test.mjs           # 76 tests: mirror table, localStorage store, chips, save/rename/delete manager, import/export
+│       ├── preset-contract.test.mjs   # 6 tests: drift lock — the client's LIMITS + gallery vs the spec's table
 │       └── audit_vendor_deps.test.mjs # 12 tests: the npm-audit wrapper's classification
 │                                      #   (CVE vs unreachable endpoint vs vacuous pass)
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,

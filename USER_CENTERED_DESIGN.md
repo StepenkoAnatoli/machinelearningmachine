@@ -469,10 +469,8 @@ ALL E2E CHECKS PASSED
 
 1. **Dark/light toggle**: currently dark only, some users prefer light.
 2. **Copy prompt button**: quick duplicate of the last prompt.
-3. **Agent presets**: "Security Auditor", "DB Expert" templates for the *Add Module* form
-   (the existing presets fill in a scenario, not a module).
-4. **Offline support**: service worker for PWA.
-5. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
+3. **Offline support**: service worker for PWA.
+4. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
 
 These are noted but not implemented to keep scope focused on highest user value fixes.
 (An earlier version of this list proposed *session isolation* and *export
@@ -480,7 +478,11 @@ These are noted but not implemented to keep scope focused on highest user value 
 rather than left as stale claims. The same rule removed *mid-run cancellation* and
 *windowed scrolling* in round 4: Stop shipped in round 3, and the transcript has
 rendered at most `RENDER_WINDOW` (200) cards since - claiming otherwise made this
-document disagree with the dashboard it describes.)
+document disagree with the dashboard it describes. And it removed *agent presets*
+when they shipped: the *Add Module* form now carries five built-in templates plus a
+save/rename/delete library and JSON import/export, held in this browser only
+(`static/presets.js`; the mirror table between it and `AddAgentRequest` is locked by
+`tests/test_preset_contract.py` and `tests/js/preset-contract.test.mjs`).)
 
 ---
 
