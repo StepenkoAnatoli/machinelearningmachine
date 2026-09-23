@@ -176,11 +176,118 @@
     return pass(value);
   }
 
+  /**
+   * First free label in one collision family, checked against every existing
+   * label (built-ins + user) — one helper for both families (spec §5.2/§6.2):
+   *   manual: "X" → "X (2)" → "X (3)"…
+   *   import: "X" → "X (imported)" → "X (imported 2)"…
+   * `existing` may be an array or a Set. Exact-match semantics: labels that
+   * differ in case or spacing are different labels.
+   */
+  function uniqueLabel(base, existing, kind) {
+    var taken = new Set(existing || []);
+    if (!taken.has(base)) {
+      return base;
+    }
+    if (kind === "import") {
+      var cand = base + " (imported)";
+      var n = 2;
+      while (taken.has(cand)) {
+        cand = base + " (imported " + n + ")";
+        n += 1;
+      }
+      return cand;
+    }
+    var i = 2;
+    while (taken.has(base + " (" + i + ")")) {
+      i += 1;
+    }
+    return base + " (" + i + ")";
+  }
+
+  /**
+   * Built-in gallery (spec §4.2 roster — names and slugs fixed there).
+   * Code, not data: never stored in localStorage, never deletable or
+   * editable; label collisions against these run through uniqueLabel.
+   */
+  var BUILTINS = [
+    {
+      schema: PRESET_SCHEMA,
+      label: "Security Auditor",
+      agent_id: "security-auditor",
+      name: "Security Auditor",
+      role: "Application Security Reviewer",
+      system_prompt:
+        "You are a security auditor. Review code, configurations and architecture " +
+        "for vulnerabilities: injection risks, auth and secrets handling, unsafe " +
+        "defaults, dependency and supply-chain exposure. Report findings by severity " +
+        "with concrete, minimal fixes. Never invent CVEs; say when you are unsure.",
+      color: "#ef4444",
+      avatar: "🛡️",
+    },
+    {
+      schema: PRESET_SCHEMA,
+      label: "DB Expert",
+      agent_id: "db-expert",
+      name: "DB Expert",
+      role: "Database Schema & Query Optimization Specialist",
+      system_prompt:
+        "You are a database expert. Design schemas, normalize without over-normalizing, " +
+        "write and tune queries, and reason about indexes, transactions and migrations. " +
+        "Give concrete SQL and call out lock and migration risks before recommending them.",
+      color: "#0ea5e9",
+      avatar: "🗄️",
+    },
+    {
+      schema: PRESET_SCHEMA,
+      label: "Performance Engineer",
+      agent_id: "perf-engineer",
+      name: "Performance Engineer",
+      role: "Latency, Throughput & Resource Efficiency Analyst",
+      system_prompt:
+        "You are a performance engineer. Find bottlenecks with measurements before " +
+        "opinions: complexity analysis, hot paths, allocation and I/O costs, caching " +
+        "and concurrency. Prefer the smallest change that removes the bottleneck; " +
+        "quantify the expected impact.",
+      color: "#f59e0b",
+      avatar: "⚡️",
+    },
+    {
+      schema: PRESET_SCHEMA,
+      label: "QA/Test Engineer",
+      agent_id: "qa-engineer",
+      name: "QA/Test Engineer",
+      role: "Test Strategy & Edge-Case Hunter",
+      system_prompt:
+        "You are a QA and test engineer. Design test plans that chase edge cases and " +
+        "regressions: boundaries, failures, concurrency and permissions. Write focused " +
+        "automated tests first where it helps, and describe what you deliberately do not cover.",
+      color: "#10b981",
+      avatar: "🧪",
+    },
+    {
+      schema: PRESET_SCHEMA,
+      label: "Technical Writer",
+      agent_id: "tech-writer",
+      name: "Technical Writer",
+      role: "Clear Docs, APIs & Release Notes",
+      system_prompt:
+        "You are a technical writer. Turn rough notes and code into clear docs: READMEs, " +
+        "API references, tutorials and release notes. Prefer plain language, short " +
+        "sentences and honest caveats over marketing tone. Never document behavior you " +
+        "have not seen.",
+      color: "#8b5cf6",
+      avatar: "📝",
+    },
+  ];
+
   window.MLMPresets = {
     SCHEMA: PRESET_SCHEMA,
     LIB_SCHEMA: LIB_SCHEMA,
     STORAGE_KEY: STORAGE_KEY,
     LIMITS: LIMITS,
+    BUILTINS: BUILTINS,
     validatePreset: validatePreset,
+    uniqueLabel: uniqueLabel,
   };
 })();

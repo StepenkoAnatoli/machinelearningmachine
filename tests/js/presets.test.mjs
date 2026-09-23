@@ -297,3 +297,57 @@ test("unknown keys are ignored (whitelist-copy)", () => {
   ]);
   assert.equal({}.polluted, undefined);
 });
+
+// ---------------------------------------------------------------- BUILTINS
+
+test("BUILTINS: exactly the 5 spec entries, in spec order (spec §4.2 roster)", () => {
+  assert.deepEqual(native(core.BUILTINS.map((b) => [b.label, b.agent_id])), [
+    ["Security Auditor", "security-auditor"],
+    ["DB Expert", "db-expert"],
+    ["Performance Engineer", "perf-engineer"],
+    ["QA/Test Engineer", "qa-engineer"],
+    ["Technical Writer", "tech-writer"],
+  ]);
+});
+
+test("BUILTINS: every entry passes validatePreset, labels and ids unique", () => {
+  assert.equal(core.BUILTINS.length, 5);
+  for (const b of core.BUILTINS) {
+    const res = core.validatePreset(b);
+    assert.equal(res.ok, true, `${b.label}: ${res.ok ? "" : res.error}`);
+  }
+  const labels = core.BUILTINS.map((b) => b.label);
+  const ids = core.BUILTINS.map((b) => b.agent_id);
+  assert.equal(new Set(labels).size, labels.length);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+// ------------------------------------------------------------- uniqueLabel
+
+test("uniqueLabel: clean, free labels are kept as-is", () => {
+  assert.equal(core.uniqueLabel("My kit", []), "My kit");
+  assert.equal(core.uniqueLabel("My kit", ["Other", "Another"]), "My kit");
+  assert.equal(core.uniqueLabel("Kit", ["Kit (2)"], "import"), "Kit");
+});
+
+test("uniqueLabel: manual family runs (2), (3)… against the full set, filling gaps", () => {
+  assert.equal(core.uniqueLabel("My kit", ["My kit"]), "My kit (2)");
+  assert.equal(core.uniqueLabel("My kit", ["My kit", "My kit (2)"]), "My kit (3)");
+  assert.equal(core.uniqueLabel("My kit", ["My kit", "My kit (2)", "My kit (3)"]), "My kit (4)");
+  assert.equal(core.uniqueLabel("My kit", ["My kit", "My kit (3)"]), "My kit (2)"); // gap wins
+  // collides with built-in labels too
+  assert.equal(core.uniqueLabel("DB Expert", core.BUILTINS.map((b) => b.label)), "DB Expert (2)");
+  // exact match only — different case is a different label
+  assert.equal(core.uniqueLabel("My kit", ["my kit"]), "My kit");
+});
+
+test("uniqueLabel: import family runs ' (imported)', ' (imported 2)'…", () => {
+  assert.equal(core.uniqueLabel("Kit", ["Kit"], "import"), "Kit (imported)");
+  assert.equal(core.uniqueLabel("Kit", ["Kit", "Kit (imported)"], "import"), "Kit (imported 2)");
+  assert.equal(core.uniqueLabel("Kit", ["Kit", "Kit (imported)", "Kit (imported 2)"], "import"), "Kit (imported 3)");
+});
+
+test("uniqueLabel: accepts arrays or Sets as the taken set", () => {
+  assert.equal(core.uniqueLabel("A", new Set(["A"])), "A (2)");
+  assert.equal(core.uniqueLabel("B", new Set(["B", "B (2)", "B (3)"])), "B (4)");
+});
