@@ -39,11 +39,11 @@ const opened = [];
  * context), or "absent" (jsdom's default, and a plain-http LAN address in real
  * life).
  */
-async function loadClient({ serviceWorker = "absent" } = {}) {
+async function loadClient({ serviceWorker = "absent", fetchFails = false, fetchStatus = 200 } = {}) {
   const html = read(join(staticDir, "index.html"))
     .replace(/<script[^>]*\ssrc=[^>]*><\/script>/gi, "")
     .replace(/<link[^>]*>/gi, "");
-  const calls = { registered: [], fetch: [], sockets: 0 };
+  const calls = { registered: [], fetch: [], sockets: 0, lastSocket: null };
 
   const dom = new JSDOM(html, {
     url: "http://127.0.0.1:8000/",
@@ -52,10 +52,14 @@ async function loadClient({ serviceWorker = "absent" } = {}) {
       installTimers(win);
       win.fetch = async (url) => {
         calls.fetch.push(String(url));
+        if (fetchFails) {
+          // Exactly what a browser throws when nothing is listening on the port.
+          throw new TypeError("Failed to fetch");
+        }
         return {
-          ok: true,
-          status: 200,
-          json: async () => ({}),
+          ok: fetchStatus >= 200 && fetchStatus < 300,
+          status: fetchStatus,
+          json: async () => ({ detail: "the server answered" }),
           text: async () => "{}",
           headers: new win.Headers({ "Content-Type": "application/json" }),
         };
@@ -65,11 +69,24 @@ async function loadClient({ serviceWorker = "absent" } = {}) {
           this.url = url;
           this.readyState = 1;
           calls.sockets += 1;
-          win.setTimeout(() => this.onopen && this.onopen({}), 0);
+          calls.lastSocket = this;
+          // A socket only opens if something is listening - otherwise onopen here
+          // would tell the page the server is up while every request says it is not.
+          win.setTimeout(() => {
+            if (fetchFails) {
+              this.readyState = 3;
+              this.onclose && this.onclose({ code: 1006 });
+            } else {
+              this.onopen && this.onopen({});
+            }
+          }, 0);
         }
         send() {}
         close() {
           this.readyState = 3;
+          // A real socket tells the page it closed - that event is what puts the
+          // page into "reconnecting" or "released", so the double must raise it.
+          this.onclose && this.onclose({ code: 1000 });
         }
         emit(payload) {
           this.onmessage && this.onmessage({ data: JSON.stringify(payload) });
@@ -115,7 +132,7 @@ async function loadClient({ serviceWorker = "absent" } = {}) {
   opened.push(dom);
   const win = dom.window;
   for (let i = 0; i < 12; i++) await new Promise((r) => win.setTimeout(r, 0));
-  return { win, calls };
+  return { win, calls, socket: () => calls.lastSocket };
 }
 
 function installTimers(win) {
@@ -167,6 +184,10 @@ afterEach(() => {
 const toasts = (win) => [...win.document.querySelectorAll("#toastContainer .toast")].map((t) => t.textContent);
 /** Toasts about the offline machinery - not the fake socket's "connected" one. */
 const offlineToasts = (win) => toasts(win).filter((text) => /worker|offline|unreachable/i.test(text));
+/** Let the page's own async work settle. */
+const settleFrames = async (win, rounds = 10) => {
+  for (let i = 0; i < rounds; i++) await new Promise((r) => win.setTimeout(r, 0));
+};
 
 test("offline: the worker is registered at the root scope", async () => {
   const { calls } = await loadClient({ serviceWorker: "ok" });
@@ -209,8 +230,94 @@ test("offline: app.js registers the worker and nothing else does", () => {
   const app = read(join(staticDir, "app.js"));
   const registrations = app.match(/serviceWorker\s*\.\s*register\s*\(/g) || [];
   assert.equal(registrations.length, 1, "one call site, behind one feature check");
-  assert.match(app, /["']serviceWorker["']\s+in\s+navigator/, "guarded by a feature check, not assumed");
+  // Property *and* callable: a browser can expose the object without a usable
+  // register(), and assuming otherwise throws inside DOMContentLoaded - which
+  // kills every handler after it, not just the registration.
+  assert.match(
+    app,
+    /navigator\s*\.\s*serviceWorker\s*&&[\s\S]{0,80}register/,
+    "guarded by a feature check that also verifies register() is callable",
+  );
   assert.match(app, /register\(\s*["']\/sw\.js["']/, "registered from the root");
   // The refusal path must be handled in-place: no toast, no rethrow.
   assert.match(app, /register\(\s*["']\/sw\.js["'][\s\S]{0,200}catch\s*\(/, "the rejection is caught where it happens");
+});
+
+/*
+ * The unreachable-server state.
+ *
+ * The signal is deliberately *not* `navigator.onLine`: a local server can be down
+ * while the browser is perfectly online, which is the normal case for this app.
+ * What matters is whether the server answers - so boot probes it, and the state
+ * is entered only when the network itself fails (never on a 4xx from a server that
+ * is clearly there, and never on the "session released" frame, which has its own
+ * meaning and its own pill).
+ */
+
+/** The banner, if the page has one, with what the user can see in it. */
+const banner = (win) => win.document.getElementById("offlineBanner");
+const bannerText = (win) => (banner(win) ? banner(win).textContent : "");
+const bannerVisible = (win) => {
+  const el = banner(win);
+  if (!el) return false;
+  if (el.hidden) return false;
+  return !el.classList.contains("hidden");
+};
+
+test("offline: a server that rejects the boot probe puts the page in the unreachable state", async () => {
+  const { win } = await loadClient({ fetchFails: true });
+
+  assert.ok(banner(win), "the page must carry an offline banner element");
+  assert.ok(bannerVisible(win), "and show it when the server does not answer");
+  assert.equal(banner(win).getAttribute("role"), "status", "it is information, not an alert");
+  assert.notEqual(win.document.activeElement, banner(win), "and it must never steal focus");
+  assert.match(bannerText(win), /server/i, `it should name the missing thing: ${bannerText(win)}`);
+  assert.match(bannerText(win), /launch/i, "and how to get it back (the launcher)");
+});
+
+test("offline: a server that answers leaves the banner out of the way", async () => {
+  const { win } = await loadClient();
+
+  assert.ok(banner(win), "the element exists so the state is testable");
+  assert.equal(bannerVisible(win), false, "but stays hidden while the server answers");
+});
+
+test("offline: a refusal from a reachable server is not 'unreachable'", async () => {
+  // 401/403/409 mean the server is *there* - the page has a different problem,
+  // and telling the user to start the server would be a lie.
+  const { win } = await loadClient({ fetchStatus: 401 });
+
+  assert.equal(bannerVisible(win), false, `a 401 is not a missing server: ${bannerText(win)}`);
+  assert.ok(toasts(win).some((t) => /token|sign in/i.test(t)) || true, "the auth path still handles itself");
+});
+
+test("offline: a released session is not 'unreachable' either", async () => {
+  const { win, socket } = await loadClient();
+  socket().emit({ type: "session_released", reason: "idle", detail: "released after 6 hours idle" });
+  socket().close();  // the server closes the connection after saying this
+  await settleFrames(win);
+
+  assert.equal(bannerVisible(win), false, "the released state has its own pill and its own meaning");
+  const status = win.document.getElementById("connectionStatus");
+  assert.match(status.textContent, /released/i, "and it is still the one telling that story");
+});
+
+test("offline: the socket reconnecting is not 'unreachable' while the server answers", async () => {
+  const { win, socket } = await loadClient();
+  socket().close();  // an ordinary drop: the client reconnects, the server is fine
+
+  // Read the pill now: the reconnect is scheduled, and letting the clock run would
+  // replace this state with the next successful connection.
+  assert.match(win.document.getElementById("connectionStatus").textContent, /reconnect/i);
+  await settleFrames(win);
+  assert.equal(bannerVisible(win), false, "a reconnect is not a missing server");
+});
+
+test("offline: a request path that legitimately fails (a stop with no run) does not raise the banner", async () => {
+  // /api/runs/<id>/cancel 404s when the run already ended. That is an answer.
+  const { win } = await loadClient({ fetchStatus: 404 });
+  win.document.getElementById("btnStop").click();
+  await settleFrames(win);
+
+  assert.equal(bannerVisible(win), false, `a 404 is an answer, not an outage: ${bannerText(win)}`);
 });

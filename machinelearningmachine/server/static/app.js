@@ -55,6 +55,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const agentCountBadge = document.getElementById("agentCountBadge");
   const topologyLabelBadge = document.getElementById("topologyLabelBadge");
   const connectionStatus = document.getElementById("connectionStatus");
+  const offlineBanner = document.getElementById("offlineBanner");
 
   // Form Controls
   const selectTopology = document.getElementById("selectTopology");
@@ -207,6 +208,8 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       resp = await fetch(url, opts);
     } catch (e) {
+      // The fetch itself failed: nothing answered. That is the unreachable state.
+      noteUnreachable();
       if (url.indexOf("/api/auth/") !== 0) showAuthPanel("Cannot reach the server - is it still running?");
       throw e;
     }
@@ -813,6 +816,44 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  // ===== The server is not answering =====
+  // Deliberately not `navigator.onLine`: a local server can be down while the
+  // browser is perfectly online, which is the ordinary case for this dashboard.
+  // The signal is whether the server answers at all - so a refusal (401/404/409)
+  // is an *answer* and never enters this state, and the "session released" frame
+  // keeps its own meaning and its own pill.
+  let serverUnreachable = false;
+  let offlineProbeTimer = null;
+  const OFFLINE_PROBE_DELAYS = [1000, 2000, 5000, 10000]; // then held at the last one
+
+  function setServerUnreachable(unreachable, why) {
+    const next = Boolean(unreachable);
+    if (next === serverUnreachable) return;
+    serverUnreachable = next;
+    if (offlineBanner) {
+      offlineBanner.hidden = !next;
+      offlineBanner.classList.toggle("hidden", !next);
+    }
+    if (next && why) console.info("Server unreachable:", why);
+    if (typeof onServerReachabilityChange === "function") onServerReachabilityChange(next);
+  }
+
+  /** One probe, resolved as "does the server answer at all?". */
+  async function probeServer() {
+    try {
+      await fetch("/api/status", { credentials: "same-origin" });
+      return true; // any HTTP answer means the server is there
+    } catch (e) {
+      return false; // the network itself failed: nothing is listening
+    }
+  }
+
+  /** Called when a request could not reach the server at all (not a refusal). */
+  function noteUnreachable() {
+    if (serverUnreachable) return;
+    setServerUnreachable(true, "a request could not reach the server");
+  }
+
   function initWebSocket() {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -824,6 +865,7 @@ document.addEventListener("DOMContentLoaded", () => {
       connectionStatus.className = "flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-emerald-950/80 border border-emerald-800 text-emerald-400";
       connectionStatus.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span><span>Live Mesh Connected</span>';
       connectionStatus.setAttribute("aria-label", "Connected to live mesh");
+      setServerUnreachable(false, "the socket connected");
       showToast("Connected to live mesh", "success", 2000);
     };
 
@@ -837,6 +879,10 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
       wsReconnectAttempts++;
+      // The socket dropped without the server saying it released the session:
+      // either the server is gone or the network hiccuped. Probe rather than
+      // assume - the banner follows the probe, not the socket.
+      probeServer().then((reachable) => setServerUnreachable(!reachable, "the socket closed and the probe failed"));
       connectionStatus.className = "flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-amber-950/80 border border-amber-800 text-amber-400";
       connectionStatus.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-400"></span><span>Reconnecting...</span>';
       connectionStatus.setAttribute("aria-label", "Reconnecting to mesh");
@@ -2071,9 +2117,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // Offline shell (static/sw.js): precaches the page so it still opens when the
   // server is not running. Registered only where a worker can exist - over plain
   // http on a LAN address there is no secure context, which is a normal way to
-  // reach this dashboard, so a refusal is handled in place and stays invisible:
+  // reach this dashboard, so a refusal is handled in place and stays silent:
   // the page must behave exactly as it did before this feature existed.
-  if ("serviceWorker" in navigator) {
+  if (navigator.serviceWorker && typeof navigator.serviceWorker.register === "function") {
     navigator.serviceWorker.register("/sw.js").catch(() => {
       /* no worker here: the dashboard runs as it always has */
     });

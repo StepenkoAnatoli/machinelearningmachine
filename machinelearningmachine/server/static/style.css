@@ -640,6 +640,26 @@ input:focus-visible {
   .msg-bubble { animation: none !important; }
 }
 
+/* Offline banner: the dashboard is open, its server is not answering. Amber
+   because it is a state to notice, not a failure to fix. */
+.offline-banner {
+  background-color: rgba(120, 53, 15, 0.35);
+  border-color: rgba(217, 119, 6, 0.55);
+  color: #fcd34d;
+}
+
+/* The explanation sits one step quieter than the headline, without spending a
+   utility the committed Tailwind build does not generate. */
+.offline-banner .offline-detail {
+  opacity: 0.9;
+}
+
+.offline-code {
+  background-color: rgba(69, 26, 3, 0.5);
+  color: #fde68a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
 /* >>> light-theme utility overrides (drift-locked by tests/js/theme.test.mjs) */
 /*
    The dashboard's colours are absolute dark-palette Tailwind utilities, and the
@@ -794,4 +814,8 @@ html:not(.dark) .prov-sim { background: rgba(120, 113, 108, 0.12); border-color:
 html:not(.dark) .prov-live { background: rgba(16, 185, 129, 0.12); border-color: rgba(16, 185, 129, 0.45); color: #047857; }
 html:not(.dark) .prov-degraded { background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.45); color: #b91c1c; }
 html:not(.dark) .prov-clipped { background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.5); color: #b45309; }
+/* Offline banner: a warning surface, not an error one - the dashboard is fine,
+   its server is just not there. Sits next to the mode banner in both themes. */
+html:not(.dark) .offline-banner { background-color: #fffbeb; border-color: rgba(217, 119, 6, 0.45); color: #92400e; }
+html:not(.dark) .offline-code { background-color: rgba(217, 119, 6, 0.12); color: #78350f; }
 /* <<< light-theme component overrides */

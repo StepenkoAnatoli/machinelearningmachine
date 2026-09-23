@@ -104,6 +104,27 @@
   <!-- What produced the transcript on screen -->
   <section id="modeBanner" class="hidden max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 w-full" aria-live="polite"></section>
 
+  <!--
+    The server is not answering. The page itself came from the service worker's
+    cache, so the dashboard is visible but nothing on it can reach the mesh.
+    role="status", not "alert": nothing is broken, nothing needs acknowledging, and
+    it must not steal focus from wherever the user is typing.
+  -->
+  <section id="offlineBanner" class="hidden max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 w-full" role="status" aria-live="polite">
+    <div class="offline-banner flex items-start gap-3 rounded-xl border px-4 py-3 text-xs">
+      <i class="fa-solid fa-plug-circle-xmark mt-0.5 text-base" aria-hidden="true"></i>
+      <div class="flex-1">
+        <p class="font-semibold">The dashboard's server isn't running.</p>
+        <p class="mt-0.5 offline-detail">
+          This page is the cached copy, so it opens without it - but nothing here can reach the mesh until the server is
+          back. Start it with the launcher window, or run
+          <code class="offline-code px-1 py-0.5 rounded">python -m machinelearningmachine serve</code>
+          where you installed it. This page reconnects on its own: no reload needed.
+        </p>
+      </div>
+    </div>
+  </section>
+
   <main id="main-content" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 flex flex-col space-y-6 w-full" role="main">
 
     <!-- Top Grid: Interactive Topology Graph & Active Modules -->
