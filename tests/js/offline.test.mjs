@@ -52,7 +52,10 @@ async function loadClient({ serviceWorker = "absent", fetchFails = false, fetchS
     sockets: 0,
     all: [], // every FakeSocket, in order, so a test can count what is still open
     lastSocket: null,
-    serverGone: false,
+    //: One switch for "nothing answers": set at load, and flipped by a test that
+    //: needs the server to come back. (It used to be a captured parameter, so a test
+    //: could not bring the server back at all.)
+    serverGone: fetchFails,
     jsdomErrors: [], // jsdom reports every navigation as an error, and a reload IS one
   };
   // jsdom's default console prints "Not implemented: navigation" to the Node
@@ -70,7 +73,10 @@ async function loadClient({ serviceWorker = "absent", fetchFails = false, fetchS
       installTimers(win);
       win.fetch = async (url) => {
         calls.fetch.push(String(url));
-        if (fetchFails || calls.serverGone) {
+        //: A test can hold one request open (and resolve it later) to observe what
+        //: a handler does when the server dies while its request is in flight.
+        if (calls.exportGate && String(url).includes("/api/export")) await calls.exportGate;
+        if (calls.serverGone) {
           // Exactly what a browser throws when nothing is listening on the port.
           throw new TypeError("Failed to fetch");
         }
@@ -101,17 +107,21 @@ async function loadClient({ serviceWorker = "absent", fetchFails = false, fetchS
         static CLOSED = 3;
         constructor(url) {
           this.url = url;
-          this.readyState = 1;
+          // CONNECTING, like a real socket: code that asks "can I use this socket
+          // as it is?" gets the same answer as in a browser. (Saying OPEN here hid
+          // a real recovery bug for a whole task - see the short-outage test.)
+          this.readyState = 0;
           calls.sockets += 1;
           calls.all.push(this);
           calls.lastSocket = this;
           // A socket only opens if something is listening - otherwise onopen here
           // would tell the page the server is up while every request says it is not.
           win.setTimeout(() => {
-            if (fetchFails || calls.serverGone) {
+            if (calls.serverGone) {
               this.readyState = 3;
               this.onclose && this.onclose({ code: 1006 });
             } else {
+              this.readyState = 1;
               this.onopen && this.onopen({});
             }
           }, 0);
@@ -178,7 +188,7 @@ async function loadClient({ serviceWorker = "absent", fetchFails = false, fetchS
   });
   opened.push(dom);
   const win = dom.window;
-  for (let i = 0; i < 12; i++) await new Promise((r) => win.setTimeout(r, 0));
+  for (let i = 0; i < 12; i++) await win.__nextTick();
   return { win, calls, socket: () => calls.lastSocket };
 }
 
@@ -186,6 +196,7 @@ function installTimers(win) {
   const realSetTimeout = win.setTimeout.bind(win);
   const realClearTimeout = win.clearTimeout.bind(win);
   const pending = new Map();
+  const rafTimers = new Set(); // animation frames: the redraw loop, not page logic
   let nextId = 1;
   win.setTimeout = (fn, ms = 0, ...args) => {
     const id = nextId++;
@@ -202,9 +213,21 @@ function installTimers(win) {
       realClearTimeout(record.realId);
     }
   };
+  /**
+   * The harness's own "go around the event loop once", on a real timer *outside*
+   * the page's queue. Using win.setTimeout for this (as the helpers first did) put
+   * the harness's 0ms timers into the same map the tests advance by hand, so "run
+   * the next timer the page scheduled" could pick up the harness's own tick instead
+   * - and a whole step silently did nothing.
+   */
+  win.__nextTick = () => new Promise((resolve) => realSetTimeout(resolve, 0));
   win.setInterval = () => nextId++;
   win.clearInterval = () => {};
-  win.requestAnimationFrame = (fn) => win.setTimeout(() => fn(Date.now()), 16);
+  win.requestAnimationFrame = (fn) => {
+    const id = win.setTimeout(() => fn(Date.now()), 16);
+    rafTimers.add(id);
+    return id;
+  };
   win.cancelAnimationFrame = (id) => win.clearTimeout(id);
   win.__cancelAllTimers = () => {
     for (const record of pending.values()) realClearTimeout(record.realId);
@@ -221,10 +244,22 @@ function installTimers(win) {
    * that reschedules itself forever from hanging a test.
    */
   win.__runPendingTimers = (limit = 50) => {
+    // Snapshot first, then run: a timer scheduled *by* a callback belongs to the
+    // future, not to this round. Draining the live map instead would let one call
+    // collapse a chain of retries - and "the retry timer was still pending when the
+    // server came back" is precisely the timing that has to be testable.
+    // Fired by *delay*, like real timers, not in the order the page happened to
+    // schedule them - the two differ exactly where it matters (the 1s offline probe
+    // is scheduled after the 1.5s socket retry, and the browser gives the race to the
+    // probe). Animation frames sort last: the canvas redraw queues one every 16ms, so
+    // otherwise "the next timer" is almost always a redraw and a step-by-step test
+    // never reaches the event it is stepping towards.
+    const due = [...pending.entries()]
+      .sort(([ia, a], [ib, b]) => (rafTimers.has(ia) ? 1 : 0) - (rafTimers.has(ib) ? 1 : 0) || a.ms - b.ms)
+      .slice(0, limit);
     let ran = 0;
-    while (pending.size && ran < limit) {
-      const [id, record] = pending.entries().next().value;
-      pending.delete(id);
+    for (const [id, record] of due) {
+      if (!pending.delete(id)) continue;
       realClearTimeout(record.realId);
       ran += 1;
       if (typeof record.fn === "function") record.fn();
@@ -254,7 +289,7 @@ const toasts = (win) => [...win.document.querySelectorAll("#toastContainer .toas
 const offlineToasts = (win) => toasts(win).filter((text) => /worker|offline|unreachable/i.test(text));
 /** Let the page's own async work settle. */
 const settleFrames = async (win, rounds = 10) => {
-  for (let i = 0; i < rounds; i++) await new Promise((r) => win.setTimeout(r, 0));
+  for (let i = 0; i < rounds; i++) await win.__nextTick();
 };
 
 test("offline: the worker is registered at the root scope", async () => {
@@ -356,7 +391,9 @@ test("offline: a refusal from a reachable server is not 'unreachable'", async ()
   const { win } = await loadClient({ fetchStatus: 401 });
 
   assert.equal(bannerVisible(win), false, `a 401 is not a missing server: ${bannerText(win)}`);
-  assert.ok(toasts(win).some((t) => /token|sign in/i.test(t)) || true, "the auth path still handles itself");
+  const panel = win.document.getElementById("authPanel");
+  assert.ok(panel, "the token panel exists");
+  assert.equal(panel.classList.contains("hidden"), false, "a refusal opens the token prompt - that is its job");
 });
 
 test("offline: a released session is not 'unreachable' either", async () => {
@@ -439,9 +476,30 @@ const disabledIds = (win) =>
     .sort();
 
 test("offline: markup marks exactly the controls that need the server", () => {
+  /*
+   * Every control whose handler reaches the server, and nothing else. Audited
+   * against the request sites rather than by eye - app.js's `apiFetch` call sites
+   * are all either background refreshes the page does for itself, or a user action
+   * on one of these controls:
+   *
+   *   run / stop / clear / confirm-clear .......... /api/run, /api/runs/<id>/cancel, /api/clear
+   *   read-url ..................................... /api/read/url
+   *   sessions list / save / load / delete ......... /api/sessions*
+   *   add module / save providers / clear providers  /api/agents, /api/config
+   *   export markdown / json ....................... /api/export/*
+   *   unlock (the token submit) .................... /api/auth/login
+   *
+   * The three exports-and-clear group was missing until that audit: they looked
+   * local (an export is just a download, clearing is just forgetting keys) while
+   * both went through the server. Offline, they were enabled buttons that answered
+   * with "Failed to export markdown".
+   */
   assert.deepEqual(markedServerControls(), [
     "btnClear",
+    "btnClearProviders",
     "btnConfirmClear",
+    "btnExportJson",
+    "btnExportMd",
     "btnNewAgent",
     "btnReadUrl",
     "btnRegisterAgent",
@@ -676,4 +734,108 @@ test("offline: recovery opens one socket, not a storm of them", async () => {
     opened,
     "and a settled page opens no more: the two recovery paths (socket retry, probe) do not fight",
   );
+});
+
+test("offline: a short outage leaves exactly one socket, not a leaked one behind", async () => {
+  /*
+   * The bug this pins: the socket's retry loop schedules its next attempt with a
+   * bare setTimeout and nothing cancelled it. Recovery *before* that timer fires -
+   * the ordinary case for a short outage, because the probe comes back at 1s while
+   * the retry waits 1.5s - re-opens the socket by hand, and then the stale retry
+   * opens a second one. The hand-opened socket is never closed: two live sockets,
+   * and every message arriving twice.
+   *
+   * Advancing one timer at a time (rather than draining everything, then settling)
+   * is what makes that timeline reachable here at all.
+   */
+  const { win, calls, socket } = await loadClient();
+  const step = async () => {
+    win.__runPendingTimers(1); // the next timer in delay order, whatever its delay
+    await settleFrames(win, 3);
+  };
+
+  calls.serverGone = true;
+  socket().close();
+  await settleFrames(win, 3); // the page enters the outage and schedules both loops
+  assert.ok(bannerVisible(win), "the page is in the outage state");
+
+  calls.serverGone = false; // the server comes back before the first retry fires
+  for (let i = 0; i < 4; i++) await step();
+
+  const live = () => calls.all.filter((s) => s.readyState === 1);
+  assert.equal(bannerVisible(win), false, "the outage is over");
+  assert.equal(live().length, 1, `one live socket, got ${live().length}`);
+  const opened = calls.all.length;
+  for (let i = 0; i < 6; i++) await step();
+  assert.equal(calls.all.length, opened, `no socket opens after recovery (${opened} -> ${calls.all.length})`);
+  assert.equal(live().length, 1, "and the one on screen is the live one");
+});
+
+
+test("offline: a server that is not there does not open the token prompt", async () => {
+  /*
+   * The token prompt is the answer to "the server refused you", not to "the server
+   * is not there" - and it used to open on both. A network failure asked the user
+   * for a token they could not spend, on a dashboard that may not even need one
+   * (loopback runs with auth off), and nothing ever closed the panel again: after
+   * the server came back, the page sat there saying "Cannot reach the server - is it
+   * still running?" over a working connection. The banner says the missing-server
+   * story now, with the controls that come back with it, and this keeps the two
+   * apart.
+   */
+  const { win, socket, calls } = await loadClient({ fetchFails: true });
+  assert.ok(bannerVisible(win), "the banner is the one saying the server is gone");
+  const panel = win.document.getElementById("authPanel");
+  assert.ok(panel);
+  assert.equal(panel.classList.contains("hidden"), true, "and the token prompt stays out of it");
+
+  calls.serverGone = false; // the server is back; the page recovers on its own
+  await tick(win, 8);
+  assert.equal(bannerVisible(win), false, "recovered");
+  assert.equal(panel.classList.contains("hidden"), true, "still no token prompt to dismiss");
+  assert.match(panel.textContent, /token/i, "the panel is still the token panel for when a 401 does happen");
+});
+
+
+test("offline: a control that comes back from its own operation stays off while the server is gone", async () => {
+  /*
+   * A hole the marked set alone does not close: several handlers disable their own
+   * button while the request is in flight and re-enable it in a `finally`. When the
+   * server dies *during* that request, the button used to be switched back on by the
+   * failure - leaving an enabled export button on an offline page, pointing at a
+   * server that was no longer there.
+   */
+  const { win, calls, socket } = await loadClient();
+  // The export needs a transcript, and the transcript arrives over the socket.
+  socket().emit({
+    type: "init",
+    agents: [],
+    history: [{ id: "m1", role: "user", content: "hello", sender: "You" }],
+    authenticated: true,
+  });
+  await settleFrames(win, 4);
+
+  let release;
+  calls.exportGate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const exportBtn = win.document.getElementById("btnExportMd");
+  exportBtn.click(); // in flight, so the button is disabled by its own handler
+  await settleFrames(win, 3);
+  assert.equal(exportBtn.disabled, true, "the export disables its button while it runs");
+
+  calls.serverGone = true;
+  socket().close();
+  await tick(win, 3);
+  assert.ok(bannerVisible(win), "the server dies mid-export");
+
+  release(); // the request comes back as a network failure
+  await settleFrames(win, 8);
+  assert.equal(exportBtn.disabled, true, "and the failure must not switch it back on while the server is away");
+  assert.match(exportBtn.getAttribute("title") || "", /server/i, "it still says why");
+
+  calls.serverGone = false;
+  await tick(win, 8);
+  assert.equal(bannerVisible(win), false, "the page recovers");
+  assert.equal(exportBtn.disabled, false, "and the button is usable again");
 });

@@ -37,6 +37,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let activePacket = null;
   let ws = null;
   let wsReconnectAttempts = 0;
+  let wsReconnectTimer = null; // the pending retry, so a recovery can cancel it
   const MAX_RECONNECT_ATTEMPTS = 10;
   let searchFilter = "";
   // Bounded by the server's own limit (sent in the WS "init" payload) so a tab
@@ -208,9 +209,13 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       resp = await fetch(url, opts);
     } catch (e) {
-      // The fetch itself failed: nothing answered. That is the unreachable state.
+      // The fetch itself failed: nothing answered. That is the unreachable state,
+      // and the offline banner is what says so - the token prompt is for a server
+      // that *refused* the request (the 401 branch below), not for one that is not
+      // running. Opening it here asked for a token nobody could spend, and nothing
+      // closed it again: the page would still be saying "Cannot reach the server -
+      // is it still running?" over a connection that had recovered.
       noteUnreachable();
-      if (url.indexOf("/api/auth/") !== 0) showAuthPanel("Cannot reach the server - is it still running?");
       throw e;
     }
     if (resp.status === 401 && url.indexOf("/api/auth/") !== 0) {
@@ -831,6 +836,28 @@ document.addEventListener("DOMContentLoaded", () => {
   const SERVER_CONTROL_REASON = "The server isn't running, so this needs it back. Start it and this control returns by itself.";
 
   /**
+   * Switch a control back on after an operation - unless the server is unreachable,
+   * in which case it stays off whatever the operation that just finished did.
+   *
+   * Several handlers turn their own button off while a request is in flight and back
+   * on in a `finally`. If the server dies mid-request, that `finally` would otherwise
+   * re-enable a button the offline state had just disabled - an enabled "Export"
+   * pointing at a server that is no longer there, which the user finds out about by
+   * clicking it and reading an error toast.
+   */
+  function enableControl(el) {
+    if (!el) return;
+    // The operation that had disabled this control is over, so the *snapshot* the
+    // offline state took of it is out of date: it recorded "disabled" for a reason
+    // that no longer exists. Left alone, recovery would faithfully restore a
+    // transient - an Export button that never comes back until the page is
+    // reloaded, because its request happened to be in flight when the server died.
+    // What keeps it off now (if anything) is the network, and recovery clears that.
+    if (el.dataset.offlineWasDisabled !== undefined) el.dataset.offlineWasDisabled = "0";
+    el.disabled = serverUnreachable && el.hasAttribute("data-requires-server");
+  }
+
+  /**
    * Disable every control that needs the server, and give them all back after.
    *
    * The set is declared in the markup (`data-requires-server`), not listed here:
@@ -959,6 +986,12 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function initWebSocket() {
+    // One live socket per page, enforced here rather than hoped for. Two ways to
+    // break that exist in normal operation: a retry timer that fires after a
+    // recovery already re-opened the socket by hand, and a repeated reconnect call.
+    // A leaked socket is not harmless - its handlers keep running, so every frame
+    // would be delivered twice.
+    if (ws && ws.readyState <= WebSocket.OPEN) return;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
 
@@ -966,6 +999,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
     ws.onopen = () => {
       wsReconnectAttempts = 0;
+      // A retry queued before this connection succeeded would open a second socket.
+      if (wsReconnectTimer !== null) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+      }
       connectionStatus.className = "flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-emerald-950/80 border border-emerald-800 text-emerald-400";
       connectionStatus.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span><span>Live Mesh Connected</span>';
       connectionStatus.setAttribute("aria-label", "Connected to live mesh");
@@ -993,7 +1031,10 @@ document.addEventListener("DOMContentLoaded", () => {
       
       if (wsReconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
         const delay = Math.min(1000 * Math.pow(1.5, wsReconnectAttempts), 10000);
-        setTimeout(initWebSocket, delay);
+        // Held so the offline probe's recovery can cancel it: when the server comes
+        // back before this fires, the probe re-opens the socket by hand, and letting
+        // the retry fire on top of that is what leaves a second live socket behind.
+        wsReconnectTimer = setTimeout(initWebSocket, delay);
       } else {
         // The socket's budget is spent, which is not the same as the page giving
         // up: the offline probe keeps asking, and re-opens this socket the moment
@@ -1811,6 +1852,10 @@ document.addEventListener("DOMContentLoaded", () => {
   /** Drop and re-open the socket (after signing in, or when the server restarted). */
   function reconnectWebSocket() {
     wsReconnectAttempts = 0;
+    if (wsReconnectTimer !== null) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
     if (ws) {
       try {
         ws.onclose = null;
@@ -2140,7 +2185,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) {
       showToast("Failed to export markdown", "error");
     } finally {
-      btnExportMd.disabled = false;
+      enableControl(btnExportMd);
       btnExportMd.innerHTML = '<i class="fa-solid fa-file-arrow-down"></i><span>Export MD</span>';
     }
   });
@@ -2160,7 +2205,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) {
       showToast("Failed to export JSON", "error");
     } finally {
-      btnExportJson.disabled = false;
+      enableControl(btnExportJson);
       btnExportJson.innerHTML = '<i class="fa-solid fa-code"></i><span>Export JSON</span>';
     }
   });
@@ -2317,7 +2362,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (err) {
       showToast("Network error adding agent: " + err.message, "error");
     } finally {
-      submitBtn.disabled = false;
+      enableControl(submitBtn);
       submitBtn.innerHTML = originalText;
     }
   });
@@ -2340,7 +2385,7 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (e) {
         showToast("Network error", "error");
       } finally {
-        btnClearProviders.disabled = false;
+        enableControl(btnClearProviders);
       }
     });
   }
@@ -2385,7 +2430,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (err) {
       showToast("Error saving settings: " + err.message, "error");
     } finally {
-      submitBtn.disabled = false;
+      enableControl(submitBtn);
       submitBtn.innerHTML = originalText;
     }
   });
@@ -2568,7 +2613,7 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (e) {
         showToast("Network error while fetching the page", "error", 4000);
       } finally {
-        btnReadUrl.disabled = false;
+        enableControl(btnReadUrl);
         btnReadUrl.innerHTML = '<i class="fa-solid fa-download" aria-hidden="true"></i><span>Fetch &amp; Read</span>';
       }
     });
@@ -2735,7 +2780,7 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (e) {
         showToast("Network error saving session", "error", 4000);
       } finally {
-        btnSaveSession.disabled = false;
+        enableControl(btnSaveSession);
         btnSaveSession.innerHTML = '<i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>Save</span>';
       }
     });
