@@ -76,7 +76,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
 - 💾 **Saved sessions** — store any conversation (modules + full transcript) on your computer and reload it later from the *Sessions* panel
 - 🧩 **Module presets** — five built-in templates (Security Auditor, DB Expert, …) fill the *Add Module* form in one click, and you can save your own from a filled-in form, rename or delete them, and export/import them as plain JSON files to carry a kit to another browser. The library lives in this browser (`localStorage`) — the server never stores or serves presets
 - 🔊 **Reads what you write** — your prompt, every agent reply, any message, any text file, or (if the operator enabled it) a web page is read aloud with your computer's own voices (no API keys); plus 🎙️ voice dictation
-- 🔌 **Installable app, nothing loaded from a third party**: the dashboard ships a web app manifest and its own drawn icons (generated from one SVG source), so Chrome/Edge offer to install it and iOS's Add to Home Screen gets a real icon - and because every asset is served from this origin, the page renders with the network unplugged. Installing needs a secure context: `http://127.0.0.1:<port>` and `https://…` qualify, a plain-`http` LAN address does not
+- 🔌 **Installable app, nothing loaded from a third party**: the dashboard ships a web app manifest and its own drawn icons (generated from one SVG source), so Chrome/Edge offer to install it and iOS's Add to Home Screen gets a real icon - and because every asset is served from this origin, installing it means the dashboard *opens* with the server stopped: a banner saying so, every control that needs the server greyed out with the reason, theme/prompt/presets/help still working, and the page clearing itself when the server comes back - no reload, nothing you typed lost. Reconnecting is only for the page: the conversation is **never** cached. No API response, no transcript, no answer is stored offline, deliberately - so the dialogue itself still needs the server. Two smaller limits: installing needs a secure context (`http://127.0.0.1:<port>` and `https://…` qualify, a plain-`http` LAN address does not), and the offline copy belongs to the exact origin you installed it from - **the port is part of an origin**, so it is there at `127.0.0.1:8000` and not at `127.0.0.1:8001` if the launcher picks the next free port tomorrow
 - 🚀 Faster execution (0.15s vs 0.4s delays), no unnecessary waiting
 - 💡 Contextual simulator: detects `rate_limiter`, `cache`, `auth`, `queue` domains and drafts code plus *proposed* tests - as a starting point, explicitly not as verified output
 - 📋 One-click copy for code blocks, export with proper headers
@@ -86,7 +86,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 704 tests (510 Python + 194 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 707 tests (513 Python + 194 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -519,7 +519,7 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 510 tests, all offline
+pytest -q                                    # 513 tests, all offline
 node --test tests/js/*.test.mjs          # 194 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
@@ -615,7 +615,10 @@ machinelearningmachine/
 │   │       ├── sw.js        # Service worker: precaches the shell, network-first, never caches /api/
 │   │       ├── manifest.webmanifest  # App identity: name, start_url, standalone, 192/512 icons
 │   │       ├── favicon.ico  # Tab icon (generated); served at /favicon.ico
-│   │       ├── icons/       # icon.svg is the source; icon-192/512 + apple-touch-icon are generated
+│   │       ├── icons/icon.svg       # the one hand-drawn source every icon is generated from
+│   │       ├── icons/icon-192.png   # generated: install icon (192), locked pixel-for-pixel to the SVG
+│   │       ├── icons/icon-512.png   # generated: install icon (512)
+│   │       ├── icons/apple-touch-icon.png  # generated: iOS Add to Home Screen
 │   │       └── vendor/      # Pinned Tailwind/FontAwesome/marked/DOMPurify/highlight.js + MANIFEST.json
 │   ├── sessions.py          # Session save/load/delete: atomic writes, header index for
 │   │                        #   cheap listings, per-client folder, trim is recorded

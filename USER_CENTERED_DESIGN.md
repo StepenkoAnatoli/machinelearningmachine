@@ -465,11 +465,64 @@ ALL E2E CHECKS PASSED
 
 ---
 
+## 🔌 Round 5: the dashboard that opens when the server is not there
+
+Round 5 (W3) came from one question: what does a user see when the thing this app
+talks to is not running? The honest answer was *`ERR_CONNECTION_REFUSED`* - a browser
+error page instead of the dashboard, with no way to tell whether the app is broken,
+the server died, or the address is old. The launchers and the *next free port*
+behaviour from round 4 made that likelier, not rarer: a bookmark to yesterday's port
+is a page that cannot open at all.
+
+What ships now: a web app manifest and hand-drawn icons (one SVG source, pixel-locked
+by test) make the dashboard installable; a service worker precaches only the shell
+(`index.html`, `app.js`, `theme.js`, `presets.js`, `markdown.js`, `style.css`,
+favicons, icons, `manifest.webmanifest`) network-first, so the page still opens with
+the server stopped, then says so in a banner and greys out exactly the eleven controls
+that cannot work without a server - each with a reason a screen reader can reach.
+Theme, the prompt box, copy, presets, read-aloud, help and search keep working, because
+none of them ever needed the server. When the server comes back the page notices by
+itself - banner clears, controls return to whatever the run state says, the socket
+re-opens - with no reload, so a half-written prompt survives the outage.
+
+The limit is deliberate and stated where install is claimed: **nothing from the API is
+cached**. No transcript, no answer, no `/api/` response. The offline copy is a shell,
+not a conversation.
+
+The one real find of the round was not in the offline code at all:
+
+| What a user saw | What was actually wrong | What it is now |
+| --- | --- | --- |
+| The *Saved Sessions* panel said "Could not list saved sessions" and listed nothing, for everybody, always - while the API returned the sessions correctly | Building each row ended with `delBtn.querySelector("i").insertAdjacentElement("afterend", document.createTextNode(" "))`. `insertAdjacentElement` requires an *Element*, and a text node is not one, so it threw a `TypeError` in every browser; the throw was swallowed by the render's own `catch`, which is why nothing surfaced anywhere | `insertAdjacentText`, plus a `tests/js/client-lifecycle.test.mjs` case that renders two saved sessions and fails without the fix. The offline round's session-row test forced this: to prove "a row built offline is disabled" there first had to be a row |
+
+**The principle that came out of this round**: an error handler that shows a friendly
+sentence is also an error handler that can hide a product that never worked. The
+offline tests were only able to find this because they asserted what the user can
+*see* on screen (a row exists), not what the function returned.
+
+### Validation (round 5)
+
+```
+$ pytest -q
+513 passed in 40.9s
+$ node --test tests/js/*.test.mjs
+# tests 194
+# pass 194
+# fail 0
+$ ruff check machinelearningmachine tests scripts examples
+All checks passed!
+$ npm run audit:js
+ok - npm audit: 140 packages checked against the advisory database (critical=0 high=0 moderate=0 low=0)
+$ python scripts/e2e_server_check.py --base http://127.0.0.1:8799
+ALL E2E CHECKS PASSED (http://127.0.0.1:8799)
+```
+
+---
+
 ## 🔮 Future User-Centered Improvements (Not Yet Done)
 
-1. **Offline support**: service worker for PWA. *(in progress: W3)*
-2. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
-3. **W6 — Task-aware model routing** (idea parked 2026-09-23, not scheduled): send a
+1. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
+2. **W6 — Task-aware model routing** (idea parked 2026-09-23, not scheduled): send a
    task to the model that is good at *that kind* of task — GPT for code, Claude for
    prose — rather than to whoever happens to hold the module.
 
@@ -489,7 +542,12 @@ ALL E2E CHECKS PASSED
    single key there is nothing to route between.
 
 These are noted but not implemented to keep scope focused on highest user value fixes.
-(An earlier version of this list proposed *session isolation* and *export
+(In round 5 it removed *offline support*, which was item 1 and marked *in progress*:
+the dashboard now ships a web app manifest, its own drawn icons and a service worker
+that precaches the shell, so with the server stopped the page opens, says the server
+is not running and greys out exactly the controls that need it - while nothing from
+the API is ever cached, which is a deliberate limit stated where install is claimed.
+An earlier version of this list proposed *session isolation* and *export
 `Content-Disposition`* as future work; both shipped since, so they have been removed
 rather than left as stale claims. The same rule removed *mid-run cancellation* and
 *windowed scrolling* in round 4: Stop shipped in round 3, and the transcript has

@@ -91,6 +91,9 @@ def test_the_dashboard_files_the_globs_promise_are_present():
         # the same class of silent failure as a wheel with no dashboard at all.
         "manifest.webmanifest",
         "favicon.ico",
+        # A wheel whose dashboard registers a worker the wheel does not contain
+        # would install fine and then fail the one moment the worker matters.
+        "sw.js",
         "icons/icon.svg",
         "icons/icon-192.png",
         "icons/icon-512.png",
