@@ -54,9 +54,9 @@ This design adds the missing kind: **module presets** — curated built-in templ
 
 ### 4.1 Components
 
-1. **`static/presets.js`** *(new; classic script, `defer`, ordered before `app.js`)* — exposes one global: `window.MLMPresets.mount({ getFormData, fillForm, toast })`. The core is DOM-free so jsdom tests can exercise it directly. `app.js` keeps owning modal lifecycle, focus trap, and toasts; `presets.js` never reimplements them.
+1. **`static/presets.js`** *(new; classic script, `defer`, ordered before `app.js`)* — exposes one global: `window.MLMPresets`, with `mount({ getFormData, fillForm, toast })` and the core surface (incl. `LIMITS`) for tests. The core is DOM-free so jsdom tests can exercise it directly. `app.js` keeps owning modal lifecycle, focus trap, and toasts; `presets.js` never reimplements them.
 2. **`static/index.html`** — one `<script>` tag; inside the existing `#agentModal`: chips row `#presetChips`, saved-presets manager `#presetManager`, a hidden `<input type="file">`, and the import/export controls (layout in §6).
-3. **`static/app.js`** — the ~15-line seam only. The submit handler already assembles `{id, name, role, system_prompt, color, avatar}` (≈ line 1986); `getFormData()` reuses that shape, `fillForm()` writes the same six fields. **Register behavior is unchanged.**
+3. **`static/app.js`** — the ~15-line seam only. The submit handler already assembles `payload = {agent_id, name, role, system_prompt, color, avatar}` (≈ line 1984); `getFormData()` reuses that exact shape, `fillForm()` writes the same six fields. **Register behavior is unchanged.**
 4. **`tests/js/presets.test.mjs`** *(new)* — jsdom tests in the established pattern (`node --test tests/js/*.test.mjs`).
 5. **Docs touch (P3 only)** — README bullet; retire the future-list entry in `USER_CENTERED_DESIGN.md` using that document's own honesty rule ("remove shipped items rather than leave stale claims"); `test_docs_are_accurate.py` stays green.
 
@@ -78,11 +78,13 @@ This design adds the missing kind: **module presets** — curated built-in templ
 - `label` (1–60 chars, not whitespace-only) is the only field beyond the six form fields. "Save as preset" defaults it to Display Name; rename edits `label` only.
 - `agent_id` is stored already normalized (`strip().lower()` per the server contract) so chips fill ids Register accepts unchanged.
 
+**Initial built-in roster (5):** Security Auditor (`security-auditor`), DB Expert (`db-expert`), Performance Engineer (`perf-engineer`), QA/Test Engineer (`qa-engineer`), Technical Writer (`tech-writer`). Names, count, and slugs are fixed here; the exact field copy is drafted during P1 and user-reviewed before P1 lands.
+
 ### 4.3 Storage
 
 - **One key:** `mlm.agentPresets.v1` = `{"schema": "mlm-agent-preset-lib/1", "presets": [Preset, …]}` — one atomic `setItem`, simple quota math.
 - **Built-ins are code, not data:** the curated gallery lives in `presets.js` and is merged at render as un-deletable, un-editable entries; user presets can never overwrite them (label collisions suffix per §5, gate 6). Wiping `localStorage` cannot lose what ships with the app.
-- **Bounds:** ≤ 50 user presets; ≤ 8 KB serialized per preset; ≤ 256 KB whole library (the library bound binds first: 50 × 8 KB ≤ 256 KB is not assumed — each save/import re-checks the library total). A library exported at cap (≤ 256 KB) is always within the 512 KB import gate, so round-trips can't fail on size.
+- **Bounds** (all measured on **compact** JSON serialization): ≤ 50 user presets; ≤ 8 KB per preset; ≤ 256 KB whole library. Since 50 × 8 KB can exceed 256 KB, the library total is re-checked on every save/import — the tighter bound always wins. A library exported at cap pretty-prints to well under the 512 KB import gate, so round-trips can't fail on size.
 - **Degradation:** if `localStorage` throws (some private windows), presets work in-memory for the session with a one-time toast: *"Presets won't persist in this browser session."* Success criterion #2 holds wherever storage is actually available.
 
 ### 4.4 Data flow
@@ -95,7 +97,7 @@ This design adds the missing kind: **module presets** — curated built-in templ
 
 ### 5.1 Mirror table (server is the contract)
 
-`AddAgentRequest` (`server/app.py:156`) is authoritative. Presets validate to **server acceptance**, not the HTML attributes — the HTML pattern `^[a-z0-9][a-z0-9-_]{0,48}[a-z0-9]$` allows 2-char ids that the server pattern rejects (known drift, out of scope to fix here); the server pattern's `^[a-z0-9]$` single-char alternative is unreachable due to `min_length=2`. Effective rules:
+`AddAgentRequest` (`server/app.py:156`) is authoritative. Presets validate to **server acceptance**, not the HTML attributes — the HTML pattern `^[a-z0-9][a-z0-9-_]{0,48}[a-z0-9]$` and the client-side check (`app.js` ≈ 1993) accept 2-char ids that the server pattern rejects (known drift, out of scope to fix here); the server pattern's `^[a-z0-9]$` single-char alternative is unreachable due to `min_length=2`. Effective rules:
 
 | Field | Rule |
 |---|---|
@@ -119,7 +121,7 @@ This table is the meeting point for the drift-lock tests (§7.3).
 3. **Shape** — must self-describe: `schema: "mlm-agent-preset/1"` (single preset object) or `schema: "mlm-agent-preset-lib/1"` with a `presets` array (library). Unknown/missing schema → *"That file was made for a different version of this app."* Single-vs-library is auto-detected by shape. Library entries beyond 100 at the shape gate → *"That file lists more presets than this app supports."*
 4. **Flat by construction** — the format has no nesting to traverse: the validator reads only top-level, known fields, type-checks each as string before length checks, **whitelist-copies** known fields into fresh objects, ignores unknown keys, and never spreads / `Object.assign`s parsed objects into anything. This is also why `__proto__` / `constructor` / `prototype` payloads have no path to pollution (locked by tests, §7.1).
 5. **Per-preset field validation** against the mirror table. Policy: **accept valid entries, skip bad ones, report honestly** — *"Imported 3 of 5 — 2 skipped."* with `console.warn` details. One corrupt entry cannot spoil a 20-preset kit.
-6. **Merge** — imported entries become user presets (built-ins are unreachable by import). Label collision with **any** existing label (built-in or user) auto-suffixes ` (imported)`, then ` (imported 2)`, ` (imported 3)`…; `agent_id` may repeat across presets (they are templates; uniqueness is enforced at Register time). Fill to the 50-preset cap, then report the remainder as skipped.
+6. **Merge** — imported entries become user presets (built-ins are unreachable by import). Label collisions run through one shared `uniqueLabel()` helper against the full current label set (built-ins + user): the import family tries ` (imported)`, ` (imported 2)`, ` (imported 3)`…; the manual-save family (§6.2) tries ` (2)`, ` (3)`…. `agent_id` may repeat across presets (they are templates; uniqueness is enforced at Register time). Fill to the 50-preset cap, then report the remainder as skipped.
 7. **Atomic commit** — build the complete new library array in memory → one `localStorage.setItem`. Quota/serialization failure leaves the old library untouched and shows a plain toast.
 
 ### 5.3 Rendering rule (XSS posture)
@@ -159,9 +161,9 @@ Toasts only (existing `showToast`), plain language + what to do next, never raw 
 ### 6.2 Flows
 
 1. **Template → Register (success criterion #1):** open modal → click a chip → six fields fill + toast *"Loaded preset: Security Auditor"* (voice matches the existing *"Loaded preset: …"* scenario toasts) → tweak or not → **Register**. Chips only fill; they never submit. Register stays explicit.
-2. **Save form as preset:** `[＋ Save as preset]` sits at the end of the chips row (always visible — saving is the core of the "personal kits" purpose). It validates via `getFormData()`, defaults `label` to Display Name, saves instantly with toast *"Saved 'Security Auditor' to your presets."* Colliding labels get the ` (2)` suffix (same suffix family as §5, gate 6).
-3. **Manage (collapsed by default; badge shows count):** a disclosure button (`aria-expanded`) — open when you want your library, closed so the common flow stays short. Rows mirror the Saved Sessions row pattern: info block (`avatar + label`, meta line `name · role` truncated) + actions **[Load]** (text, indigo), **[✎ rename]**, **[🗑 delete]**, **[⬇ export]** (icon buttons). Delete is one-click, like session rows. Rename is inline: the label swaps to a small `<input>` (Enter/blur commits, Esc cancels) — no `prompt()`, no new modal.
-4. **Import / Export:** `[⬆ Import]` and `[⬇ All]` live at the manager header (rarer actions); per-preset `[⬇]` on each row. All local file I/O per §5; summary toast on completion.
+2. **Save form as preset:** `[＋ Save as preset]` sits at the end of the chips row (always visible — saving is the core of the "personal kits" purpose). It validates via `getFormData()`, defaults `label` to Display Name, saves instantly with toast *"Saved 'Security Auditor' to your presets."* Colliding labels get ` (2)`, ` (3)`… until free (manual-save family; imports use the ` (imported)` family — §5, gate 6).
+3. **Manage (collapsed by default; badge shows count):** a disclosure button (`aria-expanded`) — open when you want your library, closed so the common flow stays short. Rows mirror the Saved Sessions row pattern: info block (`avatar + label`, meta line `name · role` truncated) + actions **[Load]** (text, indigo; fills the form and toasts *"Loaded preset: …"* exactly like chips), **[✎ rename]**, **[🗑 delete]**, **[⬇ export]** (icon buttons). Delete is one-click, like session rows. Rename is inline: the label swaps to a small `<input>` (Enter/blur commits, Esc cancels) — a commit only lands when the new label passes the mirror table, otherwise the old label stands and a toast names the rule. No `prompt()`, no new modal.
+4. **Import / Export:** `[⬆ Import]` and `[⬇ All]` sit on the disclosure row itself — visible whether the manager is open or closed (rarer actions stay out of the chip row); `[⬇ All]` is disabled while the library is empty. Per-preset `[⬇]` lives on each row. All local file I/O per §5; summary toast on completion.
 
 ### 6.3 Empty states & a11y
 
@@ -191,8 +193,8 @@ Chip → `fillForm` seam; Save-as-preset (incl. label default + ` (2)` suffix); 
 
 ### 7.3 Drift-lock parity (the `test_docs_are_accurate.py` spirit: this spec's mirror table is the meeting point)
 
-- A **Python test** asserts `AddAgentRequest`'s limits, pattern, and reserved set equal the table.
-- A **JS test** asserts `presets.js`'s limits equal the table.
+- A **Python test** (`tests/test_preset_contract.py`, new) asserts `AddAgentRequest`'s limits, pattern, and reserved set equal the table.
+- A **JS test** asserts `MLMPresets.LIMITS` (the table exposed by `presets.js`) equals the table.
 
 Server and client cannot drift without a red test.
 
