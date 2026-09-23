@@ -86,7 +86,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 640 tests (484 Python + 156 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 652 tests (496 Python + 156 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -626,6 +626,7 @@ machinelearningmachine/
 │   ├── build_vendor.py      # Regenerate static/vendor/ from pinned npm deps
 │   ├── pick_port.py         # First free local port, so a busy 8000 cannot stop a launch
 │   ├── bench_sessions.py    # Session-listing benchmark: header read vs full parse
+│   ├── make_icons.py        # app icons: static/icons/icon.svg -> committed PNG/ICO, stdlib only
 │   └── e2e_server_check.py  # End-to-end pass against a running server (HTTP + WS)
 ├── tests/
 │   ├── test_protocol.py     # message + bus bounds
@@ -657,6 +658,7 @@ machinelearningmachine/
 │   ├── test_packaging.py            # every module dir is a real package; package-data globs match
 │   ├── test_preset_contract.py      # drift lock: the preset mirror table vs AddAgentRequest
 │   ├── test_docs_are_accurate.py      # docs claims that fail the build when stale
+│   ├── test_pwa.py                  # icons match their SVG source; manifest/routes answer like a browser asks
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
 │       ├── client-lifecycle.test.mjs  # 19 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery, stale-record guard
