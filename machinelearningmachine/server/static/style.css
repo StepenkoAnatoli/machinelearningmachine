@@ -44,6 +44,38 @@ pre code.hljs {
   }
 }
 
+/* Module preset chips (static/presets.js) — the Add Module form's template
+   chips. Hand-styled on purpose: presets.js is outside the Tailwind content
+   scan (see scripts/build_vendor.py), so utility classes there would ship
+   unstyled. Deliberately not .preset-btn — app.js wires that class to the
+   scenario loader. JS sets border-color per preset (hex-gated). */
+.preset-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.625rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  border-radius: 0.5rem;
+  background-color: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #475569;
+  transition: background-color 0.15s ease;
+  cursor: pointer;
+}
+.preset-chip:hover {
+  background-color: #334155;
+}
+.preset-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px #6366f1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .preset-chip {
+    transition: none;
+  }
+}
+
 .msg-bubble {
   animation: fadeInSlideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }

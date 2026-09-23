@@ -351,3 +351,128 @@ test("uniqueLabel: accepts arrays or Sets as the taken set", () => {
   assert.equal(core.uniqueLabel("A", new Set(["A"])), "A (2)");
   assert.equal(core.uniqueLabel("B", new Set(["B", "B (2)", "B (3)"])), "B (4)");
 });
+
+// ---------------------------------------------------------- mount: chips UI
+
+function mountFixture() {
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <div id="agentModal">
+        <div id="presetChips" role="group" aria-label="Module presets"></div>
+        <form id="formAddAgent">
+          <input id="newAgentId"><input id="newAgentName"><input id="newAgentRole">
+          <textarea id="newAgentPrompt"></textarea>
+          <input id="newAgentColor"><input id="newAgentAvatar">
+        </form>
+      </div>
+    </body></html>`,
+    { runScripts: "dangerously" },
+  );
+  const win = dom.window;
+  win.eval(read(join(staticDir, "presets.js")));
+  const calls = { fill: [], toast: [], submit: 0 };
+  win.document.getElementById("formAddAgent").addEventListener("submit", (e) => {
+    e.preventDefault();
+    calls.submit += 1;
+  });
+  return {
+    win,
+    api: win.MLMPresets,
+    calls,
+    chips: win.document.getElementById("presetChips"),
+    start() {
+      return win.MLMPresets.mount({
+        fillForm: (p) => calls.fill.push(p),
+        toast: (...a) => calls.toast.push(a),
+      });
+    },
+  };
+}
+
+test("mount renders 5 chips in spec order, as non-submitting buttons with avatar faces", () => {
+  const fx = mountFixture();
+  assert.equal(fx.start(), true);
+  const btns = [...fx.chips.querySelectorAll("button")];
+  assert.equal(btns.length, 5);
+  assert.deepEqual(
+    btns.map((b) => b.getAttribute("aria-label")),
+    native(fx.api.BUILTINS.map((b) => `Load preset ${b.label}`)),
+  );
+  btns.forEach((b, i) => {
+    assert.equal(b.type, "button"); // never submits
+    assert.equal(b.className.includes("preset-btn"), false); // app.js owns .preset-btn (scenario loader)
+    assert.equal(b.children.length, 1); // one avatar face span, then a text node
+    assert.equal(b.children[0].getAttribute("aria-hidden"), "true");
+    assert.equal(b.children[0].textContent, fx.api.BUILTINS[i].avatar);
+    assert.ok(b.textContent.includes(fx.api.BUILTINS[i].label));
+  });
+});
+
+test("chip click fills the six-field payload and toasts 'Loaded preset: …'", () => {
+  const fx = mountFixture();
+  fx.start();
+  const first = fx.api.BUILTINS[0];
+  fx.chips.querySelectorAll("button")[0].click();
+  assert.equal(fx.calls.fill.length, 1);
+  assert.deepEqual(native(fx.calls.fill[0]), {
+    agent_id: first.agent_id,
+    name: first.name,
+    role: first.role,
+    system_prompt: first.system_prompt,
+    color: first.color,
+    avatar: first.avatar,
+  });
+  assert.deepEqual(fx.calls.toast, [["Loaded preset: Security Auditor", "info", 2000]]);
+});
+
+test("chips never submit the form", () => {
+  const fx = mountFixture();
+  fx.start();
+  for (const b of fx.chips.querySelectorAll("button")) b.click();
+  assert.equal(fx.calls.submit, 0);
+});
+
+test("mount is idempotent and fails soft without a container or fillForm", () => {
+  const fx = mountFixture();
+  fx.start();
+  fx.start(); // second mount re-renders, never duplicates
+  assert.equal(fx.chips.querySelectorAll("button").length, 5);
+  const bare = mountFixture();
+  bare.chips.remove();
+  assert.equal(bare.start(), false);
+  const noFill = mountFixture();
+  assert.equal(noFill.api.mount({ toast: () => {} }), false);
+});
+
+test("mount renders labels via textContent — hostile labels stay inert", () => {
+  const fx = mountFixture();
+  const evil = fx.api.validatePreset({
+    ...base(),
+    label: "<img src=x onerror=alert(1)>",
+    agent_id: "evil-one",
+  });
+  assert.equal(evil.ok, true); // label rules don't (and needn't) forbid markup characters
+  fx.api.BUILTINS.push(evil.value);
+  try {
+    fx.start();
+    assert.equal(fx.chips.querySelectorAll("img").length, 0);
+    assert.equal(fx.chips.querySelectorAll("script").length, 0);
+    assert.ok(fx.chips.textContent.includes("<img src=x onerror=alert(1)>"));
+    assert.equal(fx.win.document.images.length, 0);
+  } finally {
+    fx.api.BUILTINS.pop();
+  }
+});
+
+test("index.html wires the presets seam (sync script before app.js, container above the form)", () => {
+  const html = read(join(staticDir, "index.html"));
+  const pres = html.indexOf('<script src="/static/presets.js"');
+  const app = html.indexOf('<script src="/static/app.js"');
+  assert.ok(pres !== -1 && app !== -1 && pres < app, "presets.js must load before app.js");
+  const chipsAt = html.indexOf('id="presetChips"');
+  const formAt = html.indexOf('id="formAddAgent"');
+  assert.ok(chipsAt !== -1 && formAt !== -1 && chipsAt < formAt, "#presetChips sits above the form");
+  const chipTag = html.slice(html.lastIndexOf("<div", chipsAt), html.indexOf(">", chipsAt) + 1);
+  assert.ok(chipTag.includes('role="group"'), "chips container keeps role=group");
+  assert.ok(chipTag.includes('aria-label="Module presets"'), "chips container is labelled");
+});

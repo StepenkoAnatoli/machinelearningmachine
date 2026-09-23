@@ -281,6 +281,69 @@
     },
   ];
 
+  /** Style tokens must pass the hex gate before touching element.style (spec §5.3). */
+  function safeColor(c, fallback) {
+    return typeof c === "string" && COLOR_RE.test(c) ? c : fallback;
+  }
+
+  /** The six form fields — the fillForm/getFormData seam payload (spec §4.1). */
+  function six(p) {
+    return {
+      agent_id: p.agent_id,
+      name: p.name,
+      role: p.role,
+      system_prompt: p.system_prompt,
+      color: p.color,
+      avatar: p.avatar,
+    };
+  }
+
+  /**
+   * Attach the preset UI inside the Add Custom Module modal. P1: built-in
+   * chips only. `fillForm(payload)` writes the six fields; `toast(msg, type,
+   * ms)` is app.js's showToast. Returns false (never throws) when the page
+   * lacks the container or the seam is incomplete.
+   */
+  function mount(options) {
+    options = options || {};
+    var fillForm = typeof options.fillForm === "function" ? options.fillForm : null;
+    var toast = typeof options.toast === "function" ? options.toast : null;
+    var chips = typeof document === "object" ? document.getElementById("presetChips") : null;
+    if (!chips || !fillForm) {
+      return false;
+    }
+    while (chips.firstChild) {
+      chips.removeChild(chips.firstChild); // idempotent re-mount
+    }
+    BUILTINS.forEach(function (preset) {
+      var btn = document.createElement("button");
+      btn.type = "button"; // chips can never submit the form
+      // One hand-written class, styled in style.css (the .preset-btn convention
+      // for classes that are not Tailwind utilities): presets.js sits outside
+      // the Tailwind content scan (scripts/build_vendor.py), so utility classes
+      // here would ship unstyled. Deliberately NOT .preset-btn: app.js wires
+      // that class to the scenario loader (fills the prompt box). DOM built
+      // like Saved Sessions rows: createElement + textContent only, never
+      // interpolated markup.
+      btn.className = "preset-chip";
+      btn.style.borderColor = safeColor(preset.color, "#475569");
+      btn.setAttribute("aria-label", "Load preset " + preset.label);
+      var face = document.createElement("span");
+      face.setAttribute("aria-hidden", "true");
+      face.textContent = preset.avatar;
+      btn.appendChild(face);
+      btn.appendChild(document.createTextNode(" " + preset.label));
+      btn.addEventListener("click", function () {
+        fillForm(six(preset));
+        if (toast) {
+          toast("Loaded preset: " + preset.label, "info", 2000);
+        }
+      });
+      chips.appendChild(btn);
+    });
+    return true;
+  }
+
   window.MLMPresets = {
     SCHEMA: PRESET_SCHEMA,
     LIB_SCHEMA: LIB_SCHEMA,
@@ -289,5 +352,6 @@
     BUILTINS: BUILTINS,
     validatePreset: validatePreset,
     uniqueLabel: uniqueLabel,
+    mount: mount,
   };
 })();

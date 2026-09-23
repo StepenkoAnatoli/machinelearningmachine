@@ -54,7 +54,7 @@ This design adds the missing kind: **module presets** — curated built-in templ
 
 ### 4.1 Components
 
-1. **`static/presets.js`** *(new; classic script, `defer`, ordered before `app.js`)* — exposes one global: `window.MLMPresets`, with `mount({ getFormData, fillForm, toast })` and the core surface (incl. `LIMITS`) for tests. The core is DOM-free so jsdom tests can exercise it directly. `app.js` keeps owning modal lifecycle, focus trap, and toasts; `presets.js` never reimplements them.
+1. **`static/presets.js`** *(new; classic script, loaded as a sync `<script>` immediately before `app.js` — both are end-of-body; a `defer` tag in `<head>` would execute **after** `app.js`'s sync script and the seam would find no `MLMPresets`)* — exposes one global: `window.MLMPresets`, with `mount({ getFormData, fillForm, toast })` and the core surface (incl. `LIMITS`) for tests. The core is DOM-free so jsdom tests can exercise it directly. `app.js` keeps owning modal lifecycle, focus trap, and toasts; `presets.js` never reimplements them.
 2. **`static/index.html`** — one `<script>` tag; inside the existing `#agentModal`: chips row `#presetChips`, saved-presets manager `#presetManager`, a hidden `<input type="file">`, and the import/export controls (layout in §6).
 3. **`static/app.js`** — the ~15-line seam only. The submit handler already assembles `payload = {agent_id, name, role, system_prompt, color, avatar}` (≈ line 1984); `getFormData()` reuses that exact shape, `fillForm()` writes the same six fields. **Register behavior is unchanged.**
 4. **`tests/js/presets.test.mjs`** *(new)* — jsdom tests in the established pattern (`node --test tests/js/*.test.mjs`).

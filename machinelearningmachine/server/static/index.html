@@ -423,6 +423,12 @@
         </button>
       </div>
 
+      <!-- Module presets (static/presets.js) — prefills the form, never submits -->
+      <div class="mb-4">
+        <p class="text-xs font-medium text-slate-400 mb-1">Module presets</p>
+        <div id="presetChips" class="flex flex-wrap items-center gap-2" role="group" aria-label="Module presets"></div>
+      </div>
+
       <form id="formAddAgent" class="space-y-4" novalidate>
         <div>
           <label for="newAgentId" class="block text-xs font-medium text-slate-400 mb-1">Module ID (slug) *</label>
@@ -646,6 +652,10 @@
     MachineLearningMachine Inter-Module Mesh · Modular Multi-Agent Protocol · <span class="text-slate-600">Built for real user value</span>
   </footer>
 
+  <!-- presets.js is a sync script loaded immediately before app.js (both are
+       end-of-body): app.js's seam calls MLMPresets.mount() at load, so a
+       deferred script would run too late. -->
+  <script src="/static/presets.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

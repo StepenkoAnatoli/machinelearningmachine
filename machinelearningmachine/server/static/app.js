@@ -1976,6 +1976,24 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  // Module presets seam (static/presets.js). fillForm writes the same six
+  // fields the submit handler reads as `payload` — Register itself is
+  // untouched. getFormData joins when save-as-preset lands (P2). Chips are
+  // type=button and live outside this form: they can never submit it.
+  if (window.MLMPresets) {
+    window.MLMPresets.mount({
+      fillForm: (p) => {
+        document.getElementById("newAgentId").value = p.agent_id;
+        document.getElementById("newAgentName").value = p.name;
+        document.getElementById("newAgentRole").value = p.role;
+        document.getElementById("newAgentPrompt").value = p.system_prompt;
+        document.getElementById("newAgentColor").value = p.color;
+        document.getElementById("newAgentAvatar").value = p.avatar;
+      },
+      toast: showToast,
+    });
+  }
+
   // Add Agent form with validation
   formAddAgent.addEventListener("submit", async (e) => {
     e.preventDefault();
