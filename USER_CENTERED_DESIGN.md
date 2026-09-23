@@ -467,8 +467,26 @@ ALL E2E CHECKS PASSED
 
 ## 🔮 Future User-Centered Improvements (Not Yet Done)
 
-1. **Offline support**: service worker for PWA.
+1. **Offline support**: service worker for PWA. *(in progress: W3)*
 2. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
+3. **W6 — Task-aware model routing** (idea parked 2026-09-23, not scheduled): send a
+   task to the model that is good at *that kind* of task — GPT for code, Claude for
+   prose — rather than to whoever happens to hold the module.
+
+   What the recon already established, so nobody repeats it: provider is bound to
+   **agent identity**, not to the task (`/api/providers` assigns one OpenAI provider
+   to `mesh.gpt` *and* `mesh.copilot`, one Anthropic provider to `mesh.claude` *and*
+   `mesh.arenaai`), and the model is bound to the **provider** (`DEFAULT_OPENAI_MODEL`,
+   `DEFAULT_ANTHROPIC_MODEL`) — so today two modules on the same provider cannot even
+   use different models. The honest slice is therefore: per-module model choice first,
+   a user-authored rule table second, and a transcript line saying *"sent to X because
+   <reason>"* in the same breath — anything that picks a model silently would break the
+   one thing this dashboard does better than a chat box (every answer says which
+   provider produced it and whether it was simulated). A built-in ranking ("GPT is
+   better at coding") is deliberately *not* the starting point: it is hearsay with a
+   shelf life of months, and the app would be asserting a fact it cannot verify. It
+   also only pays off once two providers are configured; with the simulator or a
+   single key there is nothing to route between.
 
 These are noted but not implemented to keep scope focused on highest user value fixes.
 (An earlier version of this list proposed *session isolation* and *export
