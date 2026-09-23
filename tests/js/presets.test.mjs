@@ -358,7 +358,10 @@ function mountFixture() {
   const dom = new JSDOM(
     `<!doctype html><html><body>
       <div id="agentModal">
-        <div id="presetChips" role="group" aria-label="Module presets"></div>
+        <div class="mb-4">
+          <div id="presetChips" role="group" aria-label="Module presets"></div>
+          <button type="button" id="btnSavePreset"><span>Save as preset</span></button>
+        </div>
         <form id="formAddAgent">
           <input id="newAgentId"><input id="newAgentName"><input id="newAgentRole">
           <textarea id="newAgentPrompt"></textarea>
@@ -370,20 +373,56 @@ function mountFixture() {
   );
   const win = dom.window;
   win.eval(read(join(staticDir, "presets.js")));
+  const doc = win.document;
+  const storage = fakeStorage();
   const calls = { fill: [], toast: [], submit: 0 };
-  win.document.getElementById("formAddAgent").addEventListener("submit", (e) => {
+  doc.getElementById("formAddAgent").addEventListener("submit", (e) => {
     e.preventDefault();
     calls.submit += 1;
   });
+  const fields = () => ({
+    agent_id: doc.getElementById("newAgentId").value,
+    name: doc.getElementById("newAgentName").value,
+    role: doc.getElementById("newAgentRole").value,
+    system_prompt: doc.getElementById("newAgentPrompt").value,
+    color: doc.getElementById("newAgentColor").value,
+    avatar: doc.getElementById("newAgentAvatar").value,
+  });
   return {
     win,
+    doc,
     api: win.MLMPresets,
     calls,
-    chips: win.document.getElementById("presetChips"),
+    storage,
+    chips: doc.getElementById("presetChips"),
+    saveBtn: doc.getElementById("btnSavePreset"),
+    fields,
+    fill(over = {}) {
+      const f = {
+        agent_id: "my-auditor",
+        name: "My Auditor",
+        role: "Reviewer",
+        system_prompt: "You review things carefully.",
+        color: "#0ea5e9",
+        avatar: "🔐",
+        ...over,
+      };
+      doc.getElementById("newAgentId").value = f.agent_id;
+      doc.getElementById("newAgentName").value = f.name;
+      doc.getElementById("newAgentRole").value = f.role;
+      doc.getElementById("newAgentPrompt").value = f.system_prompt;
+      doc.getElementById("newAgentColor").value = f.color;
+      doc.getElementById("newAgentAvatar").value = f.avatar;
+    },
+    readStore() {
+      return native(win.MLMPresets.createStore({ storage }).load());
+    },
     start() {
       return win.MLMPresets.mount({
+        getFormData: fields,
         fillForm: (p) => calls.fill.push(p),
         toast: (...a) => calls.toast.push(a),
+        storage,
       });
     },
   };
@@ -475,6 +514,11 @@ test("index.html wires the presets seam (sync script before app.js, container ab
   const chipTag = html.slice(html.lastIndexOf("<div", chipsAt), html.indexOf(">", chipsAt) + 1);
   assert.ok(chipTag.includes('role="group"'), "chips container keeps role=group");
   assert.ok(chipTag.includes('aria-label="Module presets"'), "chips container is labelled");
+  const saveAt = html.indexOf('id="btnSavePreset"');
+  assert.ok(saveAt !== -1 && saveAt < formAt, "Save-as-preset sits above the form, with the chips");
+  const saveTag = html.slice(html.lastIndexOf("<button", saveAt), html.indexOf(">", saveAt) + 1);
+  assert.ok(saveTag.includes('type="button"'), "Save-as-preset can never submit the form");
+  assert.ok(html.slice(saveAt, saveAt + 400).includes("Save as preset"));
 });
 
 // ------------------------------------------------------- store (localStorage)
@@ -675,4 +719,84 @@ test("store: rename changes the label; collisions, invalids and unknowns are ref
   assert.equal(unknown.ok, false);
   assert.equal(unknown.error, "No preset named 'ghost'.");
   assert.deepEqual(native(store.load().map((p) => p.label).sort()), ["Beta", "Gamma"]); // unchanged
+});
+
+// --------------------------------------------------------- save-as-preset UI
+
+test("save: hidden without getFormData, shown with it", () => {
+  const hidden = mountFixture();
+  hidden.api.mount({ fillForm: () => {}, toast: () => {}, storage: hidden.storage });
+  assert.equal(hidden.saveBtn.hidden, true);
+  const shown = mountFixture();
+  shown.start();
+  assert.equal(shown.saveBtn.hidden, false);
+});
+
+test("save: happy path — label defaults to Display Name, success toast, stored", () => {
+  const fx = mountFixture();
+  fx.start();
+  fx.fill({ name: "My Auditor" });
+  fx.saveBtn.click();
+  assert.deepEqual(fx.calls.toast, [["Saved 'My Auditor' to your presets.", "success", 2500]]);
+  const lib = fx.readStore();
+  assert.deepEqual(lib.map((p) => p.label), ["My Auditor"]);
+  assert.equal(lib[0].name, "My Auditor");
+});
+
+test("save: invalid form names the first offending field and saves nothing", () => {
+  const fx = mountFixture();
+  fx.start();
+  fx.fill({ agent_id: "", name: "", role: "", system_prompt: "", color: "", avatar: "" });
+  fx.saveBtn.click();
+  assert.deepEqual(fx.calls.toast, [[MSG.agentId, "error", 4000]]);
+  fx.fill({ system_prompt: "short" }); // id/name/role back to valid
+  fx.saveBtn.click();
+  assert.deepEqual(fx.calls.toast[1], [MSG.systemPrompt, "error", 4000]);
+  assert.deepEqual(fx.readStore(), []); // nothing partially written
+});
+
+test("save: label clamps to 60 chars when Display Name runs longer", () => {
+  const fx = mountFixture();
+  fx.start();
+  fx.fill({ name: "N".repeat(80), agent_id: "long-name-a" });
+  fx.saveBtn.click();
+  const lib = fx.readStore();
+  assert.equal(lib[0].label, "N".repeat(60));
+  assert.equal(lib[0].name, "N".repeat(80)); // the form field itself is untouched
+  assert.equal(fx.calls.toast[0][0], `Saved '${"N".repeat(60)}' to your presets.`);
+});
+
+test("save: collisions suffix (2), (3) against builtins — toast shows the final label", () => {
+  const fx = mountFixture();
+  fx.start();
+  fx.fill({ name: "DB Expert", agent_id: "db-expert-x" });
+  fx.saveBtn.click();
+  fx.calls.toast.length = 0;
+  fx.fill({ name: "DB Expert", agent_id: "db-expert-y" });
+  fx.saveBtn.click();
+  assert.deepEqual(fx.readStore().map((p) => p.label), ["DB Expert (2)", "DB Expert (3)"]);
+  assert.deepEqual(fx.calls.toast, [["Saved 'DB Expert (3)' to your presets.", "success", 2500]]);
+});
+
+test("save: a rapid double-click saves exactly once", () => {
+  const fx = mountFixture();
+  fx.start();
+  fx.fill();
+  fx.saveBtn.click();
+  fx.saveBtn.click();
+  assert.equal(fx.readStore().length, 1);
+  assert.equal(fx.calls.toast.length, 1);
+});
+
+test("save: hostile Display Name is stored as data and toasted as plain text", () => {
+  const fx = mountFixture();
+  fx.start();
+  const evil = "<img src=x onerror=alert(1)>";
+  fx.fill({ name: evil, agent_id: "evil-one" });
+  fx.saveBtn.click();
+  assert.deepEqual(fx.calls.toast, [[`Saved '${evil}' to your presets.`, "success", 2500]]);
+  const lib = fx.readStore();
+  assert.equal(lib[0].label, evil);
+  assert.equal(lib[0].name, evil);
+  assert.equal(fx.doc.images.length, 0); // nothing ever parsed it as markup
 });

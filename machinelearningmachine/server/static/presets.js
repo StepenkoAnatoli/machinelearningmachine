@@ -298,20 +298,45 @@
     };
   }
 
+  /** Label defaults to Display Name, clamped to 60 code points (the form
+   *  allows 100; rename in the manager refines it). Spec §4.2/§6.2. */
+  function labelFromName(name) {
+    var s = typeof name === "string" ? name.trim() : "";
+    return Array.from(s)
+      .slice(0, LIMITS.label.max)
+      .join("");
+  }
+
+  // Per-page save-as-preset wiring (the button is static markup: one listener,
+  // latest callbacks/store swapped in on each mount).
+  var saveState = null;
+
   /**
    * Attach the preset UI inside the Add Custom Module modal. P1: built-in
-   * chips only. `fillForm(payload)` writes the six fields; `toast(msg, type,
-   * ms)` is app.js's showToast. Returns false (never throws) when the page
-   * lacks the container or the seam is incomplete.
+   * chips. P2: Save-as-preset. `fillForm(payload)` writes the six fields;
+   * `getFormData()` reads them back; `toast(msg, type, ms)` is app.js's
+   * showToast. Returns false (never throws) when the page lacks the container
+   * or the seam is incomplete.
    */
   function mount(options) {
     options = options || {};
     var fillForm = typeof options.fillForm === "function" ? options.fillForm : null;
+    var getFormData = typeof options.getFormData === "function" ? options.getFormData : null;
     var toast = typeof options.toast === "function" ? options.toast : null;
     var chips = typeof document === "object" ? document.getElementById("presetChips") : null;
     if (!chips || !fillForm) {
       return false;
     }
+    var store =
+      options.store ||
+      createStore({
+        storage: options.storage,
+        onNotice: function (msg) {
+          if (toast) {
+            toast(msg, "warning", 4000);
+          }
+        },
+      });
     while (chips.firstChild) {
       chips.removeChild(chips.firstChild); // idempotent re-mount
     }
@@ -341,6 +366,53 @@
       });
       chips.appendChild(btn);
     });
+
+    // Save-as-preset (spec §6.2 flow 2). The button is static markup, so the
+    // click listener is wired once per page (module-level `saveState` below
+    // always carries the latest seam callbacks and store).
+    var saveBtn = document.getElementById("btnSavePreset");
+    if (saveBtn) {
+      saveBtn.hidden = !getFormData;
+      if (!saveState) {
+        saveState = { getFormData: null, store: null, toast: null, lastSaveAt: 0, lastFingerprint: null };
+        saveBtn.addEventListener("click", function () {
+          var st = saveState;
+          if (!st || !st.getFormData) {
+            return;
+          }
+          var data = st.getFormData();
+          var fingerprint = JSON.stringify(data);
+          var now = Date.now();
+          if (st.lastFingerprint === fingerprint && now - st.lastSaveAt < 400) {
+            return; // identical intent twice inside a double-click; failures and
+            // edits never block a retry. Deliberately timer-free.
+          }
+          var res = st.store.save({
+            label: labelFromName(data.name),
+            agent_id: data.agent_id,
+            name: data.name,
+            role: data.role,
+            system_prompt: data.system_prompt,
+            color: data.color,
+            avatar: data.avatar,
+          });
+          if (!res.ok) {
+            if (st.toast) {
+              st.toast(res.error, "error", 4000);
+            }
+            return;
+          }
+          st.lastSaveAt = now;
+          st.lastFingerprint = fingerprint;
+          if (st.toast) {
+            st.toast("Saved '" + res.value.label + "' to your presets.", "success", 2500);
+          }
+        });
+      }
+      saveState.getFormData = getFormData;
+      saveState.store = store;
+      saveState.toast = toast;
+    }
     return true;
   }
 

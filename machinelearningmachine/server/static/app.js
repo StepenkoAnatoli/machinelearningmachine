@@ -1976,12 +1976,20 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Module presets seam (static/presets.js). fillForm writes the same six
-  // fields the submit handler reads as `payload` — Register itself is
-  // untouched. getFormData joins when save-as-preset lands (P2). Chips are
-  // type=button and live outside this form: they can never submit it.
+  // Module presets seam (static/presets.js). fillForm/getFormData move the same
+  // six fields the submit handler reads as `payload` — Register itself is
+  // untouched. Chips and Save-as-preset are type=button and live outside this
+  // form: they can never submit it.
   if (window.MLMPresets) {
     window.MLMPresets.mount({
+      getFormData: () => ({
+        agent_id: document.getElementById("newAgentId").value,
+        name: document.getElementById("newAgentName").value,
+        role: document.getElementById("newAgentRole").value,
+        system_prompt: document.getElementById("newAgentPrompt").value,
+        color: document.getElementById("newAgentColor").value,
+        avatar: document.getElementById("newAgentAvatar").value,
+      }),
       fillForm: (p) => {
         document.getElementById("newAgentId").value = p.agent_id;
         document.getElementById("newAgentName").value = p.name;
