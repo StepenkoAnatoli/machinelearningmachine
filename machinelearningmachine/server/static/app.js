@@ -2068,6 +2068,17 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  // Offline shell (static/sw.js): precaches the page so it still opens when the
+  // server is not running. Registered only where a worker can exist - over plain
+  // http on a LAN address there is no secure context, which is a normal way to
+  // reach this dashboard, so a refusal is handled in place and stays invisible:
+  // the page must behave exactly as it did before this feature existed.
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      /* no worker here: the dashboard runs as it always has */
+    });
+  }
+
   // Module presets seam (static/presets.js). fillForm/getFormData move the same
   // six fields the submit handler reads as `payload` — Register itself is
   // untouched. Chips and Save-as-preset are type=button and live outside this

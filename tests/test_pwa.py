@@ -368,7 +368,7 @@ def test_the_api_is_still_guarded():
     client = TestClient(create_app(ServerConfig(auth_token=TOKEN, host="0.0.0.0", allow_public=True)))
     assert client.get("/api/status").status_code in (401, 403)
     assert client.get("/api/agents").status_code in (401, 403)
-    assert PUBLIC_PATHS == {"/", "/health", "/favicon.ico", "/manifest.webmanifest"}, (
+    assert PUBLIC_PATHS == {"/", "/health", "/favicon.ico", "/manifest.webmanifest", "/sw.js"}, (
         "PUBLIC_PATHS grows deliberately, one entry at a time"
     )
 
@@ -419,3 +419,46 @@ def test_every_icon_the_head_references_exists():
     for ref in re.findall(r'(?:href)="(/(?:static/)?[^"]+\.(?:png|ico|svg|webmanifest))"', _head()):
         path = STATIC / ref.replace("/static/", "").lstrip("/")
         assert path.is_file(), f"the head references a missing file: {ref}"
+
+
+# --------------------------------------------------------------------------- #
+# the service worker route
+# --------------------------------------------------------------------------- #
+def test_the_worker_is_served_from_the_root_as_javascript():
+    """
+    Three things have to be right or the worker silently never runs: the path (a
+    worker under /static/ is scoped to /static/ and cannot control the page), the
+    media type (a worker served as text/plain is refused by the browser), and
+    reachability before signing in (the browser fetches it before any credential
+    exists - a token-only install would break the very case it exists for).
+    """
+    client = TestClient(create_app(ServerConfig(host="127.0.0.1")))
+    response = client.get("/sw.js")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/javascript")
+    assert "no-cache" in response.headers.get("cache-control", ""), (
+        "the worker script is what decides when a new worker installs; caching it hides updates"
+    )
+    body = response.text
+    assert "install" in body and "fetch" in body, "and it is the real worker, not an empty file"
+
+
+def test_the_worker_is_reachable_before_signing_in():
+    client = TestClient(create_app(ServerConfig(auth_token=TOKEN, host="0.0.0.0", allow_public=True)))
+    assert client.get("/sw.js").status_code == 200
+    assert "/sw.js" in PUBLIC_PATHS
+
+
+def test_the_worker_served_at_the_root_is_the_worker_on_disk():
+    """
+    One source of truth: /sw.js is the file in static/, not a copy that can drift.
+
+    (The /static mount also exposes it, which is harmless - a worker's *scope* is
+    decided by the URL it is registered from, and tests/js/offline.test.mjs pins
+    that to "/sw.js". Registering the /static path instead would scope the worker
+    to /static and quietly disable offline, so that URL is what is locked, not this
+    one's 404.)
+    """
+    client = TestClient(create_app(ServerConfig(host="127.0.0.1")))
+    served = client.get("/sw.js")
+    assert served.content == (STATIC / "sw.js").read_bytes()

@@ -101,7 +101,7 @@ CLIENT_HISTORY_LIMIT = MessageBus.MAX_HISTORY
 #: favicon before anyone signs in, and a service worker fetches the shell during
 #: install, when no credential exists yet. None of them exposes state - they are
 #: files that ship with the server.
-PUBLIC_PATHS = {"/", "/health", "/favicon.ico", "/manifest.webmanifest"}
+PUBLIC_PATHS = {"/", "/health", "/favicon.ico", "/manifest.webmanifest", "/sw.js"}
 PUBLIC_PREFIXES = ("/static/", "/api/auth/")
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1505,6 +1505,27 @@ def _register_routes(
         if not manifest.exists():
             return JSONResponse({"detail": "No manifest in this build."}, status_code=404)
         return FileResponse(str(manifest), media_type="application/manifest+json")
+
+    @app.api_route("/sw.js", methods=["GET", "HEAD"])
+    async def serve_service_worker():
+        """
+        The service worker, from the root, as JavaScript.
+
+        All three of those matter. From the root because a worker under ``/static``
+        would be scoped to ``/static`` and could never control the page it is meant
+        to keep alive; as JavaScript because a worker served as ``text/plain`` is
+        refused outright by the browser; and ``no-cache`` because the worker script
+        is the thing that decides when a new worker installs - an HTTP-cached copy
+        hides updates from the user.
+        """
+        worker = STATIC_DIR / "sw.js"
+        if not worker.exists():
+            return JSONResponse({"detail": "No service worker in this build."}, status_code=404)
+        return FileResponse(
+            str(worker),
+            media_type="text/javascript",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
     async def serve_favicon():

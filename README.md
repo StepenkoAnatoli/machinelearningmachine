@@ -86,7 +86,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 678 tests (507 Python + 171 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 686 tests (510 Python + 176 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -519,8 +519,8 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 507 tests, all offline
-node --test tests/js/*.test.mjs          # 171 jsdom browser tests (needs: npm ci)
+pytest -q                                    # 510 tests, all offline
+node --test tests/js/*.test.mjs          # 176 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
 ```
@@ -662,7 +662,7 @@ machinelearningmachine/
 │   ├── test_packaging.py            # every module dir is a real package; package-data globs match
 │   ├── test_preset_contract.py      # drift lock: the preset mirror table vs AddAgentRequest
 │   ├── test_docs_are_accurate.py      # docs claims that fail the build when stale
-│   ├── test_pwa.py                  # icons match their SVG source; manifest/routes/head answer like a browser asks
+│   ├── test_pwa.py                  # icons match their SVG source; manifest/worker/routes/head answer like a browser asks
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
 │       ├── client-lifecycle.test.mjs  # 19 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery, stale-record guard
@@ -670,6 +670,7 @@ machinelearningmachine/
 │       ├── preset-contract.test.mjs   # 6 tests: drift lock — the client's LIMITS + gallery vs the spec's table
 │       ├── theme.test.mjs             # 14 tests: resolution, persistence, toggle wiring, canvas palette, and both light-layer drift locks (utilities + hand-written components)
 │       ├── service-worker.test.mjs    # 15 tests: the shell precache list drift-locked to the shipped files, and /api/ + /ws pinned as never cached
+│       ├── offline.test.mjs           # 5 tests: the worker registration contract - root scope, one call site, refusals kept quiet
 │       ├── prompt-copy.test.mjs       # 14 tests: copy-last-prompt button, source choice, and the clipboard fallbacks for both the prompt and the code-block button (one writeText call site)
 │       └── audit_vendor_deps.test.mjs # 12 tests: the npm-audit wrapper's classification
 │                                      #   (CVE vs unreachable endpoint vs vacuous pass)
