@@ -1,0 +1,24 @@
+{
+  "name": "MachineLearningMachine - Inter-Module Agent Mesh",
+  "short_name": "Agent Mesh",
+  "description": "Modular multi-agent orchestration: Arena AI, Copilot, Claude and GPT talk to each other, with real transcripts, saved sessions and read-aloud.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/static/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

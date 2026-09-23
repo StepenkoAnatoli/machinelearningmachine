@@ -275,3 +275,107 @@ def test_the_generator_is_hermetic(tmp_path, monkeypatch):
 def test_rendering_is_deterministic(size):
     """Same input, same pixels - otherwise the drift lock above is a coin toss."""
     assert make_icons.render(size) == make_icons.render(size)
+
+
+# --------------------------------------------------------------------------- #
+# the manifest a browser reads before it will offer to install the app
+# --------------------------------------------------------------------------- #
+from fastapi.testclient import TestClient  # noqa: E402  - see the section comment above
+
+from machinelearningmachine.server.app import PUBLIC_PATHS, create_app  # noqa: E402
+from machinelearningmachine.server.config import ServerConfig  # noqa: E402
+
+TOKEN = "a-sufficiently-long-random-token-value"
+MANIFEST_PATH = STATIC / "manifest.webmanifest"
+
+
+def _manifest() -> dict:
+    import json
+
+    assert MANIFEST_PATH.is_file(), "the dashboard must ship a web app manifest to be installable"
+    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
+def test_the_manifest_declares_an_installable_app():
+    manifest = _manifest()
+    assert manifest["name"], "the install dialog needs a name"
+    assert manifest["short_name"], "and a short one for the home screen"
+    assert manifest["start_url"] == "/", "launching the app must open the dashboard, not a subpath"
+    assert manifest["display"] == "standalone", "an installed app should not open with browser chrome"
+    assert manifest["theme_color"].startswith("#") and manifest["background_color"].startswith("#")
+    assert manifest["description"], "the install prompt shows this"
+
+
+def test_the_manifest_icons_exist_at_the_sizes_it_promises():
+    """The classic silent failure: a manifest listing sizes nothing actually has."""
+    sizes: list[tuple[int, int]] = []
+    for icon in _manifest()["icons"]:
+        path = STATIC / icon["src"].replace("/static/", "")
+        assert path.is_file(), f"manifest references a missing icon: {icon['src']}"
+        width, height, _depth, _colour = _png_header(path.read_bytes())
+        declared = icon["sizes"].lower().replace(" ", "")
+        assert declared == f"{width}x{height}", f"{icon['src']} is {width}x{height} but the manifest says {declared}"
+        assert icon["type"] == "image/png"
+        sizes.append((width, height))
+    assert (192, 192) in sizes and (512, 512) in sizes, "Chrome/Edge want at least 192 and 512"
+
+
+def test_the_manifest_is_valid_json_with_no_comments():
+    """A manifest is read by the browser's JSON parser - a trailing comma makes it inert."""
+    import json
+
+    raw = MANIFEST_PATH.read_text(encoding="utf-8")
+    json.loads(raw)
+    assert "/*" not in raw and "//" not in raw, "keep the manifest comment-free: browsers parse it as strict JSON"
+
+
+# --------------------------------------------------------------------------- #
+# the routes, asked for the way a browser asks
+# --------------------------------------------------------------------------- #
+def test_the_manifest_is_served_with_its_own_media_type():
+    client = TestClient(create_app(ServerConfig(host="127.0.0.1")))
+    response = client.get("/manifest.webmanifest")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/manifest+json"), (
+        "a manifest served as text/plain is ignored by the browser"
+    )
+    assert response.json()["start_url"] == "/"
+
+
+def test_the_favicon_route_serves_the_real_file():
+    """/favicon.ico has been in PUBLIC_PATHS all along while nothing served it."""
+    client = TestClient(create_app(ServerConfig(host="127.0.0.1")))
+    response = client.get("/favicon.ico")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/")
+    assert response.content[:4] == b"\x00\x00\x01\x00", "an ICO container"
+
+
+def test_the_install_assets_are_reachable_before_signing_in():
+    """
+    The shell is public by design: a browser fetches the manifest and the icons
+    without credentials, and so does a service worker during install. If these
+    need the token, installing breaks exactly when an operator sets one.
+    """
+    client = TestClient(create_app(ServerConfig(auth_token=TOKEN, host="0.0.0.0", allow_public=True)))
+    for path in ("/manifest.webmanifest", "/favicon.ico"):
+        assert client.get(path).status_code == 200, f"{path} must not require the token"
+    assert "/manifest.webmanifest" in PUBLIC_PATHS
+
+
+def test_the_api_is_still_guarded():
+    """Widening the public set must not have widened anything else."""
+    client = TestClient(create_app(ServerConfig(auth_token=TOKEN, host="0.0.0.0", allow_public=True)))
+    assert client.get("/api/status").status_code in (401, 403)
+    assert client.get("/api/agents").status_code in (401, 403)
+    assert PUBLIC_PATHS == {"/", "/health", "/favicon.ico", "/manifest.webmanifest"}, (
+        "PUBLIC_PATHS grows deliberately, one entry at a time"
+    )
+
+
+def test_the_icons_are_served_from_the_static_mount():
+    client = TestClient(create_app(ServerConfig(host="127.0.0.1")))
+    for name in ("icon-192.png", "icon-512.png", "apple-touch-icon.png"):
+        response = client.get(f"/static/icons/{name}")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("image/png")

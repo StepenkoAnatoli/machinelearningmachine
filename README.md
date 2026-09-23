@@ -86,7 +86,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 652 tests (496 Python + 156 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 660 tests (504 Python + 156 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
