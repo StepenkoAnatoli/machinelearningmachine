@@ -37,6 +37,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let activePacket = null;
   let ws = null;
   let wsReconnectAttempts = 0;
+  let wsReconnectTimer = null; // the pending retry, so a recovery can cancel it
   const MAX_RECONNECT_ATTEMPTS = 10;
   let searchFilter = "";
   // Bounded by the server's own limit (sent in the WS "init" payload) so a tab
@@ -55,6 +56,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const agentCountBadge = document.getElementById("agentCountBadge");
   const topologyLabelBadge = document.getElementById("topologyLabelBadge");
   const connectionStatus = document.getElementById("connectionStatus");
+  const offlineBanner = document.getElementById("offlineBanner");
 
   // Form Controls
   const selectTopology = document.getElementById("selectTopology");
@@ -69,6 +71,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnExportJson = document.getElementById("btnExportJson");
   const charCountEl = document.getElementById("charCount");
   const promptClearBtn = document.getElementById("btnClearPrompt");
+  const promptCopyBtn = document.getElementById("btnCopyPrompt");
   const searchInput = document.getElementById("searchMessages");
   const toastContainer = document.getElementById("toastContainer");
 
@@ -206,7 +209,13 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       resp = await fetch(url, opts);
     } catch (e) {
-      if (url.indexOf("/api/auth/") !== 0) showAuthPanel("Cannot reach the server - is it still running?");
+      // The fetch itself failed: nothing answered. That is the unreachable state,
+      // and the offline banner is what says so - the token prompt is for a server
+      // that *refused* the request (the 401 branch below), not for one that is not
+      // running. Opening it here asked for a token nobody could spend, and nothing
+      // closed it again: the page would still be saying "Cannot reach the server -
+      // is it still running?" over a connection that had recovered.
+      noteUnreachable();
       throw e;
     }
     if (resp.status === 401 && url.indexOf("/api/auth/") !== 0) {
@@ -703,6 +712,71 @@ document.addEventListener("DOMContentLoaded", () => {
     inputPrompt.style.height = Math.min(inputPrompt.scrollHeight, 200) + "px";
   }
 
+  // ===== The prompt the user last handed to the machine =====
+  // One string, in memory, this tab only. Nothing else on the page is allowed to
+  // overwrite a prompt (presets, dictation and Clear all do), so "what did I
+  // actually ask for?" is a question only this record can answer.
+  let lastRunPrompt = "";
+
+  /**
+   * Put text on the clipboard. Resolves true when it landed there, false when the
+   * browser will not let us - which is the normal case for this dashboard, since
+   * `navigator.clipboard` does not exist over the plain http:// most LAN users
+   * reach it on, and a rejected promise is indistinguishable to the user from a
+   * button that does nothing. Never throws: callers offer a manual fallback.
+   */
+  async function copyTextToClipboard(text) {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (e) {
+      /* denied, or not a secure context: fall through to the caller's plan B */
+    }
+    return false;
+  }
+
+  /** Select an element's text, so the user's own Ctrl+C can take it from there. */
+  function selectElementText(el) {
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const selection = window.getSelection();
+      if (!selection) return;
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } catch (e) {
+      /* selecting is a courtesy - its failure must never read as a copy failure */
+    }
+  }
+
+  /** Hand text back in the prompt box, selected, as a one-keystroke manual copy. */
+  function offerPromptInBox(text) {
+    if (!inputPrompt) return;
+    inputPrompt.value = text;
+    updateCharCount();
+    inputPrompt.focus();
+    inputPrompt.select();
+  }
+
+  /** Copy the last prompt run, or the draft if nothing has been run yet. */
+  async function copyPrompt() {
+    const fromRun = Boolean(lastRunPrompt);
+    const text = fromRun ? lastRunPrompt : (inputPrompt ? inputPrompt.value.trim() : "");
+    if (!text) {
+      showToast("No prompt to copy yet - run one, or type into the box.", "warning", 3000);
+      return;
+    }
+    if (await copyTextToClipboard(text)) {
+      showToast(fromRun ? "Last run prompt copied." : "Current prompt copied.", "success", 2000);
+      return;
+    }
+    // Could not reach the clipboard: give the text back where Ctrl+C works.
+    offerPromptInBox(text);
+    showToast("Couldn't reach the clipboard - the prompt is in the box and selected, press Ctrl+C.", "warning", 5000);
+  }
+
   // ===== Canvas Handling - draws only while something is actually moving =====
   let animationFrameId = null;
   let needsRedraw = true;
@@ -747,7 +821,177 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  // ===== The server is not answering =====
+  // Deliberately not `navigator.onLine`: a local server can be down while the
+  // browser is perfectly online, which is the ordinary case for this dashboard.
+  // The signal is whether the server answers at all - so a refusal (401/404/409)
+  // is an *answer* and never enters this state, and the "session released" frame
+  // keeps its own meaning and its own pill.
+  let serverUnreachable = false;
+  let offlineProbeTimer = null;
+  let offlineProbeRounds = 0;
+  const OFFLINE_PROBE_DELAYS = [1000, 2000, 5000, 10000]; // then held at the last one
+
+  //: What a disabled control tells the user, and where the full story lives.
+  const SERVER_CONTROL_REASON = "The server isn't running, so this needs it back. Start it and this control returns by itself.";
+
+  /**
+   * Switch a control back on after an operation - unless the server is unreachable,
+   * in which case it stays off whatever the operation that just finished did.
+   *
+   * Several handlers turn their own button off while a request is in flight and back
+   * on in a `finally`. If the server dies mid-request, that `finally` would otherwise
+   * re-enable a button the offline state had just disabled - an enabled "Export"
+   * pointing at a server that is no longer there, which the user finds out about by
+   * clicking it and reading an error toast.
+   */
+  function enableControl(el) {
+    if (!el) return;
+    // The operation that had disabled this control is over, so the *snapshot* the
+    // offline state took of it is out of date: it recorded "disabled" for a reason
+    // that no longer exists. Left alone, recovery would faithfully restore a
+    // transient - an Export button that never comes back until the page is
+    // reloaded, because its request happened to be in flight when the server died.
+    // What keeps it off now (if anything) is the network, and recovery clears that.
+    if (el.dataset.offlineWasDisabled !== undefined) el.dataset.offlineWasDisabled = "0";
+    el.disabled = serverUnreachable && el.hasAttribute("data-requires-server");
+  }
+
+  /**
+   * Disable every control that needs the server, and give them all back after.
+   *
+   * The set is declared in the markup (`data-requires-server`), not listed here:
+   * a hand-kept list in JS would drift the first time a button is added, and the
+   * opposite mistake is just as visible to users (an enabled Execute button that
+   * silently cannot run, or a greyed-out theme toggle because their server is off).
+   *
+   * `disabled` is restored from what the element had *before* we touched it, and
+   * the run-dependent pair is then handed back to syncRunActivity() - Stop is
+   * disabled while idle for reasons that have nothing to do with the network, and
+   * blanket-enabling it would be a bug.
+   */
+  function applyServerControlState() {
+    document.querySelectorAll("[data-requires-server]").forEach((el) => {
+      if (serverUnreachable) {
+        if (el.dataset.offlineWasDisabled === undefined) {
+          el.dataset.offlineWasDisabled = el.disabled ? "1" : "0";
+          el.dataset.offlineWasDescribed = el.getAttribute("aria-describedby") || "";
+          el.dataset.offlineWasTitled = el.getAttribute("title") || "";
+        }
+        el.disabled = true;
+        el.setAttribute("aria-describedby", "offlineBanner");
+        el.title = SERVER_CONTROL_REASON;
+        return;
+      }
+      const was = el.dataset.offlineWasDisabled;
+      if (was !== undefined) {
+        el.disabled = was === "1";
+        delete el.dataset.offlineWasDisabled;
+        const described = el.dataset.offlineWasDescribed;
+        if (described) el.setAttribute("aria-describedby", described);
+        else el.removeAttribute("aria-describedby");
+        const titled = el.dataset.offlineWasTitled;
+        if (titled) el.title = titled;
+        else el.removeAttribute("title");
+        delete el.dataset.offlineWasDescribed;
+        delete el.dataset.offlineWasTitled;
+      }
+    });
+    // Stop/Execute depend on whether a run is active, and that outranks the
+    // network: recompute rather than guess.
+    if (!serverUnreachable && typeof syncRunActivity === "function") syncRunActivity();
+  }
+
+  function setServerUnreachable(unreachable, why) {
+    const next = Boolean(unreachable);
+    if (next === serverUnreachable) return;
+    serverUnreachable = next;
+    if (offlineBanner) {
+      offlineBanner.hidden = !next;
+      offlineBanner.classList.toggle("hidden", !next);
+    }
+    applyServerControlState();
+    // Entering the state starts the one thing that can end it without the user
+    // doing anything; leaving it stops that, so nothing keeps asking a server we
+    // are already talking to.
+    if (next) scheduleOfflineProbe();
+    else stopOfflineProbe();
+    if (next && why) console.info("Server unreachable:", why);
+  }
+
+  /** One probe, resolved as "does the server answer at all?". */
+  async function probeServer() {
+    try {
+      await fetch("/api/status", { credentials: "same-origin" });
+      return true; // any HTTP answer means the server is there
+    } catch (e) {
+      return false; // the network itself failed: nothing is listening
+    }
+  }
+
+  /**
+   * Ask the server whether it is back, and keep asking - with a widening delay -
+   * for as long as it is not.
+   *
+   * The socket's own retry loop cannot be the only way back: it gives up after
+   * MAX_RECONNECT_ATTEMPTS (ten minutes of dialling forever is not a thing a page
+   * should do), and a server the user relaunches after that would never be
+   * noticed. This loop does not give up, and it is cheap: one request per delay,
+   * the last delay holding at ten seconds.
+   *
+   * Only one probe is ever in flight, so a flapping server cannot stack them.
+   */
+  function scheduleOfflineProbe() {
+    if (offlineProbeTimer !== null || sessionReleased) return;
+    const delay = OFFLINE_PROBE_DELAYS[Math.min(offlineProbeRounds, OFFLINE_PROBE_DELAYS.length - 1)];
+    offlineProbeTimer = setTimeout(() => {
+      offlineProbeTimer = null;
+      offlineProbeRounds += 1;
+      if (!serverUnreachable) return;
+      probeServer().then((reachable) => {
+        if (!serverUnreachable) return;
+        if (reachable) recoverFromOffline();
+        else scheduleOfflineProbe();
+      });
+    }, delay);
+  }
+
+  function stopOfflineProbe() {
+    if (offlineProbeTimer !== null) {
+      clearTimeout(offlineProbeTimer);
+      offlineProbeTimer = null;
+    }
+    offlineProbeRounds = 0; // the next outage starts asking quickly again
+  }
+
+  /**
+   * The server answered a probe: give the page back, in place.
+   *
+   * Deliberately not a reload. The user may be half-way through a prompt, the
+   * transcript on screen is the history they have been reading, and a page that
+   * throws all of that away to save a reconnect has made the outage worse. The
+   * socket is re-opened by hand instead - reconnectWebSocket() drops the dead one,
+   * so its onclose cannot report a second outage for a server that is now fine.
+   */
+  function recoverFromOffline() {
+    stopOfflineProbe();
+    setServerUnreachable(false, "the server answered a probe");
+    if (!ws || ws.readyState > WebSocket.OPEN) reconnectWebSocket();
+  }
+
+  /** Called when a request could not reach the server at all (not a refusal). */
+  function noteUnreachable() {
+    if (serverUnreachable) return;
+    setServerUnreachable(true, "a request could not reach the server");
+  }
+
   function initWebSocket() {
+    // One live socket per page, enforced here rather than hoped for. Two ways to
+    // break that exist in normal operation: a retry timer that fires after a
+    // recovery already re-opened the socket by hand, and a repeated reconnect call.
+    // A leaked socket is not harmless - its handlers keep running, so every frame
+    // would be delivered twice.
+    if (ws && ws.readyState <= WebSocket.OPEN) return;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
 
@@ -755,9 +999,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
     ws.onopen = () => {
       wsReconnectAttempts = 0;
+      // A retry queued before this connection succeeded would open a second socket.
+      if (wsReconnectTimer !== null) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+      }
       connectionStatus.className = "flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-emerald-950/80 border border-emerald-800 text-emerald-400";
       connectionStatus.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span><span>Live Mesh Connected</span>';
       connectionStatus.setAttribute("aria-label", "Connected to live mesh");
+      setServerUnreachable(false, "the socket connected");
       showToast("Connected to live mesh", "success", 2000);
     };
 
@@ -771,17 +1021,29 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
       wsReconnectAttempts++;
+      // The socket dropped without the server saying it released the session:
+      // either the server is gone or the network hiccuped. Probe rather than
+      // assume - the banner follows the probe, not the socket.
+      probeServer().then((reachable) => setServerUnreachable(!reachable, "the socket closed and the probe failed"));
       connectionStatus.className = "flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-amber-950/80 border border-amber-800 text-amber-400";
       connectionStatus.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-400"></span><span>Reconnecting...</span>';
       connectionStatus.setAttribute("aria-label", "Reconnecting to mesh");
       
       if (wsReconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
         const delay = Math.min(1000 * Math.pow(1.5, wsReconnectAttempts), 10000);
-        setTimeout(initWebSocket, delay);
+        // Held so the offline probe's recovery can cancel it: when the server comes
+        // back before this fires, the probe re-opens the socket by hand, and letting
+        // the retry fire on top of that is what leaves a second live socket behind.
+        wsReconnectTimer = setTimeout(initWebSocket, delay);
       } else {
-        connectionStatus.className = "flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-red-950/80 border border-red-800 text-red-400";
-        connectionStatus.innerHTML = '<span class="w-2 h-2 rounded-full bg-red-400"></span><span>Disconnected - Refresh to retry</span>';
-        showToast("Connection lost. Please refresh the page.", "error", 5000);
+        // The socket's budget is spent, which is not the same as the page giving
+        // up: the offline probe keeps asking, and re-opens this socket the moment
+        // the server answers. So say "still trying" - "refresh to retry" would
+        // invite the user to wipe the transcript and their half-written prompt to
+        // fix something the page fixes by itself.
+        connectionStatus.className = "flex items-center space-x-2 text-xs px-2.5 py-1 rounded-full bg-amber-950/80 border border-amber-800 text-amber-400";
+        connectionStatus.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-400"></span><span>Server unreachable - retrying</span>';
+        connectionStatus.setAttribute("aria-label", "Server unreachable, still retrying");
       }
     };
 
@@ -980,6 +1242,9 @@ document.addEventListener("DOMContentLoaded", () => {
       resyncHistoryFromServer(`Some messages were skipped while this tab was not keeping up (${data.dropped || 0}) - refetched`);
     } else if (data.type === "session_released") {
       sessionReleased = true;
+      // This tab's mesh is gone for good: reconnecting would hand it a different,
+      // empty session, so there is nothing to probe for.
+      stopOfflineProbe();
       localRun = false;
       localQueued = false;
       queuedRunId = null;
@@ -1075,6 +1340,12 @@ document.addEventListener("DOMContentLoaded", () => {
       return; // no loop while the tab is hidden or the canvas is gone
     }
 
+    // The graph is drawn in JS, so its colours come from the theme module
+    // rather than from a CSS layer (static/theme.js keeps both palettes).
+    const palette = window.MLMTheme
+      ? window.MLMTheme.palette()
+      : { edge: "rgba(51, 65, 85, 0.4)", nodeFill: "rgba(15, 23, 42, 0.8)", nodeLabel: "#cbd5e1" };
+
     // Throttle, but never below the "something moved" signal.
     if (timestamp - lastDrawTime < DRAW_THROTTLE && !needsRedraw && !activePacket && !isExecuting) {
       return;
@@ -1118,7 +1389,7 @@ document.addEventListener("DOMContentLoaded", () => {
         ctx.beginPath();
         ctx.moveTo(p1.x, p1.y);
         ctx.lineTo(p2.x, p2.y);
-        ctx.strokeStyle = "rgba(51, 65, 85, 0.4)";
+        ctx.strokeStyle = palette.edge;
         ctx.lineWidth = 1.5;
         ctx.setLineDash([4, 4]);
         ctx.stroke();
@@ -1161,7 +1432,7 @@ document.addEventListener("DOMContentLoaded", () => {
       ctx.save();
       ctx.beginPath();
       ctx.arc(node.x, node.y, radius + 2, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(15, 23, 42, 0.8)";
+      ctx.fillStyle = palette.nodeFill;
       ctx.fill();
       ctx.lineWidth = 2.5;
       ctx.strokeStyle = node.color;
@@ -1176,7 +1447,7 @@ document.addEventListener("DOMContentLoaded", () => {
       ctx.fillText(node.avatar, node.x, node.y);
 
       ctx.font = "bold 11px sans-serif";
-      ctx.fillStyle = "#cbd5e1";
+      ctx.fillStyle = palette.nodeLabel;
       ctx.fillText(node.name, node.x, node.y + radius + 14);
     }
 
@@ -1534,15 +1805,17 @@ document.addEventListener("DOMContentLoaded", () => {
       copyBtn.setAttribute("aria-label", "Copy code to clipboard");
       copyBtn.innerHTML = '<i class="fa-regular fa-copy" aria-hidden="true"></i> Copy';
       copyBtn.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(block.innerText);
+        if (await copyTextToClipboard(block.innerText)) {
           copyBtn.innerHTML = '<i class="fa-solid fa-check text-emerald-400" aria-hidden="true"></i> Copied!';
           showToast("Code copied to clipboard", "success", 2000);
           setTimeout(() => {
             copyBtn.innerHTML = '<i class="fa-regular fa-copy" aria-hidden="true"></i> Copy';
           }, 2000);
-        } catch (e) {
-          showToast("Failed to copy code", "error");
+        } else {
+          // No clipboard here (plain http://): hand the user the selection rather
+          // than a dead end - their own Ctrl+C is then one keystroke away.
+          selectElementText(block);
+          showToast("Couldn't reach the clipboard - the code is selected, press Ctrl+C.", "warning", 5000);
         }
       });
       pre.appendChild(copyBtn);
@@ -1579,6 +1852,10 @@ document.addEventListener("DOMContentLoaded", () => {
   /** Drop and re-open the socket (after signing in, or when the server restarted). */
   function reconnectWebSocket() {
     wsReconnectAttempts = 0;
+    if (wsReconnectTimer !== null) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
     if (ws) {
       try {
         ws.onclose = null;
@@ -1658,6 +1935,11 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  // Copy prompt button (the last one run, or the current draft)
+  if (promptCopyBtn) {
+    promptCopyBtn.addEventListener("click", copyPrompt);
+  }
+
   wireAuthPanel();
 
   // Search messages
@@ -1729,6 +2011,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (SpeechKit.isReadPromptOnRun()) {
       SpeechKit.speak(prompt, { label: "Your prompt" });
     }
+
+    // Remember it *now*, not on success: a refused, queued or failed run is
+    // exactly when the text is wanted back, and it is what the user handed over.
+    lastRunPrompt = prompt;
 
     localRun = true;
     // The reconcile window for a late 202: only terminal frames inside this
@@ -1899,7 +2185,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) {
       showToast("Failed to export markdown", "error");
     } finally {
-      btnExportMd.disabled = false;
+      enableControl(btnExportMd);
       btnExportMd.innerHTML = '<i class="fa-solid fa-file-arrow-down"></i><span>Export MD</span>';
     }
   });
@@ -1919,7 +2205,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) {
       showToast("Failed to export JSON", "error");
     } finally {
-      btnExportJson.disabled = false;
+      enableControl(btnExportJson);
       btnExportJson.innerHTML = '<i class="fa-solid fa-code"></i><span>Export JSON</span>';
     }
   });
@@ -1976,6 +2262,52 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  // Theme toggle (static/theme.js owns resolution + persistence; it runs in
+  // <head> so the first paint is already right). This only wires the header
+  // button and forces a repaint, because the canvas palette lives in JS.
+  if (window.MLMTheme) {
+    window.MLMTheme.mount({
+      onChange: () => requestRedraw(true),
+    });
+  }
+
+  // Offline shell (static/sw.js): precaches the page so it still opens when the
+  // server is not running. Registered only where a worker can exist - over plain
+  // http on a LAN address there is no secure context, which is a normal way to
+  // reach this dashboard, so a refusal is handled in place and stays silent:
+  // the page must behave exactly as it did before this feature existed.
+  if (navigator.serviceWorker && typeof navigator.serviceWorker.register === "function") {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      /* no worker here: the dashboard runs as it always has */
+    });
+  }
+
+  // Module presets seam (static/presets.js). fillForm/getFormData move the same
+  // six fields the submit handler reads as `payload` — Register itself is
+  // untouched. Chips and Save-as-preset are type=button and live outside this
+  // form: they can never submit it.
+  if (window.MLMPresets) {
+    window.MLMPresets.mount({
+      getFormData: () => ({
+        agent_id: document.getElementById("newAgentId").value,
+        name: document.getElementById("newAgentName").value,
+        role: document.getElementById("newAgentRole").value,
+        system_prompt: document.getElementById("newAgentPrompt").value,
+        color: document.getElementById("newAgentColor").value,
+        avatar: document.getElementById("newAgentAvatar").value,
+      }),
+      fillForm: (p) => {
+        document.getElementById("newAgentId").value = p.agent_id;
+        document.getElementById("newAgentName").value = p.name;
+        document.getElementById("newAgentRole").value = p.role;
+        document.getElementById("newAgentPrompt").value = p.system_prompt;
+        document.getElementById("newAgentColor").value = p.color;
+        document.getElementById("newAgentAvatar").value = p.avatar;
+      },
+      toast: showToast,
+    });
+  }
+
   // Add Agent form with validation
   formAddAgent.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -2030,7 +2362,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (err) {
       showToast("Network error adding agent: " + err.message, "error");
     } finally {
-      submitBtn.disabled = false;
+      enableControl(submitBtn);
       submitBtn.innerHTML = originalText;
     }
   });
@@ -2053,7 +2385,7 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (e) {
         showToast("Network error", "error");
       } finally {
-        btnClearProviders.disabled = false;
+        enableControl(btnClearProviders);
       }
     });
   }
@@ -2098,7 +2430,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (err) {
       showToast("Error saving settings: " + err.message, "error");
     } finally {
-      submitBtn.disabled = false;
+      enableControl(submitBtn);
       submitBtn.innerHTML = originalText;
     }
   });
@@ -2281,7 +2613,7 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (e) {
         showToast("Network error while fetching the page", "error", 4000);
       } finally {
-        btnReadUrl.disabled = false;
+        enableControl(btnReadUrl);
         btnReadUrl.innerHTML = '<i class="fa-solid fa-download" aria-hidden="true"></i><span>Fetch &amp; Read</span>';
       }
     });
@@ -2326,6 +2658,11 @@ document.addEventListener("DOMContentLoaded", () => {
         const makeButton = (cls, label, iconCls) => {
           const btn = document.createElement("button");
           btn.className = cls;
+          // Loading a saved session is a server read; the marker is what the
+          // offline toggle looks for, and the new button must honour the state
+          // it was born into.
+          btn.setAttribute("data-requires-server", "");
+          if (serverUnreachable) btn.disabled = true;
           // dataset/setAttribute, never an interpolated attribute in a template:
           // a session name containing a quote must not be able to escape it.
           btn.dataset.id = String(s.id || "");
@@ -2350,7 +2687,10 @@ document.addEventListener("DOMContentLoaded", () => {
           `Delete "${nameEl.textContent}"`,
           "fa-solid fa-trash-can"
         );
-        delBtn.querySelector("i").insertAdjacentElement("afterend", document.createTextNode(" "));
+        // `insertAdjacentElement` takes an *Element*: handing it a text node throws
+        // a TypeError, which aborted the whole render - so the Saved Sessions panel
+        // showed "Could not list saved sessions" and no rows, in every browser.
+        delBtn.querySelector("i").insertAdjacentText("afterend", " ");
         actions.appendChild(loadBtn);
         actions.appendChild(delBtn);
 
@@ -2440,7 +2780,7 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (e) {
         showToast("Network error saving session", "error", 4000);
       } finally {
-        btnSaveSession.disabled = false;
+        enableControl(btnSaveSession);
         btnSaveSession.innerHTML = '<i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>Save</span>';
       }
     });

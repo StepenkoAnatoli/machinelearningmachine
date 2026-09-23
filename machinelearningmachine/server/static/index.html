@@ -13,11 +13,24 @@
   <link rel="stylesheet" href="/static/vendor/tailwind.css">
   <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css">
   <link rel="stylesheet" href="/static/vendor/highlight.js/styles/atom-one-dark.min.css">
+  <!-- Resolves the theme before the first paint; the light layer in style.css
+       keys off the `dark` class this file sets (no script inside the page: see
+       tests/test_frontend_security.py). -->
+  <script src="/static/theme.js"></script>
   <script src="/static/vendor/marked/marked.min.js" defer></script>
   <script src="/static/vendor/dompurify/purify.min.js" defer></script>
   <script src="/static/vendor/highlight.js/highlight.min.js" defer></script>
   <script src="/static/markdown.js" defer></script>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <!--
+    App identity: the crisp drawn mark for browsers that take an SVG, the
+    generated ICO for everything else, the iOS home-screen icon, and the manifest
+    that makes the dashboard installable. All four are files served from this
+    origin (static/icons/icon.svg is their source - scripts/make_icons.py).
+  -->
+  <link rel="icon" type="image/svg+xml" href="/static/icons/icon.svg">
+  <link rel="icon" href="/favicon.ico" sizes="32x32">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased">
@@ -48,15 +61,18 @@
           <i class="fa-regular fa-circle-question" aria-hidden="true"></i>
           <span>How to use</span>
         </button>
-        <button id="btnSessions" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Open saved sessions">
+        <button id="btnSessions" data-requires-server class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Open saved sessions">
           <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
           <span>Sessions</span>
+        </button>
+        <button id="btnThemeToggle" type="button" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" title="Light or dark theme" aria-label="Light theme" aria-pressed="false">
+          <i class="fa-solid fa-moon" aria-hidden="true"></i>
         </button>
         <button id="btnSettings" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Open settings and API keys">
           <i class="fa-solid fa-sliders" aria-hidden="true"></i>
           <span>Settings / Keys</span>
         </button>
-        <button id="btnNewAgent" class="px-3 py-1.5 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white flex items-center space-x-1.5 transition shadow-sm focus-visible:ring-2 focus-visible:ring-indigo-400" aria-label="Add new custom module">
+        <button id="btnNewAgent" data-requires-server class="px-3 py-1.5 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white flex items-center space-x-1.5 transition shadow-sm focus-visible:ring-2 focus-visible:ring-indigo-400" aria-label="Add new custom module">
           <i class="fa-solid fa-plus" aria-hidden="true"></i>
           <span>Add Module</span>
         </button>
@@ -79,7 +95,7 @@
           The token is what the server was started with (--auth-token or MACHINELEARNINGMACHINE_AUTH_TOKEN).
         </p>
       </div>
-      <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-amber-400">
+      <button type="submit" id="btnUnlock" data-requires-server class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-amber-400">
         Unlock
       </button>
     </form>
@@ -87,6 +103,27 @@
 
   <!-- What produced the transcript on screen -->
   <section id="modeBanner" class="hidden max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 w-full" aria-live="polite"></section>
+
+  <!--
+    The server is not answering. The page itself came from the service worker's
+    cache, so the dashboard is visible but nothing on it can reach the mesh.
+    role="status", not "alert": nothing is broken, nothing needs acknowledging, and
+    it must not steal focus from wherever the user is typing.
+  -->
+  <section id="offlineBanner" class="hidden max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 w-full" role="status" aria-live="polite">
+    <div class="offline-banner flex items-start gap-3 rounded-xl border px-4 py-3 text-xs">
+      <i class="fa-solid fa-plug-circle-xmark mt-0.5 text-base" aria-hidden="true"></i>
+      <div class="flex-1">
+        <p class="font-semibold">The dashboard's server isn't running.</p>
+        <p class="mt-0.5 offline-detail">
+          This page is the cached copy, so it opens without it - but nothing here can reach the mesh until the server is
+          back. Start it with the launcher window, or run
+          <code class="offline-code px-1 py-0.5 rounded">python -m machinelearningmachine serve</code>
+          where you installed it. This page reconnects on its own: no reload needed.
+        </p>
+      </div>
+    </div>
+  </section>
 
   <main id="main-content" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 flex flex-col space-y-6 w-full" role="main">
 
@@ -224,6 +261,7 @@
             <label for="inputPrompt" class="block text-xs font-medium text-slate-400">Task Specification / Prompt</label>
             <div class="flex items-center gap-2">
               <span id="charCount" class="char-count" aria-live="polite">0 / 5000</span>
+              <button id="btnCopyPrompt" type="button" class="text-[11px] text-slate-500 hover:text-slate-300 underline" title="Copy the last prompt you ran" aria-label="Copy the last prompt you ran">Copy</button>
               <button id="btnClearPrompt" type="button" class="text-[11px] text-slate-500 hover:text-slate-300 underline" aria-label="Clear prompt">Clear</button>
             </div>
           </div>
@@ -249,12 +287,12 @@
             </button>
           </div>
           <div class="flex items-center space-x-2">
-            <button id="btnStop" disabled class="h-10 px-5 rounded-lg text-white text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed" title="Stop after the current agent replies">Stop</button>
-            <button id="btnRun" class="h-10 px-5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-indigo-600/30 transition disabled:opacity-50 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-indigo-400" aria-label="Execute dialogue">
+            <button id="btnStop" data-requires-server disabled class="h-10 px-5 rounded-lg text-white text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed" title="Stop after the current agent replies">Stop</button>
+            <button id="btnRun" data-requires-server class="h-10 px-5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-indigo-600/30 transition disabled:opacity-50 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-indigo-400" aria-label="Execute dialogue">
               <i class="fa-solid fa-play" aria-hidden="true"></i>
               <span>Execute Dialogue</span>
             </button>
-            <button id="btnClear" class="h-10 px-3.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 text-xs transition focus-visible:ring-2 focus-visible:ring-slate-500" title="Clear History" aria-label="Clear all messages">
+            <button id="btnClear" data-requires-server class="h-10 px-3.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 text-xs transition focus-visible:ring-2 focus-visible:ring-slate-500" title="Clear History" aria-label="Clear all messages">
               <i class="fa-solid fa-trash-can" aria-hidden="true"></i>
             </button>
           </div>
@@ -276,11 +314,11 @@
             <input id="searchMessages" type="search" placeholder="Search messages..." class="search-input w-40 sm:w-56 px-2.5 py-1 text-xs rounded-lg text-slate-200 placeholder-slate-500" aria-label="Search messages">
             <i class="fa-solid fa-search absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 text-[11px] pointer-events-none" aria-hidden="true"></i>
           </div>
-          <button id="btnExportMd" class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition focus-visible:ring-2 focus-visible:ring-slate-500" aria-label="Export transcript as Markdown">
+          <button id="btnExportMd" data-requires-server class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition focus-visible:ring-2 focus-visible:ring-slate-500" aria-label="Export transcript as Markdown">
             <i class="fa-solid fa-file-arrow-down" aria-hidden="true"></i>
             <span>Export MD</span>
           </button>
-          <button id="btnExportJson" class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition focus-visible:ring-2 focus-visible:ring-slate-500" aria-label="Export transcript as JSON">
+          <button id="btnExportJson" data-requires-server class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1 transition focus-visible:ring-2 focus-visible:ring-slate-500" aria-label="Export transcript as JSON">
             <i class="fa-solid fa-code" aria-hidden="true"></i>
             <span>Export JSON</span>
           </button>
@@ -395,7 +433,7 @@
         <div class="flex flex-wrap items-center gap-3">
           <input type="url" id="readerUrl" placeholder="https://example.com/article" title="Public http(s) pages only" class="flex-1 min-w-[240px] bg-slate-800/90 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-pink-500" aria-label="Web page URL to read aloud">
           <p id="readerUrlHint" class="hidden text-[11px] text-amber-300 mb-2"></p>
-          <button id="btnReadUrl" class="px-4 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-xs font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Fetch and read the web page aloud">
+          <button id="btnReadUrl" data-requires-server class="px-4 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-xs font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Fetch and read the web page aloud">
             <i class="fa-solid fa-download" aria-hidden="true"></i><span>Fetch &amp; Read</span>
           </button>
         </div>
@@ -421,6 +459,38 @@
         <button id="btnCloseAgentModal" class="text-slate-400 hover:text-slate-200 p-1 rounded focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Close modal">
           <i class="fa-solid fa-xmark text-lg" aria-hidden="true"></i>
         </button>
+      </div>
+
+      <!-- Module presets (static/presets.js) — prefills the form, never submits -->
+      <div class="mb-4">
+        <p class="text-xs font-medium text-slate-400 mb-1">Module presets</p>
+        <div class="flex flex-wrap items-center gap-2">
+          <div id="presetChips" class="flex flex-wrap items-center gap-2" role="group" aria-label="Module presets"></div>
+          <button type="button" id="btnSavePreset" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus-visible:ring-2 focus-visible:ring-slate-500 flex items-center space-x-1.5">
+            <i class="fa-solid fa-plus" aria-hidden="true"></i>
+            <span>Save as preset</span>
+          </button>
+        </div>
+
+        <div class="preset-manager-bar">
+          <button type="button" id="btnPresetManager" class="preset-disclosure" aria-expanded="false" aria-controls="presetManager">
+            <i class="fa-solid fa-chevron-right preset-chevron" aria-hidden="true"></i>
+            <span id="presetManagerBadge">Saved presets (0)</span>
+          </button>
+          <div class="preset-manager-actions">
+            <button type="button" id="btnPresetImport" class="preset-act" aria-label="Import preset file">
+              <i class="fa-solid fa-upload" aria-hidden="true"></i>
+              <span>Import</span>
+            </button>
+            <button type="button" id="btnPresetExportAll" class="preset-act" disabled aria-label="Export all saved presets">
+              <i class="fa-solid fa-download" aria-hidden="true"></i>
+              <span>Export all</span>
+            </button>
+          </div>
+          <input type="file" id="presetImportInput" accept=".json,application/json" hidden>
+        </div>
+        <div id="presetManager" class="preset-manager" role="list" aria-label="Saved presets" hidden></div>
+        <p id="presetManagerEmpty" class="preset-manager-empty" hidden>No saved presets yet — fill the form and hit 'Save as preset'.</p>
       </div>
 
       <form id="formAddAgent" class="space-y-4" novalidate>
@@ -463,7 +533,7 @@
           <button type="button" id="btnCancelAddAgent" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus-visible:ring-2 focus-visible:ring-slate-500">
             Cancel
           </button>
-          <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-indigo-400">
+          <button type="submit" id="btnRegisterAgent" data-requires-server class="px-4 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-indigo-400">
             Register Module
           </button>
         </div>
@@ -528,7 +598,7 @@
           </span>
         </label>
 
-        <button type="button" id="btnClearProviders" class="text-[11px] text-slate-400 hover:text-red-300 underline">
+        <button type="button" id="btnClearProviders" data-requires-server class="text-[11px] text-slate-400 hover:text-red-300 underline">
           Back to simulator (forget keys for this session)
         </button>
 
@@ -536,7 +606,7 @@
           <button type="button" id="btnCancelSettings" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus-visible:ring-2 focus-visible:ring-slate-500">
             Cancel
           </button>
-          <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-amber-400">
+          <button type="submit" id="btnSaveProviders" data-requires-server class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-amber-400">
             Save Configuration
           </button>
         </div>
@@ -603,7 +673,7 @@
       <div class="flex items-center justify-end space-x-2">
         <button id="btnCancelClear" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus-visible:ring-2 focus-visible:ring-slate-500">Cancel</button>
         <button id="btnCloseClearModal" class="sr-only">Close</button>
-        <button id="btnConfirmClear" class="px-4 py-2 text-xs rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-red-400">Clear Session</button>
+        <button id="btnConfirmClear" data-requires-server class="px-4 py-2 text-xs rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-red-400">Clear Session</button>
       </div>
     </div>
   </div>
@@ -626,7 +696,7 @@
         <div class="flex items-center gap-2">
           <input type="text" id="sessionName" placeholder="e.g. Rate limiter redesign" maxlength="120"
             class="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-pink-500" aria-describedby="sessions-help">
-          <button id="btnSaveSession" class="px-4 py-2 text-xs rounded-lg bg-pink-600 hover:bg-pink-500 text-white font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Save current session">
+          <button id="btnSaveSession" data-requires-server class="px-4 py-2 text-xs rounded-lg bg-pink-600 hover:bg-pink-500 text-white font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Save current session">
             <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i>
             <span>Save</span>
           </button>
@@ -646,6 +716,10 @@
     MachineLearningMachine Inter-Module Mesh · Modular Multi-Agent Protocol · <span class="text-slate-600">Built for real user value</span>
   </footer>
 
+  <!-- presets.js is a sync script loaded immediately before app.js (both are
+       end-of-body): app.js's seam calls MLMPresets.mount() at load, so a
+       deferred script would run too late. -->
+  <script src="/static/presets.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -65,15 +65,18 @@ A modular orchestration system that enables AI modules to talk directly to each 
 - ♿ Full keyboard navigation, focus traps in modals, ARIA labels, skip links
 - ⌨️ Shortcuts: `Ctrl+Enter` to run, `Esc` to close modals
 - 🔍 Search/filter messages, character count, auto-resizing prompt
+- 📋 **Copy the prompt you ran** — one click in the prompt row recovers the last prompt you *executed*, even after Clear, a scenario preset or dictation overwrote the box; before anything has been run it copies the draft. If the browser refuses clipboard access (the usual case over plain `http://`), the text is handed back into the box, selected, instead of failing quietly
 - 📱 Responsive, respects `prefers-reduced-motion`, and the network canvas draws **on demand** - it repaints when something changes and then stops (no permanent animation loop, idle tab costs nothing)
+- 🌗 **Light or dark** — the dashboard follows your OS preference on the first visit and remembers your choice afterwards (header toggle, one `localStorage` key). Dark stays the default when the OS expresses no preference, and both themes cover the whole page: chrome, panels, modals, toasts, code blocks and the network graph
 
 **Practical & Pleasant:**
 - 🚀 **One-click install & launch** — double-click `launch-windows.bat` / `launch-macos.command` / `launch-linux.sh` and the app sets itself up (Python check → venv → dependencies → dashboard → browser) and runs. It refuses to start on a Python older than 3.10 with a message naming the download page, and if port 8000 is already taken it uses the next free port instead of exiting — both of which used to look like "the app is broken"
 - 📖 **[INSTALL-WINDOWS.md](INSTALL-WINDOWS.md)** — the same procedure written for someone who has never installed software from a download: what to click, what the warnings mean, and a troubleshooting table
 - 🧭 **First screen explains itself** — an empty transcript shows three numbered steps (say what you want → Execute Dialogue → read the answers), a **How to use** button reopens them any time, and the simulator-labelling is explained where the answers appear
 - 💾 **Saved sessions** — store any conversation (modules + full transcript) on your computer and reload it later from the *Sessions* panel
+- 🧩 **Module presets** — five built-in templates (Security Auditor, DB Expert, …) fill the *Add Module* form in one click, and you can save your own from a filled-in form, rename or delete them, and export/import them as plain JSON files to carry a kit to another browser. The library lives in this browser (`localStorage`) — the server never stores or serves presets
 - 🔊 **Reads what you write** — your prompt, every agent reply, any message, any text file, or (if the operator enabled it) a web page is read aloud with your computer's own voices (no API keys); plus 🎙️ voice dictation
-- 🔌 **Genuinely offline UI**: nothing in the dashboard is fetched from a third party, so it renders with the network unplugged
+- 🔌 **Installable app, nothing loaded from a third party**: the dashboard ships a web app manifest and its own drawn icons (generated from one SVG source), so Chrome/Edge offer to install it and iOS's Add to Home Screen gets a real icon - and because every asset is served from this origin, installing it means the dashboard *opens* with the server stopped: a banner saying so, every control that needs the server greyed out with the reason, theme/prompt/presets/help still working, and the page clearing itself when the server comes back - no reload, nothing you typed lost. Reconnecting is only for the page: the conversation is **never** cached. No API response, no transcript, no answer is stored offline, deliberately - so the dialogue itself still needs the server. Two smaller limits: installing needs a secure context (`http://127.0.0.1:<port>` and `https://…` qualify, a plain-`http` LAN address does not), and the offline copy belongs to the exact origin you installed it from - **the port is part of an origin**, so it is there at `127.0.0.1:8000` and not at `127.0.0.1:8001` if the launcher picks the next free port tomorrow
 - 🚀 Faster execution (0.15s vs 0.4s delays), no unnecessary waiting
 - 💡 Contextual simulator: detects `rate_limiter`, `cache`, `auth`, `queue` domains and drafts code plus *proposed* tests - as a starting point, explicitly not as verified output
 - 📋 One-click copy for code blocks, export with proper headers
@@ -83,7 +86,7 @@ A modular orchestration system that enables AI modules to talk directly to each 
   home directory and are namespaced per browser
 
 **Engineering Quality:**
-- 🧪 523 tests (477 Python + 46 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
+- 🧪 716 tests (519 Python + 197 jsdom browser cases) running in CI on Python 3.10/3.11/3.12, plus ruff, `pip-audit`, a vendor-integrity check, and a job that installs the built wheel and *serves* it
 - 🔒 Simulated output is labelled as simulated - see [Mock output vs. real output](#-mock-output-vs-real-output-read-this)
 - 📝 Friendly CLI with validation, progress indicators, `--agent-ids` and `--no-delay` options
 - 🔧 Realistic examples that actually help users get started
@@ -516,10 +519,11 @@ Everything is offline and hermetic - network calls are injected, never performed
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pinned, reproducible environment (3.11+)
 # on Python 3.10 install without -c; websockets 17 in the pin file needs >=3.11
-pytest -q                                    # 476 tests, all offline
-node --test tests/js/*.test.mjs          # 46 jsdom browser tests (needs: npm ci)
+pytest -q                                    # 519 tests, all offline
+node --test tests/js/*.test.mjs          # 197 jsdom browser tests (needs: npm ci)
 ruff check machinelearningmachine tests scripts examples   # lint
 python scripts/e2e_server_check.py --base http://127.0.0.1:8000   # against a running server
+node scripts/offline_recovery_check.mjs   # kills and restarts a real server: offline -> recovery
 ```
 
 ```
@@ -604,8 +608,18 @@ machinelearningmachine/
 │   │   └── static/
 │   │       ├── index.html   # Dashboard markup (no CDN tags, no inline script)
 │   │       ├── app.js       # WebSocket streaming, Read-Aloud Studio, sessions UI
+│   │       ├── presets.js   # Module presets: built-in templates, saved kits (localStorage),
+│   │       │                #   JSON import/export - the mirror table lives in tests/
 │   │       ├── markdown.js  # The XSS boundary: marked + DOMPurify allowlist (tested in tests/js)
-│   │       ├── style.css    # Dark-mode styling incl. transcript + provenance badges
+│   │       ├── theme.js     # Light/dark: resolution in <head> (no flash) + the canvas palette
+│   │       ├── style.css    # Dark styling plus the hand-written light layer (html:not(.dark))
+│   │       ├── sw.js        # Service worker: precaches the shell, network-first, never caches /api/
+│   │       ├── manifest.webmanifest  # App identity: name, start_url, standalone, 192/512 icons
+│   │       ├── favicon.ico  # Tab icon (generated); served at /favicon.ico
+│   │       ├── icons/icon.svg       # the one hand-drawn source every icon is generated from
+│   │       ├── icons/icon-192.png   # generated: install icon (192), locked pixel-for-pixel to the SVG
+│   │       ├── icons/icon-512.png   # generated: install icon (512)
+│   │       ├── icons/apple-touch-icon.png  # generated: iOS Add to Home Screen
 │   │       └── vendor/      # Pinned Tailwind/FontAwesome/marked/DOMPurify/highlight.js + MANIFEST.json
 │   ├── sessions.py          # Session save/load/delete: atomic writes, header index for
 │   │                        #   cheap listings, per-client folder, trim is recorded
@@ -620,7 +634,10 @@ machinelearningmachine/
 │   ├── build_vendor.py      # Regenerate static/vendor/ from pinned npm deps
 │   ├── pick_port.py         # First free local port, so a busy 8000 cannot stop a launch
 │   ├── bench_sessions.py    # Session-listing benchmark: header read vs full parse
-│   └── e2e_server_check.py  # End-to-end pass against a running server (HTTP + WS)
+│   ├── make_icons.py        # app icons: static/icons/icon.svg -> committed PNG/ICO, stdlib only
+│   ├── e2e_server_check.py  # End-to-end pass against a running server (HTTP + WS)
+│   └── offline_recovery_check.mjs  # the real page, a real server: stop it, start it, no reload
+│                            #   (needs npm ci; not in CI - it kills a server on purpose)
 ├── tests/
 │   ├── test_protocol.py     # message + bus bounds
 │   ├── test_deps.py         # missing-dependency hints name package + commands
@@ -649,10 +666,19 @@ machinelearningmachine/
 │   ├── test_provider_provenance.py  # simulated vs live vs failed-provider labelling
 │   ├── test_frontend_security.py    # headers, vendor integrity, no CDN refs
 │   ├── test_packaging.py            # every module dir is a real package; package-data globs match
+│   ├── test_preset_contract.py      # drift lock: the preset mirror table vs AddAgentRequest
 │   ├── test_docs_are_accurate.py      # docs claims that fail the build when stale
+│   ├── test_pwa.py                  # icons match their SVG source; manifest/worker/routes/head answer like a browser asks
+│   ├── test_offline_check_script.py # the live offline->recovery check stays runnable and documented
 │   └── js/
 │       ├── sanitize.test.mjs          # 15 XSS/invariant tests through the real sanitizer
-│       ├── client-lifecycle.test.mjs  # 19 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery, stale-record guard
+│       ├── client-lifecycle.test.mjs  # 20 tests: gap refetch, released session, 409/queue lifecycle, badges, reconnect recovery, stale-record guard, session-row rendering
+│       ├── presets.test.mjs           # 76 tests: mirror table, localStorage store, chips, save/rename/delete manager, import/export
+│       ├── preset-contract.test.mjs   # 6 tests: drift lock — the client's LIMITS + gallery vs the spec's table
+│       ├── theme.test.mjs             # 14 tests: resolution, persistence, toggle wiring, canvas palette, and both light-layer drift locks (utilities + hand-written components)
+│       ├── service-worker.test.mjs    # 15 tests: the shell precache list drift-locked to the shipped files, and /api/ + /ws pinned as never cached
+│       ├── offline.test.mjs           # 25 tests: worker registration, the unreachable-server state (and the signals that must not trigger it), what is disabled while it lasts, the reload-free recovery, and no leaked sockets
+│       ├── prompt-copy.test.mjs       # 14 tests: copy-last-prompt button, source choice, and the clipboard fallbacks for both the prompt and the code-block button (one writeText call site)
 │       └── audit_vendor_deps.test.mjs # 12 tests: the npm-audit wrapper's classification
 │                                      #   (CVE vs unreachable endpoint vs vacuous pass)
 ├── .github/workflows/ci.yml # tests x3 pythons, ruff, wheel contents + serving the wheel,

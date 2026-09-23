@@ -465,22 +465,117 @@ ALL E2E CHECKS PASSED
 
 ---
 
+## 🔌 Round 5: the dashboard that opens when the server is not there
+
+Round 5 (W3) came from one question: what does a user see when the thing this app
+talks to is not running? The honest answer was *`ERR_CONNECTION_REFUSED`* - a browser
+error page instead of the dashboard, with no way to tell whether the app is broken,
+the server died, or the address is old. The launchers and the *next free port*
+behaviour from round 4 made that likelier, not rarer: a bookmark to yesterday's port
+is a page that cannot open at all.
+
+What ships now: a web app manifest and hand-drawn icons (one SVG source, pixel-locked
+by test) make the dashboard installable; a service worker precaches only the shell
+(`index.html`, `app.js`, `theme.js`, `presets.js`, `markdown.js`, `style.css`,
+favicons, icons, `manifest.webmanifest`) network-first, so the page still opens with
+the server stopped, then says so in a banner and greys out exactly the fourteen controls
+that cannot work without a server - each with a reason a screen reader can reach.
+Theme, the prompt box, copy, presets, read-aloud, help and search keep working, because
+none of them ever needed the server. When the server comes back the page notices by
+itself - banner clears, controls return to whatever the run state says, the socket
+re-opens - with no reload, so a half-written prompt survives the outage.
+
+The limit is deliberate and stated where install is claimed: **nothing from the API is
+cached**. No transcript, no answer, no `/api/` response. The offline copy is a shell,
+not a conversation.
+
+The one real find of the round was not in the offline code at all:
+
+| What a user saw | What was actually wrong | What it is now |
+| --- | --- | --- |
+| Offline, "Export Markdown"/"Export JSON" and Clear-providers stayed enabled and answered a click with an error toast | They looked local - an export is a download, clearing keys is forgetting something - but all three go through the server (`/api/export/*`, `POST /api/config`). The offline set had been chosen by eye | Every `apiFetch` call site was mapped to the control that triggers it; the three joined the marked set (eleven controls -> fourteen), and `enableControl()` now keeps a control off when the server dies *during* its own request - that path used to leave a permanently disabled Export button behind |
+| The *Saved Sessions* panel said "Could not list saved sessions" and listed nothing, for everybody, always - while the API returned the sessions correctly | Building each row ended with `delBtn.querySelector("i").insertAdjacentElement("afterend", document.createTextNode(" "))`. `insertAdjacentElement` requires an *Element*, and a text node is not one, so it threw a `TypeError` in every browser; the throw was swallowed by the render's own `catch`, which is why nothing surfaced anywhere | `insertAdjacentText`, plus a `tests/js/client-lifecycle.test.mjs` case that renders two saved sessions and fails without the fix. The offline round's session-row test forced this: to prove "a row built offline is disabled" there first had to be a row |
+
+**The principle that came out of this round**: an error handler that shows a friendly
+sentence is also an error handler that can hide a product that never worked. The
+offline tests were only able to find this because they asserted what the user can
+*see* on screen (a row exists), not what the function returned.
+
+### Validation (round 5)
+
+```
+$ pytest -q
+519 passed in 40.9s
+$ node --test tests/js/*.test.mjs
+# tests 196
+# pass 196
+# fail 0
+$ ruff check machinelearningmachine tests scripts examples
+All checks passed!
+$ npm run audit:js
+ok - npm audit: 140 packages checked against the advisory database (critical=0 high=0 moderate=0 low=0)
+$ python scripts/e2e_server_check.py --base http://127.0.0.1:8799
+ALL E2E CHECKS PASSED (http://127.0.0.1:8799)
+$ node scripts/offline_recovery_check.mjs
+ALL OFFLINE/RECOVERY CHECKS PASSED (34)
+```
+
+The last one is the round's own addition, and the reason to trust the rest: it starts a
+server whose port it has *confirmed* free, drives the real dashboard in jsdom with real
+fetch/WebSocket/timers, kills that server, brings it back, and asserts the page
+recovered by itself - twice, once with a fast restart (2s, the race where the probe and
+the socket's retry both want to reconnect) and once with a longer outage. It was written
+after the jsdom suite passed 24/24 while the leak it now catches was still live: two
+sockets open, every message delivered twice.
+
+---
+
 ## 🔮 Future User-Centered Improvements (Not Yet Done)
 
-1. **Dark/light toggle**: currently dark only, some users prefer light.
-2. **Copy prompt button**: quick duplicate of the last prompt.
-3. **Agent presets**: "Security Auditor", "DB Expert" templates for the *Add Module* form
-   (the existing presets fill in a scenario, not a module).
-4. **Offline support**: service worker for PWA.
-5. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
+1. **Per-run meshes** if multi-run-per-session is ever wanted, instead of the run lock.
+2. **W6 — Task-aware model routing** (idea parked 2026-09-23, not scheduled): send a
+   task to the model that is good at *that kind* of task — GPT for code, Claude for
+   prose — rather than to whoever happens to hold the module.
+
+   What the recon already established, so nobody repeats it: provider is bound to
+   **agent identity**, not to the task (`/api/providers` assigns one OpenAI provider
+   to `mesh.gpt` *and* `mesh.copilot`, one Anthropic provider to `mesh.claude` *and*
+   `mesh.arenaai`), and the model is bound to the **provider** (`DEFAULT_OPENAI_MODEL`,
+   `DEFAULT_ANTHROPIC_MODEL`) — so today two modules on the same provider cannot even
+   use different models. The honest slice is therefore: per-module model choice first,
+   a user-authored rule table second, and a transcript line saying *"sent to X because
+   <reason>"* in the same breath — anything that picks a model silently would break the
+   one thing this dashboard does better than a chat box (every answer says which
+   provider produced it and whether it was simulated). A built-in ranking ("GPT is
+   better at coding") is deliberately *not* the starting point: it is hearsay with a
+   shelf life of months, and the app would be asserting a fact it cannot verify. It
+   also only pays off once two providers are configured; with the simulator or a
+   single key there is nothing to route between.
 
 These are noted but not implemented to keep scope focused on highest user value fixes.
-(An earlier version of this list proposed *session isolation* and *export
+(In round 5 it removed *offline support*, which was item 1 and marked *in progress*:
+the dashboard now ships a web app manifest, its own drawn icons and a service worker
+that precaches the shell, so with the server stopped the page opens, says the server
+is not running and greys out exactly the controls that need it - while nothing from
+the API is ever cached, which is a deliberate limit stated where install is claimed.
+An earlier version of this list proposed *session isolation* and *export
 `Content-Disposition`* as future work; both shipped since, so they have been removed
 rather than left as stale claims. The same rule removed *mid-run cancellation* and
 *windowed scrolling* in round 4: Stop shipped in round 3, and the transcript has
 rendered at most `RENDER_WINDOW` (200) cards since - claiming otherwise made this
-document disagree with the dashboard it describes.)
+document disagree with the dashboard it describes. And it removed *agent presets*
+when they shipped: the *Add Module* form now carries five built-in templates plus a
+save/rename/delete library and JSON import/export, held in this browser only
+(`static/presets.js`; the mirror table between it and `AddAgentRequest` is locked by
+`tests/test_preset_contract.py` and `tests/js/preset-contract.test.mjs`). The same
+rule then removed *dark/light toggle*: `static/theme.js` resolves the theme before
+the first paint (OS preference on a first visit, then the remembered choice) and the
+header toggle flips it, with the light layer in `style.css` kept honest by
+`tests/js/theme.test.mjs`. It then removed *copy prompt button*: the prompt row
+now carries a Copy button that returns the last prompt you ran — read from an
+in-memory record written at commit time, so a refused or queued run is still
+recoverable, and with a stated fallback when the clipboard is out of reach
+(`app.js`, pinned by `tests/js/prompt-copy.test.mjs`).)
 
 ---
 

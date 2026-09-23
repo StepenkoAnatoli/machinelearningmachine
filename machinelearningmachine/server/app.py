@@ -96,7 +96,12 @@ LOGIN_LOCKOUT_SECONDS = 60.0
 CLIENT_HISTORY_LIMIT = MessageBus.MAX_HISTORY
 
 #: Requests that may skip authentication. Everything else 401s when a token is set.
-PUBLIC_PATHS = {"/", "/health", "/favicon.ico"}
+#:
+#: The install assets are here on purpose: a browser fetches the manifest and the
+#: favicon before anyone signs in, and a service worker fetches the shell during
+#: install, when no credential exists yet. None of them exposes state - they are
+#: files that ship with the server.
+PUBLIC_PATHS = {"/", "/health", "/favicon.ico", "/manifest.webmanifest", "/sw.js"}
 PUBLIC_PREFIXES = ("/static/", "/api/auth/")
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1485,6 +1490,57 @@ def _register_routes(
         if index_file.exists():
             return FileResponse(str(index_file))
         return JSONResponse({"status": "healthy", "service": "MachineLearningMachine Agent Mesh API"})
+
+    @app.api_route("/manifest.webmanifest", methods=["GET", "HEAD"])
+    async def serve_manifest():
+        """
+        The web app manifest, with its own media type.
+
+        Served from a route rather than through the ``/static`` mount so the URL
+        is ``/manifest.webmanifest`` - the conventional root path a browser looks
+        for - and so the type is explicit: a manifest served as ``text/plain`` is
+        silently ignored, and the app simply never becomes installable.
+        """
+        manifest = STATIC_DIR / "manifest.webmanifest"
+        if not manifest.exists():
+            return JSONResponse({"detail": "No manifest in this build."}, status_code=404)
+        return FileResponse(str(manifest), media_type="application/manifest+json")
+
+    @app.api_route("/sw.js", methods=["GET", "HEAD"])
+    async def serve_service_worker():
+        """
+        The service worker, from the root, as JavaScript.
+
+        All three of those matter. From the root because a worker under ``/static``
+        would be scoped to ``/static`` and could never control the page it is meant
+        to keep alive; as JavaScript because a worker served as ``text/plain`` is
+        refused outright by the browser; and ``no-cache`` because the worker script
+        is the thing that decides when a new worker installs - an HTTP-cached copy
+        hides updates from the user.
+        """
+        worker = STATIC_DIR / "sw.js"
+        if not worker.exists():
+            return JSONResponse({"detail": "No service worker in this build."}, status_code=404)
+        return FileResponse(
+            str(worker),
+            media_type="text/javascript",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
+    async def serve_favicon():
+        """
+        The tab icon, as a file.
+
+        ``/favicon.ico`` has been listed in :data:`PUBLIC_PATHS` since the token
+        gate was written, while nothing served it - so every browser that asked
+        for it (and every authenticated one, past the gate) got a 404. The file is
+        generated from ``static/icons/icon.svg`` by ``scripts/make_icons.py``.
+        """
+        favicon = STATIC_DIR / "favicon.ico"
+        if not favicon.exists():
+            return JSONResponse({"detail": "No favicon in this build."}, status_code=404)
+        return FileResponse(str(favicon), media_type="image/x-icon")
 
     @app.api_route("/health", methods=["GET", "HEAD"])
     async def health():

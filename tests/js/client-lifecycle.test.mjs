@@ -674,3 +674,49 @@ test("no window outlives its test", () => {
   assert.equal(windowsClosed, windowsOpened,
     "an unclosed jsdom window keeps its timers alive after the last assertion");
 });
+
+test("the Saved Sessions panel actually renders the sessions the server lists", async () => {
+  /*
+   * This was *broken in production* while every test passed. The render built each
+   * row's delete button and then ran
+   *
+   *     delBtn.querySelector("i").insertAdjacentElement("afterend", document.createTextNode(" "))
+   *
+   * insertAdjacentElement's second argument must be an Element, and a text node is
+   * not one - so it threw a TypeError in every browser, the row was never appended,
+   * and the panel showed "Could not list saved sessions" instead of the user's saved
+   * conversations. The throw happened inside the render's own try/catch, which is
+   * why nothing surfaced anywhere.
+   *
+   * Nothing covered the *rendering* of a session row: the API was tested, the
+   * offline behaviour was tested, the row-building was not.
+   */
+  const { win } = await loadClient((url) => {
+    if (String(url).includes("/api/sessions")) {
+      return {
+        status: 200,
+        body: {
+          sessions: [
+            { id: "20260923-101010.000000-ab12cd", name: "earlier chat", saved_at: 1790000000, message_count: 4 },
+            { id: "20260923-111111.000000-cd34ef", name: "long one", saved_at: 1790000600, message_count: 12, trimmed: true },
+          ],
+        },
+      };
+    }
+    return okResponder();
+  });
+
+  win.document.getElementById("btnSessions").click();
+  for (let i = 0; i < 10; i++) await new Promise((r) => win.setTimeout(r, 0));
+
+  const rows = [...win.document.querySelectorAll("#sessionsList .session-row")];
+  assert.equal(rows.length, 2, "one row per saved session");
+  assert.match(rows[0].textContent, /earlier chat/);
+  assert.match(rows[0].textContent, /4 messages/);
+  assert.match(rows[1].textContent, /12 messages/);
+  assert.match(rows[1].textContent, /oldest dropped to fit the size limit/i, "a trimmed transcript says so");
+  // Each row offers the two things a saved session needs: load it, or delete it.
+  assert.equal(rows[0].querySelectorAll("button").length, 2);
+  assert.ok(rows[0].querySelector(".session-load"), "a load button");
+  assert.ok(rows[0].querySelector(".session-del"), "a delete button");
+});
