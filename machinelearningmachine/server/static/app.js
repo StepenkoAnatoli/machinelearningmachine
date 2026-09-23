@@ -826,6 +826,54 @@ document.addEventListener("DOMContentLoaded", () => {
   let offlineProbeTimer = null;
   const OFFLINE_PROBE_DELAYS = [1000, 2000, 5000, 10000]; // then held at the last one
 
+  //: What a disabled control tells the user, and where the full story lives.
+  const SERVER_CONTROL_REASON = "The server isn't running, so this needs it back. Start it and this control returns by itself.";
+
+  /**
+   * Disable every control that needs the server, and give them all back after.
+   *
+   * The set is declared in the markup (`data-requires-server`), not listed here:
+   * a hand-kept list in JS would drift the first time a button is added, and the
+   * opposite mistake is just as visible to users (an enabled Execute button that
+   * silently cannot run, or a greyed-out theme toggle because their server is off).
+   *
+   * `disabled` is restored from what the element had *before* we touched it, and
+   * the run-dependent pair is then handed back to syncRunActivity() - Stop is
+   * disabled while idle for reasons that have nothing to do with the network, and
+   * blanket-enabling it would be a bug.
+   */
+  function applyServerControlState() {
+    document.querySelectorAll("[data-requires-server]").forEach((el) => {
+      if (serverUnreachable) {
+        if (el.dataset.offlineWasDisabled === undefined) {
+          el.dataset.offlineWasDisabled = el.disabled ? "1" : "0";
+          el.dataset.offlineWasDescribed = el.getAttribute("aria-describedby") || "";
+          el.dataset.offlineWasTitled = el.getAttribute("title") || "";
+        }
+        el.disabled = true;
+        el.setAttribute("aria-describedby", "offlineBanner");
+        el.title = SERVER_CONTROL_REASON;
+        return;
+      }
+      const was = el.dataset.offlineWasDisabled;
+      if (was !== undefined) {
+        el.disabled = was === "1";
+        delete el.dataset.offlineWasDisabled;
+        const described = el.dataset.offlineWasDescribed;
+        if (described) el.setAttribute("aria-describedby", described);
+        else el.removeAttribute("aria-describedby");
+        const titled = el.dataset.offlineWasTitled;
+        if (titled) el.title = titled;
+        else el.removeAttribute("title");
+        delete el.dataset.offlineWasDescribed;
+        delete el.dataset.offlineWasTitled;
+      }
+    });
+    // Stop/Execute depend on whether a run is active, and that outranks the
+    // network: recompute rather than guess.
+    if (!serverUnreachable && typeof syncRunActivity === "function") syncRunActivity();
+  }
+
   function setServerUnreachable(unreachable, why) {
     const next = Boolean(unreachable);
     if (next === serverUnreachable) return;
@@ -834,8 +882,8 @@ document.addEventListener("DOMContentLoaded", () => {
       offlineBanner.hidden = !next;
       offlineBanner.classList.toggle("hidden", !next);
     }
+    applyServerControlState();
     if (next && why) console.info("Server unreachable:", why);
-    if (typeof onServerReachabilityChange === "function") onServerReachabilityChange(next);
   }
 
   /** One probe, resolved as "does the server answer at all?". */
@@ -2501,6 +2549,11 @@ document.addEventListener("DOMContentLoaded", () => {
         const makeButton = (cls, label, iconCls) => {
           const btn = document.createElement("button");
           btn.className = cls;
+          // Loading a saved session is a server read; the marker is what the
+          // offline toggle looks for, and the new button must honour the state
+          // it was born into.
+          btn.setAttribute("data-requires-server", "");
+          if (serverUnreachable) btn.disabled = true;
           // dataset/setAttribute, never an interpolated attribute in a template:
           // a session name containing a quote must not be able to escape it.
           btn.dataset.id = String(s.id || "");
@@ -2525,7 +2578,10 @@ document.addEventListener("DOMContentLoaded", () => {
           `Delete "${nameEl.textContent}"`,
           "fa-solid fa-trash-can"
         );
-        delBtn.querySelector("i").insertAdjacentElement("afterend", document.createTextNode(" "));
+        // `insertAdjacentElement` takes an *Element*: handing it a text node throws
+        // a TypeError, which aborted the whole render - so the Saved Sessions panel
+        // showed "Could not list saved sessions" and no rows, in every browser.
+        delBtn.querySelector("i").insertAdjacentText("afterend", " ");
         actions.appendChild(loadBtn);
         actions.appendChild(delBtn);
 

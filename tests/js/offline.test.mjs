@@ -39,11 +39,13 @@ const opened = [];
  * context), or "absent" (jsdom's default, and a plain-http LAN address in real
  * life).
  */
-async function loadClient({ serviceWorker = "absent", fetchFails = false, fetchStatus = 200 } = {}) {
+async function loadClient({ serviceWorker = "absent", fetchFails = false, fetchStatus = 200, sessions = null } = {}) {
   const html = read(join(staticDir, "index.html"))
     .replace(/<script[^>]*\ssrc=[^>]*><\/script>/gi, "")
     .replace(/<link[^>]*>/gi, "");
-  const calls = { registered: [], fetch: [], sockets: 0, lastSocket: null };
+  //: `serverGone` lets a test kill the server mid-flight, which is how the page
+  //: ever has session rows on screen while the server is unreachable.
+  const calls = { registered: [], fetch: [], sockets: 0, lastSocket: null, serverGone: false };
 
   const dom = new JSDOM(html, {
     url: "http://127.0.0.1:8000/",
@@ -52,9 +54,18 @@ async function loadClient({ serviceWorker = "absent", fetchFails = false, fetchS
       installTimers(win);
       win.fetch = async (url) => {
         calls.fetch.push(String(url));
-        if (fetchFails) {
+        if (fetchFails || calls.serverGone) {
           // Exactly what a browser throws when nothing is listening on the port.
           throw new TypeError("Failed to fetch");
+        }
+        if (sessions && String(url).includes("/api/sessions")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ sessions }),
+            text: async () => "{}",
+            headers: new win.Headers({ "Content-Type": "application/json" }),
+          };
         }
         return {
           ok: fetchStatus >= 200 && fetchStatus < 300,
@@ -127,6 +138,18 @@ async function loadClient({ serviceWorker = "absent", fetchFails = false, fetchS
 
       win.eval(read(join(staticDir, "markdown.js")));
       win.eval(read(join(staticDir, "app.js")));
+
+      // theme.js, in the order the page really uses it (<head>, before the deferred
+      // scripts). It cannot simply be eval'd here: jsdom calls beforeParse with
+      // `document.documentElement === null`, and theme.js applies the theme to that
+      // element - which never happens in a browser, where a <script> in <head> runs
+      // after <html> exists. So it is loaded at DOMContentLoaded instead, and the
+      // mount app.js would have done is done here, because app.js's own init ran
+      // before the module existed.
+      win.document.addEventListener("DOMContentLoaded", () => {
+        win.eval(read(join(staticDir, "theme.js")));
+        win.MLMTheme.mount({});
+      });
     },
   });
   opened.push(dom);
@@ -320,4 +343,172 @@ test("offline: a request path that legitimately fails (a stop with no run) does 
   await settleFrames(win);
 
   assert.equal(bannerVisible(win), false, `a 404 is an answer, not an outage: ${bannerText(win)}`);
+});
+
+/*
+ * What stops working when the server is not there - and what must not.
+ *
+ * The split is deliberate and it is the whole point of this task: a control that
+ * needs the server is disabled *with a reason*, and everything the page can do by
+ * itself (theme, the prompt box, the preset library, read-aloud, help, search)
+ * keeps working. Getting this wrong in either direction is user-visible: an
+ * enabled Execute button that cannot run, or a greyed-out theme toggle because the
+ * user's server is off.
+ *
+ * The set is declared in the markup with data-requires-server, so this file can
+ * lock it: the drift lock at the bottom fails if a control is added to one side of
+ * the line without a decision.
+ */
+
+/** The ids the markup marks as needing the server (the drift-locked contract). */
+function markedServerControls() {
+  const markup = read(join(staticDir, "index.html"));
+  const ids = [];
+  for (const match of markup.matchAll(/<([a-z]+)([^>]*?)data-requires-server([^>]*?)>/g)) {
+    const id = /id="([^"]+)"/.exec(match[2] + match[3]);
+    if (id) ids.push(id[1]);
+  }
+  return ids.sort();
+}
+
+/** Controls that must keep working with the server down - all local. */
+const LOCAL_CONTROLS = [
+  "btnThemeToggle", // theme is a class on <html>
+  "btnCopyPrompt",
+  "btnClearPrompt",
+  "inputPrompt",
+  "btnReadPrompt",
+  "btnHelp",
+  "btnPresetManager",
+  "btnSavePreset",
+  "btnPresetImport",
+  "btnPresetExportAll",
+  "searchMessages",
+];
+
+const disabledIds = (win) =>
+  [...win.document.querySelectorAll("button, input, textarea, select")]
+    .filter((el) => el.disabled)
+    .map((el) => el.id)
+    .filter(Boolean)
+    .sort();
+
+test("offline: markup marks exactly the controls that need the server", () => {
+  assert.deepEqual(markedServerControls(), [
+    "btnClear",
+    "btnConfirmClear",
+    "btnNewAgent",
+    "btnReadUrl",
+    "btnRegisterAgent",
+    "btnRun",
+    "btnSaveProviders",
+    "btnSaveSession",
+    "btnSessions",
+    "btnStop",
+    "btnUnlock",
+  ], "the server-bound set is a decision, not an accident - update this list deliberately");
+});
+
+test("offline: going offline disables exactly the marked controls, and nothing else", async () => {
+  // Compared as a *delta* against the same page with the server up: some controls
+  // are disabled for their own reasons (Export-all with an empty preset library,
+  // the voice picker with no voices installed), and blaming those on the network
+  // would be wrong in the other direction.
+  const up = await loadClient();
+  const down = await loadClient({ fetchFails: true });
+
+  // 1. Every server-bound control is disabled while offline - including the ones
+  //    that happened to be disabled already (Stop is idle-disabled with a server
+  //    up, and stays so), which is why this is stated per control and not as a set
+  //    difference.
+  const down_disabled = disabledIds(down.win);
+  for (const id of markedServerControls()) {
+    assert.ok(down_disabled.includes(id), `${id} needs the server and must be disabled without it`);
+  }
+  // 2. Nothing outside that set is newly disabled by going offline.
+  const newlyDisabled = down_disabled.filter((id) => !disabledIds(up.win).includes(id));
+  assert.deepEqual(
+    newlyDisabled.filter((id) => !markedServerControls().includes(id)),
+    [],
+    "the offline state may only disable controls the markup marks as needing the server",
+  );
+  // 3. And nothing is enabled by losing the server.
+  const newlyEnabled = disabledIds(up.win).filter((id) => !down_disabled.includes(id));
+  assert.deepEqual(newlyEnabled, [], "being offline must not enable anything");
+});
+
+test("offline: everything local keeps working while the server is down", async () => {
+  const up = await loadClient();
+  const { win } = await loadClient({ fetchFails: true });
+
+  for (const id of LOCAL_CONTROLS) {
+    const el = win.document.getElementById(id);
+    assert.ok(el, `${id} should exist`);
+    assert.equal(
+      el.disabled,
+      up.win.document.getElementById(id).disabled,
+      `${id} does not need the server: losing it must change nothing about this control`,
+    );
+  }
+  // And they still do something: the theme toggle flips the class on <html>.
+  const before = win.document.documentElement.classList.contains("dark");
+  win.document.getElementById("btnThemeToggle").click();
+  assert.notEqual(win.document.documentElement.classList.contains("dark"), before, "the theme still switches");
+});
+
+test("offline: a disabled control says why, and points at the banner", async () => {
+  const { win } = await loadClient({ fetchFails: true });
+
+  const run = win.document.getElementById("btnRun");
+  assert.equal(run.disabled, true);
+  assert.match(run.getAttribute("aria-describedby") || "", /offlineBanner/, "screen readers reach the reason");
+  assert.match(run.getAttribute("title") || "", /server/i, "and a hover explains it too");
+});
+
+test("offline: recovery gives the controls back, and run-state wins over ours", async () => {
+  // The subtle case: btnStop is disabled while idle *anyway*. Recovery must not
+  // blanket-enable it - it has to go back to whatever the run state says.
+  const { win, socket } = await loadClient({ fetchFails: true });
+  assert.equal(win.document.getElementById("btnStop").disabled, true);
+
+  socket().onopen({});  // the server is back
+  await settleFrames(win);
+
+  assert.equal(bannerVisible(win), false, "the banner clears");
+  assert.equal(win.document.getElementById("btnStop").disabled, true, "Stop is idle-disabled, not offline-disabled");
+  assert.equal(win.document.getElementById("btnRun").disabled, false, "and Execute is usable again");
+  assert.equal(win.document.getElementById("btnSessions").disabled, false);
+  assert.equal(win.document.getElementById("btnRun").getAttribute("aria-describedby"), null, "the reason is gone too");
+});
+
+test("offline: session rows already on screen are disabled when the server goes away", async () => {
+  // The real sequence: the user opens the Sessions panel while the server is up
+  // (rows render, each is a server read), and the server then stops.
+  const { win, calls, socket } = await loadClient({
+    sessions: [{ id: "20260923-101010.000000-ab12cd", name: "earlier chat", saved_at: 1790000000, message_count: 4 }],
+  });
+  win.document.getElementById("btnSessions").click();
+  await settleFrames(win);
+  const rows = [...win.document.querySelectorAll("#sessionsList button")];
+  assert.ok(rows.length > 0, "the panel has rows to begin with");
+
+  calls.serverGone = true;
+  socket().onclose({ code: 1006 });  // the server went away
+  await settleFrames(win);
+
+  assert.ok(bannerVisible(win), "the page noticed");
+  for (const button of rows) {
+    assert.notEqual(button.dataset.requiresServer, undefined, "a session row is a server read");
+    assert.equal(button.disabled, true, `the row's ${button.getAttribute("aria-label")} must be disabled`);
+  }
+});
+
+test("offline: the prompt box is never disabled - the user's typing is theirs", async () => {
+  const { win } = await loadClient({ fetchFails: true });
+
+  const box = win.document.getElementById("inputPrompt");
+  assert.equal(box.disabled, false);
+  assert.equal(box.readOnly, false);
+  box.value = "a prompt I want to keep";
+  assert.equal(box.value, "a prompt I want to keep", "and nothing rewrites it");
 });

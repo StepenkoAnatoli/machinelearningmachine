@@ -61,7 +61,7 @@
           <i class="fa-regular fa-circle-question" aria-hidden="true"></i>
           <span>How to use</span>
         </button>
-        <button id="btnSessions" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Open saved sessions">
+        <button id="btnSessions" data-requires-server class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Open saved sessions">
           <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
           <span>Sessions</span>
         </button>
@@ -72,7 +72,7 @@
           <i class="fa-solid fa-sliders" aria-hidden="true"></i>
           <span>Settings / Keys</span>
         </button>
-        <button id="btnNewAgent" class="px-3 py-1.5 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white flex items-center space-x-1.5 transition shadow-sm focus-visible:ring-2 focus-visible:ring-indigo-400" aria-label="Add new custom module">
+        <button id="btnNewAgent" data-requires-server class="px-3 py-1.5 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white flex items-center space-x-1.5 transition shadow-sm focus-visible:ring-2 focus-visible:ring-indigo-400" aria-label="Add new custom module">
           <i class="fa-solid fa-plus" aria-hidden="true"></i>
           <span>Add Module</span>
         </button>
@@ -95,7 +95,7 @@
           The token is what the server was started with (--auth-token or MACHINELEARNINGMACHINE_AUTH_TOKEN).
         </p>
       </div>
-      <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-amber-400">
+      <button type="submit" id="btnUnlock" data-requires-server class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-amber-400">
         Unlock
       </button>
     </form>
@@ -287,12 +287,12 @@
             </button>
           </div>
           <div class="flex items-center space-x-2">
-            <button id="btnStop" disabled class="h-10 px-5 rounded-lg text-white text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed" title="Stop after the current agent replies">Stop</button>
-            <button id="btnRun" class="h-10 px-5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-indigo-600/30 transition disabled:opacity-50 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-indigo-400" aria-label="Execute dialogue">
+            <button id="btnStop" data-requires-server disabled class="h-10 px-5 rounded-lg text-white text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed" title="Stop after the current agent replies">Stop</button>
+            <button id="btnRun" data-requires-server class="h-10 px-5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-indigo-600/30 transition disabled:opacity-50 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-indigo-400" aria-label="Execute dialogue">
               <i class="fa-solid fa-play" aria-hidden="true"></i>
               <span>Execute Dialogue</span>
             </button>
-            <button id="btnClear" class="h-10 px-3.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 text-xs transition focus-visible:ring-2 focus-visible:ring-slate-500" title="Clear History" aria-label="Clear all messages">
+            <button id="btnClear" data-requires-server class="h-10 px-3.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 text-xs transition focus-visible:ring-2 focus-visible:ring-slate-500" title="Clear History" aria-label="Clear all messages">
               <i class="fa-solid fa-trash-can" aria-hidden="true"></i>
             </button>
           </div>
@@ -433,7 +433,7 @@
         <div class="flex flex-wrap items-center gap-3">
           <input type="url" id="readerUrl" placeholder="https://example.com/article" title="Public http(s) pages only" class="flex-1 min-w-[240px] bg-slate-800/90 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-pink-500" aria-label="Web page URL to read aloud">
           <p id="readerUrlHint" class="hidden text-[11px] text-amber-300 mb-2"></p>
-          <button id="btnReadUrl" class="px-4 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-xs font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Fetch and read the web page aloud">
+          <button id="btnReadUrl" data-requires-server class="px-4 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-xs font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Fetch and read the web page aloud">
             <i class="fa-solid fa-download" aria-hidden="true"></i><span>Fetch &amp; Read</span>
           </button>
         </div>
@@ -533,7 +533,7 @@
           <button type="button" id="btnCancelAddAgent" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus-visible:ring-2 focus-visible:ring-slate-500">
             Cancel
           </button>
-          <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-indigo-400">
+          <button type="submit" id="btnRegisterAgent" data-requires-server class="px-4 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-indigo-400">
             Register Module
           </button>
         </div>
@@ -606,7 +606,7 @@
           <button type="button" id="btnCancelSettings" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus-visible:ring-2 focus-visible:ring-slate-500">
             Cancel
           </button>
-          <button type="submit" class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-amber-400">
+          <button type="submit" id="btnSaveProviders" data-requires-server class="px-4 py-2 text-xs rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-amber-400">
             Save Configuration
           </button>
         </div>
@@ -673,7 +673,7 @@
       <div class="flex items-center justify-end space-x-2">
         <button id="btnCancelClear" class="px-4 py-2 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 focus-visible:ring-2 focus-visible:ring-slate-500">Cancel</button>
         <button id="btnCloseClearModal" class="sr-only">Close</button>
-        <button id="btnConfirmClear" class="px-4 py-2 text-xs rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-red-400">Clear Session</button>
+        <button id="btnConfirmClear" data-requires-server class="px-4 py-2 text-xs rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium focus-visible:ring-2 focus-visible:ring-red-400">Clear Session</button>
       </div>
     </div>
   </div>
@@ -696,7 +696,7 @@
         <div class="flex items-center gap-2">
           <input type="text" id="sessionName" placeholder="e.g. Rate limiter redesign" maxlength="120"
             class="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-pink-500" aria-describedby="sessions-help">
-          <button id="btnSaveSession" class="px-4 py-2 text-xs rounded-lg bg-pink-600 hover:bg-pink-500 text-white font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Save current session">
+          <button id="btnSaveSession" data-requires-server class="px-4 py-2 text-xs rounded-lg bg-pink-600 hover:bg-pink-500 text-white font-medium flex items-center space-x-1.5 transition focus-visible:ring-2 focus-visible:ring-pink-400" aria-label="Save current session">
             <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i>
             <span>Save</span>
           </button>
